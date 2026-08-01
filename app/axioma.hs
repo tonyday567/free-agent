@@ -164,14 +164,14 @@ main = do
         h = Host {hostName = "echo", hostRun = pure . map ("echo:" <>)}
         seat :: FreeSeat
         seat = SeatCompose (hostSeat h) (pipelineSeat p)
-        sh :: Shard (State [Post]) [Post] [Post]
+        sh :: Shard (StateT [Post] IO) [Post] [Post]
         sh = interpretSeat seat
         posts =
           [ mkPost "human" ["bot"] "hello world",
             mkPost "human" ["bot"] "noise",
             mkPost "human" ["bot"] "again"
           ]
-        (outs, st) = closeShard sh posts []
+    (outs, st) <- closeShardIO sh posts []
     assert "free seat composed pipeline then host" $
       map body outs == ["echo:map:hello", "echo:world"]
         && all (\x -> to x == ["human"]) outs
@@ -260,11 +260,34 @@ main = do
           [ mkPost "human" ["bot"] "hi",
             mkPost "human" ["skip"] "no"
           ]
-        (outsL, _) = closeShard (interpretSeat leftA) posts []
-        (outsR, _) = closeShard (interpretSeat rightA) posts []
+    (outsL, _) <- closeShardIO (interpretSeat leftA) posts []
+    (outsR, _) <- closeShardIO (interpretSeat rightA) posts []
     assert "SeatCompose associative under close" $
       outsL == outsR
         && map body outsL == ["m:hi"]
         && all (\x -> to x == ["out"]) outsL
+
+  -------------------------------------------------------------------------
+  -- Real process host sharing StateT IO buffer with pipeline stages
+  -------------------------------------------------------------------------
+  putStrLn "Real host in shared StateT IO buffer"
+
+  do
+    let p = forName "shell" :: Pipeline Post Post
+        h = processHost "shell" "echo" ["ok"]
+        seat :: FreeSeat
+        seat = SeatCompose (hostSeat h) (pipelineSeat p)
+        sh :: Shard (StateT [Post] IO) [Post] [Post]
+        sh = interpretSeat seat
+        posts =
+          [ mkPost "human" ["shell"] "world",
+            mkPost "human" ["skip"] "no"
+          ]
+    (outs, st) <- closeShardIO sh posts []
+    assert "process host shares StateT IO buffer with pipeline" $
+      map body outs == ["ok world"]
+        && all (\x -> to x == ["human"]) outs
+        && all (\x -> from x == "shell") outs
+    assert "shared buffer cleared after emit" $ st == []
 
   putStrLn "All tests passed"

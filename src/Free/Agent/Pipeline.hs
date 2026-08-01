@@ -24,7 +24,7 @@ where
 
 import Circuit (Ends (..), endsK)
 import Circuit.Agent (Name, Post (..), Shard, deliversTo)
-import Control.Monad.State (State, get, put)
+import Control.Monad.State.Class (MonadState (..))
 
 -- $setup
 -- >>> :set -XOverloadedStrings
@@ -82,9 +82,10 @@ runPipeline (Compose g f) = runPipeline g . runPipeline f
 -- The state holds the pending input batch.  Commit replaces it; emit applies
 -- the pipeline and clears the buffer.
 pipelineShard ::
-  forall a b.
+  forall m a b.
+  (MonadState [a] m) =>
   Pipeline a b ->
-  Shard (State [a]) [a] [b]
+  Shard m [a] [b]
 pipelineShard p =
   endsK
     (\xs -> put xs)
