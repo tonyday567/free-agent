@@ -9,7 +9,7 @@ import Circuit.Category (Category (id, (.)))
 import Control.Arrow (runKleisli)
 import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Text (Text)
-import Free.Agent.Host (Host (..), hostShard, processHost)
+import Free.Agent.Host (BodyMode (..), Host (..), host, hostShard, processHost)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Pipeline qualified as P
 import Free.Agent.Pipeline
@@ -150,7 +150,7 @@ main = do
   putStrLn "Host shard round-trip"
 
   do
-    let h = Host {hostName = "echo", hostRun = pure . map ("echo:" <>)}
+    let h = host "echo" (pure . map ("echo:" <>))
         sh :: Shard (State [Post]) [Post] [Post]
         sh = hostShard h
         p = mkPost "human" ["echo"] "hi there"
@@ -162,7 +162,7 @@ main = do
     assert "host buffer cleared after emit" $ st == []
 
   do
-    let h = Host {hostName = "echo", hostRun = pure . map ("echo:" <>)}
+    let h = host "echo" (pure . map ("echo:" <>))
         sh :: Shard (State [Post]) [Post] [Post]
         sh = hostShard h
         posts =
@@ -177,6 +177,18 @@ main = do
         && all (\x -> from x == "echo") outs
     assert "multi-post host buffer cleared after emit" $ st == []
 
+  do
+    let h = (host "echo" (pure . map ("echo:" <>))) {hostBodyMode = BodyLines}
+        sh :: Shard (State [Post]) [Post] [Post]
+        sh = hostShard h
+        p = mkPost "human" ["echo"] "hi\nthere"
+        (outs, st) = closeShard sh [p] []
+    assert "host BodyLines splits on newlines" $
+      map body outs == ["echo:hi", "echo:there"]
+        && all (\x -> to x == ["human"]) outs
+        && all (\x -> from x == "echo") outs
+    assert "BodyLines host buffer cleared after emit" $ st == []
+
   -------------------------------------------------------------------------
   -- FreeSeat multi-stage close: pipeline + host composed as seat terms
   -------------------------------------------------------------------------
@@ -185,7 +197,7 @@ main = do
   do
     let p :: Pipeline Post Post
         p = mapP (\x -> x {body = "map:" <> body x}) `P.Compose` filterP (\x -> body x /= "noise")
-        h = Host {hostName = "echo", hostRun = pure . map ("echo:" <>)}
+        h = host "echo" (pure . map ("echo:" <>))
         seat :: FreeSeat
         seat = SeatCompose (hostSeat h) (pipelineSeat p)
         sh :: Shard (StateT [Post] IO) [Post] [Post]
