@@ -1,0 +1,73 @@
+cabal-version: 3.0
+name: free-agent
+version: 0.1.0.0
+license: BSD-3-Clause
+license-file: LICENSE
+copyright: Tony Day (c) 2026
+category: control
+author: Tony Day
+maintainer: tonyday567@gmail.com
+homepage: https://github.com/tonyday567/free-agent#readme
+bug-reports: https://github.com/tonyday567/free-agent/issues
+synopsis: Free syntax for circuits-agent seats (Agent / Shard)
+description:
+  Free constructions above circuits-agent: inspectable syntax for pure
+  Agents and effectful Shards (Ends (Kleisli m)), with folds back into
+  the concrete algebra. Package role ABOVE — depends on circuits-agent;
+  does not replace Post/Agent/Shard.
+
+build-type: Simple
+tested-with:
+  ghc ==9.14.1
+
+extra-doc-files:
+  ChangeLog.md
+  readme.md
+
+source-repository head
+  type: git
+  location: https://github.com/tonyday567/free-agent
+
+common ghc-options-stanza
+  ghc-options:
+    -Wall
+    -Wno-unused-imports
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wredundant-constraints
+
+common ghc2024-stanza
+  default-language: GHC2024
+
+library
+  import: ghc-options-stanza
+  import: ghc2024-stanza
+  hs-source-dirs: src
+  exposed-modules:
+    Free.Agent.Syntax
+    Free.Agent.Layer
+    Free.Agent.Pipeline
+    Free.Agent.Host
+    Free.Agent.Seat
+  build-depends:
+    base >=4.18 && <5,
+    circuits >=0.3 && <0.4,
+    circuits-agent >=0.1 && <0.2,
+    mtl >=2.3 && <2.4,
+    text >=2.0 && <3,
+
+executable free-agent-axioma
+  import: ghc-options-stanza
+  import: ghc2024-stanza
+  hs-source-dirs: app
+  main-is: axioma.hs
+  build-depends:
+    base >=4.18 && <5,
+    circuits,
+    circuits-agent,
+    free-agent,
+    mtl >=2.3 && <2.4,
+    text >=2.0 && <3,
