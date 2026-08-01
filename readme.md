@@ -6,15 +6,21 @@ Free syntax **above** [circuits-agent](https://github.com/tonyday567/circuits-ag
 free-agent  →  folds into  →  circuits-agent Agent / Shard
 ```
 
-- `Free.Agent.Syntax` — free category over a base arrow (`Lift`, `Compose`)
-- `Free.Agent.Layer` — `Layer FreeAgent` plus `runFreeAgent` / `bindFreeAgent`
-- `Free.Agent.Pipeline` — inspectable pure stages (`Filter` / `Map` / `Route`) → `pipelineShard`
-- `Free.Agent.Host` — oneshot host as a list-shard algebra (no hermes dependency)
-- `Free.Agent.Seat` — free Pipeline+Host seats; `interpretSeat` folds via `composeEnds`
+Package role **ABOVE**: depends on circuits-agent; does not replace `Post` /
+`Agent` / `Shard`.
 
-Design: `coffee/loom/free-agent.md`, `coffee/loom/circuits-agent-spec.md`.
+| Module | Role |
+|--------|------|
+| `Free.Agent.Syntax` | Free category over a base arrow (`Lift`, `Compose`) |
+| `Free.Agent.Layer` | `Layer FreeAgent` + `runFreeAgent` / `bindFreeAgent` |
+| `Free.Agent.Pipeline` | Pure stages + `Category`; route / `forName` / `fromName` → `pipelineShard` |
+| `Free.Agent.Host` | Oneshot host + `processHost`; `hostShard` emits per committed post |
+| `Free.Agent.Seat` | Free Pipeline+Host seats; `interpretSeat` → `Shard (StateT [Post] IO)` via `composeEnds` |
+
+Design notes: coffee loom `free-agent.md`, `circuits-agent-spec.md` §8b.
 
 ```bash
 cabal build free-agent free-agent-axioma
 cabal run free-agent-axioma
+cabal haddock
 ```

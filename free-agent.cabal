@@ -9,12 +9,13 @@ author: Tony Day
 maintainer: tonyday567@gmail.com
 homepage: https://github.com/tonyday567/free-agent#readme
 bug-reports: https://github.com/tonyday567/free-agent/issues
-synopsis: Free syntax for circuits-agent seats (Agent / Shard)
+synopsis: Free syntax above circuits-agent (Agent / Shard seats)
 description:
-  Free constructions above circuits-agent: inspectable syntax for pure
-  Agents and effectful Shards (Ends (Kleisli m)), with folds back into
-  the concrete algebra. Package role ABOVE — depends on circuits-agent;
-  does not replace Post/Agent/Shard.
+  Free constructions above circuits-agent: FreeAgent category and Layer folds,
+  inspectable Pipeline stages (Category, route/forName helpers), Host and
+  processHost shards (multi-post emit), and FreeSeat composition into
+  Shard (StateT [Post] IO) via composeEnds. Package role ABOVE — depends on
+  circuits-agent; does not replace Post/Agent/Shard.
 
 build-type: Simple
 tested-with:
