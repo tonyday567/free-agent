@@ -5,8 +5,9 @@ module Main (main) where
 
 import Circuit (Ends (..), close)
 import Circuit.Agent (Post (..), Shard)
-import Circuit.Category (Category (id, (.)))
-import Control.Arrow (runKleisli)
+import Circuit.Category (Category (id, (.)), ObDict (..))
+import Circuit.Layer ((:~>))
+import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Text (Text)
 import Free.Agent.Host (BodyMode (..), Host (..), host, hostShard, processHost)
@@ -96,6 +97,23 @@ main = do
         targetGF = bindFreeAgent id id freeGF :: (->) Int Int
     assert "bind/unit: bind id (Lift f) == f" $ target 5 == 6
     assert "bind preserves Compose" $ targetGF 5 == 12
+
+  do
+    let f :: Int -> Int
+        f = (+ 1)
+        g :: Int -> Int
+        g = (* 2)
+        freeF = Lift f :: FreeAgent (->) Int Int
+        freeG = Lift g :: FreeAgent (->) Int Int
+        freeGF = freeG `Compose` freeF
+        toMaybe :: (->) :~> Kleisli Maybe
+        toMaybe h = Kleisli (Just . h)
+        targetF = bindFreeAgent (\_ -> ObDict) toMaybe freeF :: Kleisli Maybe Int Int
+        targetGF = bindFreeAgent (\_ -> ObDict) toMaybe freeGF :: Kleisli Maybe Int Int
+    assert "bindFreeAgent folds into a discrete target (Kleisli Maybe)" $
+      runKleisli targetF 5 == Just 6
+    assert "bindFreeAgent preserves Compose into Kleisli Maybe" $
+      runKleisli targetGF 5 == Just 12
 
   -------------------------------------------------------------------------
   -- Pipeline laws (on the pure fold)

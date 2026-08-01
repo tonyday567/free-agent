@@ -36,5 +36,10 @@ instance (Category arr) => Category (FreeAgent arr) where
   id = Lift id
   (.) = Compose
 
+-- | A discrete base category lifts to a discrete free category.
+--
+-- 'withOb' delegates to the base category, so any object constraint can be
+-- discharged at every free object. This is what lets 'bindFreeAgent' fold
+-- into arbitrary discrete target categories.
 instance (Discrete arr) => Discrete (FreeAgent arr) where
   withOb @a x = withOb @arr @a x
