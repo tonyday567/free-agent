@@ -12,7 +12,19 @@ import Data.Text qualified as T
 import Free.Agent.Host (Host (..), hostShard, processHost)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Pipeline qualified as P
-import Free.Agent.Pipeline (Pipeline, broadcast, filterP, mapP, pipelineShard, routeBy, routeP, routeTo, runPipeline)
+import Free.Agent.Pipeline
+  ( Pipeline,
+    broadcast,
+    filterP,
+    forName,
+    fromName,
+    mapP,
+    pipelineShard,
+    routeBy,
+    routeP,
+    routeTo,
+    runPipeline,
+  )
 import Free.Agent.Seat (FreeSeat (..), hostSeat, interpretSeat, pipelineSeat)
 import Free.Agent.Syntax (FreeAgent (..))
 import System.Exit (exitFailure)
@@ -216,5 +228,43 @@ main = do
     assert "process host runs echo and replies" $
       map body outs == ["hello ignored"] && all (\x -> to x == ["human"]) outs
     assert "process host buffer cleared after emit" $ st == []
+
+  -------------------------------------------------------------------------
+  -- Addressed filters
+  -------------------------------------------------------------------------
+  putStrLn "Addressed filters"
+
+  do
+    let posts =
+          [ mkPost "alice" ["bot"] "a",
+            mkPost "bob" ["other"] "b",
+            mkPost "carol" ["bot", "x"] "c"
+          ]
+    assert "forName keeps deliversTo name" $
+      map body (runPipeline (forName "bot") posts) == ["a", "c"]
+    assert "fromName keeps sender" $
+      map body (runPipeline (fromName "bob") posts) == ["b"]
+
+  -------------------------------------------------------------------------
+  -- FreeSeat Compose associative under interpretSeat close
+  -------------------------------------------------------------------------
+  putStrLn "FreeSeat Compose assoc"
+
+  do
+    let p1 = forName "bot" :: Pipeline Post Post
+        p2 = mapP (\x -> x {body = "m:" <> body x}) :: Pipeline Post Post
+        p3 = routeTo "out" :: Pipeline Post Post
+        leftA = SeatCompose (pipelineSeat p3) (SeatCompose (pipelineSeat p2) (pipelineSeat p1))
+        rightA = SeatCompose (SeatCompose (pipelineSeat p3) (pipelineSeat p2)) (pipelineSeat p1)
+        posts =
+          [ mkPost "human" ["bot"] "hi",
+            mkPost "human" ["skip"] "no"
+          ]
+        (outsL, _) = closeShard (interpretSeat leftA) posts []
+        (outsR, _) = closeShard (interpretSeat rightA) posts []
+    assert "SeatCompose associative under close" $
+      outsL == outsR
+        && map body outsL == ["m:hi"]
+        && all (\x -> to x == ["out"]) outsL
 
   putStrLn "All tests passed"
