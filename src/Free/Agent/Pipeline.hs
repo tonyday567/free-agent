@@ -14,11 +14,14 @@ module Free.Agent.Pipeline
     filterP,
     mapP,
     routeP,
+    routeTo,
+    routeBy,
+    broadcast,
   )
 where
 
 import Circuit (Ends (..), endsK)
-import Circuit.Agent (Shard)
+import Circuit.Agent (Name, Post (..), Shard)
 import Control.Monad.State (State, get, put)
 
 -- $setup
@@ -44,6 +47,18 @@ mapP = Map
 -- | Expand each input into zero or more outputs.
 routeP :: (a -> [b]) -> Pipeline a b
 routeP = Route
+
+-- | Route every post to a single recipient.
+routeTo :: Name -> Pipeline Post Post
+routeTo name = Map (\p -> p {to = [name]})
+
+-- | Route posts using a function from the post to a recipient list.
+routeBy :: (Post -> [Name]) -> Pipeline Post Post
+routeBy f = Map (\p -> p {to = f p})
+
+-- | Broadcast every post to a list of recipients.
+broadcast :: [Name] -> Pipeline Post Post
+broadcast names = Map (\p -> p {to = names})
 
 -- | Fold a pipeline into a pure list function.
 runPipeline :: Pipeline a b -> ([a] -> [b])

@@ -6,13 +6,13 @@ module Main (main) where
 import Circuit (Ends (..), close)
 import Circuit.Agent (Post (..), Shard)
 import Control.Arrow (runKleisli)
-import Control.Monad.State (State, runState)
+import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Free.Agent.Host (Host (..), hostShard)
+import Free.Agent.Host (Host (..), hostShard, processHost)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Pipeline qualified as P
-import Free.Agent.Pipeline (Pipeline, filterP, mapP, pipelineShard, routeP, runPipeline)
+import Free.Agent.Pipeline (Pipeline, broadcast, filterP, mapP, pipelineShard, routeBy, routeP, routeTo, runPipeline)
 import Free.Agent.Seat (FreeSeat (..), hostSeat, interpretSeat, pipelineSeat)
 import Free.Agent.Syntax (FreeAgent (..))
 import System.Exit (exitFailure)
@@ -32,6 +32,11 @@ mkPost = Post
 closeShard :: Shard (State s) a a -> a -> s -> (a, s)
 closeShard sh x s0 =
   runState (runKleisli (close (conjoint sh) (companion sh)) x) s0
+
+-- | Close a same-type shard once under StateT IO.
+closeShardIO :: Shard (StateT s IO) a a -> a -> s -> IO (a, s)
+closeShardIO sh x s0 =
+  runStateT (runKleisli (close (conjoint sh) (companion sh)) x) s0
 
 main :: IO ()
 main = do
@@ -160,5 +165,56 @@ main = do
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
     assert "free seat buffer cleared after emit" $ st == []
+
+  -------------------------------------------------------------------------
+  -- Route-by-name helpers
+  -------------------------------------------------------------------------
+  putStrLn "Route-by-name helpers"
+
+  do
+    let posts =
+          [ mkPost "human" ["bot"] "one",
+            mkPost "human" ["bot"] "two"
+          ]
+        p = routeTo "router" :: Pipeline Post Post
+    assert "routeTo sets single recipient" $
+      all (\x -> to x == ["router"]) (runPipeline p posts)
+
+  do
+    let posts =
+          [ mkPost "human" [] "one",
+            mkPost "human" [] "two"
+          ]
+        p = broadcast ["a", "b"] :: Pipeline Post Post
+        routed = runPipeline p posts
+    assert "broadcast sets multiple recipients" $
+      all (\x -> to x == ["a", "b"]) routed && length routed == 2
+
+  do
+    let p = routeBy (\x -> if body x == "ops" then ["ops"] else ["general"])
+        posts =
+          [ mkPost "human" [] "ops",
+            mkPost "human" [] "chat"
+          ]
+        routed = runPipeline p posts
+    assert "routeBy routes by predicate" $
+      case routed of
+        [opsPost, generalPost] -> to opsPost == ["ops"] && to generalPost == ["general"]
+        _ -> False
+
+  -------------------------------------------------------------------------
+  -- Real-host sketch: external process
+  -------------------------------------------------------------------------
+  putStrLn "Real-host sketch"
+
+  do
+    let h = processHost "shell" "echo" ["hello"]
+        sh :: Shard (StateT [Post] IO) [Post] [Post]
+        sh = hostShard h
+        p = mkPost "human" ["shell"] "ignored"
+    (outs, st) <- closeShardIO sh [p] []
+    assert "process host runs echo and replies" $
+      map body outs == ["hello ignored"] && all (\x -> to x == ["human"]) outs
+    assert "process host buffer cleared after emit" $ st == []
 
   putStrLn "All tests passed"

@@ -57,6 +57,7 @@ library
     circuits >=0.3 && <0.4,
     circuits-agent >=0.1 && <0.2,
     mtl >=2.3 && <2.4,
+    process >=1.6 && <1.7,
     text >=2.0 && <3,
 
 executable free-agent-axioma

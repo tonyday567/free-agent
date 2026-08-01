@@ -8,14 +8,17 @@
 module Free.Agent.Host
   ( Host (..),
     hostShard,
+    processHost,
   )
 where
 
 import Circuit (Ends (..), endsK)
 import Circuit.Agent (Post (..), Shard)
-import Control.Monad.State (State, get, put)
+import Control.Monad.IO.Class (MonadIO (..))
+import Control.Monad.State.Class (MonadState (..))
 import Data.Text (Text)
 import Data.Text qualified as T
+import System.Process (readProcess)
 
 -- $setup
 -- >>> :set -XOverloadedStrings
@@ -37,7 +40,10 @@ data Host m = Host
 -- The shard remembers the committed posts in its state.  On emit it runs the
 -- host on the first committed post's body (split into words) and emits one
 -- reply post per output line, addressed back to the original sender.
-hostShard :: Host (State [Post]) -> Shard (State [Post]) [Post] [Post]
+hostShard ::
+  (MonadState [Post] m) =>
+  Host m ->
+  Shard m [Post] [Post]
 hostShard h =
   endsK
     (\xs -> put xs)
@@ -50,3 +56,25 @@ hostShard h =
             outs <- hostRun h (T.words (body p))
             pure [Post (hostName h) [from p] o | o <- outs]
     )
+
+-- | Sketch of a real host backed by an external process.
+--
+-- The command receives the post body as stdin and its output lines become the
+-- reply.  This uses 'System.Process.readProcess' and lives in 'IO' (lifted
+-- through whatever state transformer holds the shard buffer).
+processHost ::
+  (MonadIO m) =>
+  -- | Host name.
+  Text ->
+  -- | Command to run.
+  FilePath ->
+  -- | Command arguments.
+  [String] ->
+  Host m
+processHost name cmd args =
+  Host
+    { hostName = name,
+      hostRun = \ws -> do
+        out <- liftIO (readProcess cmd (args ++ map T.unpack ws) "")
+        pure (map T.pack (lines out))
+    }
