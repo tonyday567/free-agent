@@ -5,10 +5,10 @@ module Main (main) where
 
 import Circuit (Ends (..), close)
 import Circuit.Agent (Post (..), Shard)
+import Circuit.Category (Category (id, (.)))
 import Control.Arrow (runKleisli)
 import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Free.Agent.Host (Host (..), hostShard, processHost)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Pipeline qualified as P
@@ -28,6 +28,7 @@ import Free.Agent.Pipeline
 import Free.Agent.Seat (FreeSeat (..), hostSeat, interpretSeat, pipelineSeat)
 import Free.Agent.Syntax (FreeAgent (..))
 import System.Exit (exitFailure)
+import Prelude hiding (id, (.))
 
 assert :: String -> Bool -> IO ()
 assert msg ok =
@@ -105,13 +106,20 @@ main = do
     let f = filterP even :: Pipeline Int Int
         g = mapP (* 3) :: Pipeline Int Int
         h = routeP (\n -> [n, n + 1]) :: Pipeline Int Int
-        leftA = h `P.Compose` (g `P.Compose` f)
-        rightA = (h `P.Compose` g) `P.Compose` f
+        leftA = h . (g . f)
+        rightA = (h . g) . f
         xs = [1 .. 6 :: Int]
+        pid = id :: Pipeline Int Int
     assert "pipeline Compose associative under runPipeline" $
       runPipeline leftA xs == runPipeline rightA xs
     assert "filter then map" $
-      runPipeline (g `P.Compose` f) xs == [6, 12, 18]
+      runPipeline (g . f) xs == [6, 12, 18]
+    assert "pipeline left unit: runPipeline (f . id) == runPipeline f" $
+      runPipeline (f . pid) xs == runPipeline f xs
+    assert "pipeline right unit: runPipeline (id . f) == runPipeline f" $
+      runPipeline (pid . f) xs == runPipeline f xs
+    assert "pipeline id is identity" $
+      runPipeline pid xs == xs
 
   -------------------------------------------------------------------------
   -- Pipeline round-trip into Shard (State [Post]) [Post] [Post]

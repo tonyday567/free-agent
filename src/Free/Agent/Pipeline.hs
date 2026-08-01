@@ -1,5 +1,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- | Inspectable shard pipelines over addressed posts.
 --
@@ -24,7 +25,9 @@ where
 
 import Circuit (Ends (..), endsK)
 import Circuit.Agent (Name, Post (..), Shard, deliversTo)
+import Circuit.Category (Category (..))
 import Control.Monad.State.Class (MonadState (..))
+import Prelude hiding (id, (.))
 
 -- $setup
 -- >>> :set -XOverloadedStrings
@@ -41,6 +44,12 @@ data Pipeline a b where
   Route :: (a -> [b]) -> Pipeline a b
   -- | Sequence two pipelines.
   Compose :: Pipeline b c -> Pipeline a b -> Pipeline a c
+
+-- | Pipelines form a category: 'id' is @'Map' id@; composition is 'Compose'.
+instance Category Pipeline where
+  type Ob Pipeline a = ()
+  id = Map (\x -> x)
+  (.) = Compose
 
 -- | Keep only inputs that satisfy the predicate.
 filterP :: (a -> Bool) -> Pipeline a a
