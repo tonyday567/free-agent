@@ -33,9 +33,13 @@ import Control.Monad.State.Class (MonadState (..))
 
 -- | A pipeline stage or composition of stages.
 data Pipeline a b where
+  -- | Keep only inputs that satisfy the predicate.
   Filter :: (a -> Bool) -> Pipeline a a
+  -- | Transform each input.
   Map :: (a -> b) -> Pipeline a b
+  -- | Expand each input into zero or more outputs.
   Route :: (a -> [b]) -> Pipeline a b
+  -- | Sequence two pipelines.
   Compose :: Pipeline b c -> Pipeline a b -> Pipeline a c
 
 -- | Keep only inputs that satisfy the predicate.

@@ -31,7 +31,9 @@ import System.Process (readProcess)
 -- produces output lines.  The caller decides how to turn those lines back into
 -- posts; 'hostShard' uses the default mapping (reply to sender).
 data Host m = Host
-  { hostName :: Text,
+  { -- | Name used as the 'from' field of reply posts.
+    hostName :: Text,
+    -- | Run the host on arguments derived from the incoming post body.
     hostRun :: [Text] -> m [Text]
   }
 

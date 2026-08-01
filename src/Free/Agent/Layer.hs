@@ -2,6 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeAbstractions #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Layer instance for 'FreeAgent': unit / run / bind into any discrete target.
 --
@@ -24,10 +25,11 @@ import Prelude hiding (id, (.))
 -- >>> import Free.Agent.Layer
 -- >>> import Prelude hiding (id, (.))
 
+-- | 'FreeAgent' is a free category, so it is a 'Layer' over any base arrow.
+-- 'runFreeAgent' and 'bindFreeAgent' are the two folds.
 instance Layer FreeAgent where
   type Law FreeAgent arr' = Discrete arr'
   type Run FreeAgent arr = (Category arr, Discrete arr)
-  type Bind FreeAgent arr = ()
   unit = Lift
   bind ::
     forall arr' arr a b.
@@ -53,7 +55,7 @@ runFreeAgent (Compose g f) = runFreeAgent g . runFreeAgent f
 -- | Fold a free agent term into any discrete target category.
 bindFreeAgent ::
   forall (arr' :: Type -> Type -> Type) (arr :: Type -> Type -> Type) a b.
-  (Category arr', Discrete arr', Ob arr a, Ob arr b, Ob arr' a, Ob arr' b) =>
+  (Discrete arr', Ob arr a, Ob arr b, Ob arr' a, Ob arr' b) =>
   (forall s. ObDict arr s -> ObDict arr' s) ->
   (arr :~> arr') ->
   FreeAgent arr a b ->

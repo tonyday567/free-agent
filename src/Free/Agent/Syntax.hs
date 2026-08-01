@@ -26,7 +26,9 @@ import Prelude hiding (id, (.))
 -- Intermediate 'Ob' evidence lives on 'Compose' so same-category folds do not
 -- require a 'Discrete' base for every intermediate object.
 data FreeAgent arr a b where
+  -- | Embed a base arrow as a single generator.
   Lift :: arr a b -> FreeAgent arr a b
+  -- | Sequence two free morphisms (right-to-left, matching 'Category' composition).
   Compose :: (Ob arr b) => FreeAgent arr b c -> FreeAgent arr a b -> FreeAgent arr a c
 
 instance (Category arr) => Category (FreeAgent arr) where

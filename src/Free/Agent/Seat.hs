@@ -29,8 +29,11 @@ import Free.Agent.Pipeline (Pipeline, pipelineShard)
 --   * 'SeatHost' — a one-shot host (may perform IO).
 --   * 'SeatCompose' — sequential composition of seats.
 data FreeSeat where
+  -- | A pure pipeline stage.
   SeatPipeline :: Pipeline Post Post -> FreeSeat
+  -- | A one-shot host stage (may perform IO).
   SeatHost :: Host (StateT [Post] IO) -> FreeSeat
+  -- | Sequential composition of seats.
   SeatCompose :: FreeSeat -> FreeSeat -> FreeSeat
 
 -- | Lift a pure pipeline into a free seat term.
