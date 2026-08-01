@@ -37,11 +37,12 @@ data Host m = Host
     hostRun :: [Text] -> m [Text]
   }
 
--- | Turn a host into a stateful shard that consumes one post per close.
+-- | Turn a host into a stateful shard that consumes every committed post.
 --
 -- The shard remembers the committed posts in its state.  On emit it runs the
--- host on the first committed post's body (split into words) and emits one
--- reply post per output line, addressed back to the original sender.
+-- host on each post's body (split into words), in order, and emits one reply
+-- post per output line per input post.  Each reply is addressed back to the
+-- sender of its input post.
 hostShard ::
   (MonadState [Post] m) =>
   Host m ->
@@ -52,11 +53,13 @@ hostShard h =
     ( do
         xs <- get
         put []
-        case xs of
-          [] -> pure []
-          (p : _) -> do
-            outs <- hostRun h (T.words (body p))
-            pure [Post (hostName h) [from p] o | o <- outs]
+        fmap concat $
+          traverse
+            ( \p -> do
+                outs <- hostRun h (T.words (body p))
+                pure [Post (hostName h) [from p] o | o <- outs]
+            )
+            xs
     )
 
 -- | Sketch of a real host backed by an external process.

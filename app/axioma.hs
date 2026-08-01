@@ -153,6 +153,22 @@ main = do
         && all (\x -> from x == "echo") outs
     assert "host buffer cleared after emit" $ st == []
 
+  do
+    let h = Host {hostName = "echo", hostRun = pure . map ("echo:" <>)}
+        sh :: Shard (State [Post]) [Post] [Post]
+        sh = hostShard h
+        posts =
+          [ mkPost "human" ["echo"] "one two",
+            mkPost "human" ["echo"] "three"
+          ]
+        (outs, st) = closeShard sh posts []
+    assert "host emits one reply batch per committed post" $
+      map body outs == ["echo:one", "echo:two", "echo:three"]
+        && length outs == 3
+        && all (\x -> to x == ["human"]) outs
+        && all (\x -> from x == "echo") outs
+    assert "multi-post host buffer cleared after emit" $ st == []
+
   -------------------------------------------------------------------------
   -- FreeSeat multi-stage close: pipeline + host composed as seat terms
   -------------------------------------------------------------------------
@@ -173,7 +189,7 @@ main = do
           ]
     (outs, st) <- closeShardIO sh posts []
     assert "free seat composed pipeline then host" $
-      map body outs == ["echo:map:hello", "echo:world"]
+      map body outs == ["echo:map:hello", "echo:world", "echo:map:again"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
     assert "free seat buffer cleared after emit" $ st == []
