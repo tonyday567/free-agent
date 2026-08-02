@@ -4,7 +4,7 @@
 module Main (main) where
 
 import Circuit (Ends (..), close)
-import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, branches, cone, raceA, runAgentShard, sortNub, tape, toBag)
+import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, branches, cone, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
 import Circuit.Channel (Strength (..), Traced (..))
 import Circuit.Agent.Tensor
   ( awaitShard,
@@ -18,6 +18,7 @@ import Circuit.Layer ((:~>))
 import Circuit.Poly (Mono, System (..), monoDir)
 import Circuit.Poly.Process (iterateSystem, runSystem)
 import Circuit.Poly.StringDiagram (SDiagram (..))
+import Circuit.Poly.StringDiagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
 import Circuit.Process (delay, register, scan)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (when)
@@ -750,9 +751,9 @@ main = do
       viaRegister == viaTrace && viaRegister == [2, 4, 6, 8]
 
   -------------------------------------------------------------------------
-  -- Meeting skeleton (endgame stage 2): a conversation reads back as a
-  -- drawing tree.  Sequential fragment only — forks and merges wait for
-  -- the stage-3 copy/merge generators.
+  -- Meeting skeleton (endgame stage 2/2b): a conversation reads back as a
+  -- drawing of the full post-DAG — chains, forks (visible copy spiders)
+  -- and syntheses (visible merge spiders), routed with SSwap permutations.
   -------------------------------------------------------------------------
   putStrLn "meeting skeleton"
   do
@@ -766,13 +767,47 @@ main = do
         b1 = turn seatB a1
         a2 = turn seatA b1
         convo = [seed, a1, b1, a2]
-    assert "skeleton of a ping-pong is the speaker chain" $
-      meetingSkeleton convo
-        == SThenD (SBox "human") (SThenD (SBox "a") (SThenD (SBox "b") (SThenD (SBox "a") SWire)))
+    assert "skeleton of a ping-pong is the speaker chain (hyper-normal form)" $
+      hyperEquiv (meetingSkeleton convo) $
+        SThenD (SBox "human" 0 1) (SThenD (SBox "a" 1 1) (SThenD (SBox "b" 1 1) (SBox "a" 1 1)))
     assert "single-thread ancestry is the skeleton's label sequence" $
       case branches [seed, a1, b1] a2 of
         [path] -> skeletonLabels (meetingSkeleton convo) == reverse (map T.unpack path)
         _ -> False
+
+  putStrLn "meeting skeleton: forks, syntheses, dangling parents"
+  do
+    let p0 = mkPost "a" [] "seed"
+        r1 = replyTo "b" p0 "r1"
+        r2 = replyTo "c" p0 "r2"
+        forkSkel = meetingSkeleton [p0, r1, r2]
+        hgFork = normalise forkSkel
+    assert "fork: one wire joins the parent's output to both replies' inputs" $
+      Wire [] [PortEnd "a" Out 0, PortEnd "b" In 0, PortEnd "c" In 0] `elem` hgWires hgFork
+    assert "fork: no free inputs, both replies reach the boundary" $
+      hgInArity hgFork == 0 && hgOutArity hgFork == 2
+    assert "fork: the copy spider is visible in the drawing" $
+      "spider" `elem` skeletonLabels forkSkel
+
+  do
+    let pA = mkPost "a" [] "1"
+        pB = mkPost "b" [] "2"
+        pC = mkPost "c" [] "3"
+        s = synthesis "s" [] [pA, pB, pC] "sum"
+        synSkel = meetingSkeleton [pA, pB, pC, s]
+        hgSyn = normalise synSkel
+    assert "synthesis: the box input descends from a merge of exactly the three parents' outputs" $
+      Wire [] [PortEnd "a" Out 0, PortEnd "b" Out 0, PortEnd "c" Out 0, PortEnd "s" In 0] `elem` hgWires hgSyn
+    assert "synthesis: no free inputs, one boundary output" $
+      hgInArity hgSyn == 0 && hgOutArity hgSyn == 1
+    assert "synthesis: the merge spider is visible in the drawing" $
+      "spider" `elem` skeletonLabels synSkel
+
+  do
+    let d = (mkPost "a" [] "x") {thread = ["ghost"]}
+        hgD = normalise (meetingSkeleton [d])
+    assert "dangling parent: a free input wire feeds the box" $
+      hgInArity hgD == 1 && Wire [InB 0] [PortEnd "a" In 0] `elem` hgWires hgD
 
   -------------------------------------------------------------------------
   -- Hyper generators (endgame stage 3): copy/merge/braid for streams, and
