@@ -4,7 +4,7 @@
 module Main (main) where
 
 import Circuit (Ends (..), close)
-import Circuit.Agent (AgentSeat (..), Bag, Post (..), Shard, awaitA, raceA, runAgentShard, tape, toBag)
+import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, raceA, runAgentShard, tape, toBag)
 import Circuit.Agent.Tensor
   ( awaitShard,
     fanInShard,
@@ -14,12 +14,15 @@ import Circuit.Agent.Tensor
   )
 import Circuit.Category (Category (id, (.)), ObDict (..))
 import Circuit.Layer ((:~>))
+import Circuit.Poly (Mono, System (..), monoDir)
+import Circuit.Poly.Process (iterateSystem, runSystem)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (when)
 import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Free.Agent.Diagram (diagramStep, diagramSteps)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, mkHost, hostShard, processHost)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Pipeline qualified as P
@@ -670,5 +673,34 @@ main = do
     outs2 <- runAgentSBox (interpretSeatS (pipelineSeat p)) perm
     assert "bag of outputs is invariant under input permutation" $
       toBag outs1 == toBag outs2
+
+  -------------------------------------------------------------------------
+  -- Diagram bridge (endgame stage 1): an agent is a box; one diagram run
+  -- is one Moore step.  Feedback wiring (bend + delay) is not yet
+  -- expressible in the string-diagram surface — see Free.Agent.Diagram.
+  -------------------------------------------------------------------------
+  putStrLn "diagram bridge"
+  do
+    let sysN = System (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: System (->) Int (Mono Int Int)
+    assert "diagram step is runSystem's (put, get)" $
+      diagramStep sysN 5 3 == (snd (runSystem sysN 5) 3, fst (runSystem sysN 5))
+    assert "diagram steps mirror iterateSystem" $
+      diagramSteps sysN 0 [1 .. 5] == iterateSystem sysN 0 [1 .. 5]
+
+  do
+    let echo =
+          tape (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
+            Agent (->) [Post Text] (Post Text) [Post Text]
+        p0 = mkPost "human" ["bot"] "one"
+        ins =
+          [ p0,
+            mkPost "human" ["bot"] "two",
+            mkPost "human" ["bot"] "three"
+          ]
+    assert "tape agent: diagram step is runSystem's (put, get)" $
+      diagramStep echo [] p0
+        == (snd (runSystem echo []) p0, fst (runSystem echo []))
+    assert "tape agent: diagram steps mirror iterateSystem" $
+      diagramSteps echo [] ins == iterateSystem echo [] ins
 
   putStrLn "All tests passed"
