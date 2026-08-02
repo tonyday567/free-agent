@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 
 -- | Free seat syntax: pipelines and hosts as inspectable terms that fold into
--- 'Circuit.Agent.Shard' values in 'StateT [Post] IO', and into STM agents via
+-- 'Circuit.Agent.Shard' values in 'StateT [Post Text] IO', and into STM agents via
 -- 'interpretSeatS'.
 module Free.Agent.Seat
   ( FreeSeat (..),
@@ -40,6 +40,7 @@ import Circuit.Poly (System (..), monoDir)
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent.STM (STM, atomically)
 import Control.Monad.State (StateT)
+import Data.Text (Text)
 import Free.Agent.Host (Host, hostShard)
 import Free.Agent.Pipeline (Pipeline, pipelineShard, runPipeline)
 
@@ -50,7 +51,7 @@ import Free.Agent.Pipeline (Pipeline, pipelineShard, runPipeline)
 -- >>> import Free.Agent.Host
 -- >>> import Circuit.Agent
 
--- | An inspectable '[Post]'-to-'[Post]' seat term.
+-- | An inspectable '[Post Text]'-to-'[Post Text]' seat term.
 --
 --   * 'SeatPipeline' — a pure list-to-list pipeline over 'Post'.
 --   * 'SeatHost' — a one-shot host (may perform IO).
@@ -63,9 +64,9 @@ import Free.Agent.Pipeline (Pipeline, pipelineShard, runPipeline)
 --   * 'SeatFanIn' — fan-out then collapse the branch outputs with a summary.
 data FreeSeat where
   -- | A pure pipeline stage.
-  SeatPipeline :: Pipeline Post Post -> FreeSeat
+  SeatPipeline :: Pipeline (Post Text) (Post Text) -> FreeSeat
   -- | A one-shot host stage (may perform IO).
-  SeatHost :: Host (StateT [Post] IO) -> FreeSeat
+  SeatHost :: Host (StateT [Post Text] IO) -> FreeSeat
   -- | The silent seat: emits the empty list.
   SeatSilent :: FreeSeat
   -- | Sequential composition of seats.
@@ -79,14 +80,14 @@ data FreeSeat where
   -- | Fan-out: run every branch on a copy of the input.
   SeatFanOut :: [FreeSeat] -> FreeSeat
   -- | Fan-in: fan-out then summarize the collected branch outputs.
-  SeatFanIn :: ([[Post]] -> [Post]) -> [FreeSeat] -> FreeSeat
+  SeatFanIn :: ([[Post Text]] -> [Post Text]) -> [FreeSeat] -> FreeSeat
 
 -- | Lift a pure pipeline into a free seat term.
-pipelineSeat :: Pipeline Post Post -> FreeSeat
+pipelineSeat :: Pipeline (Post Text) (Post Text) -> FreeSeat
 pipelineSeat = SeatPipeline
 
 -- | Lift a host into a free seat term.
-hostSeat :: Host (StateT [Post] IO) -> FreeSeat
+hostSeat :: Host (StateT [Post Text] IO) -> FreeSeat
 hostSeat = SeatHost
 
 -- | The silent seat: emits nothing.
@@ -110,21 +111,21 @@ fanOutSeat :: [FreeSeat] -> FreeSeat
 fanOutSeat = SeatFanOut
 
 -- | Fan-in: fan-out then summarize the branch outputs.
-fanInSeat :: ([[Post]] -> [Post]) -> [FreeSeat] -> FreeSeat
+fanInSeat :: ([[Post Text]] -> [Post Text]) -> [FreeSeat] -> FreeSeat
 fanInSeat = SeatFanIn
 
 -- | 'fanInSeat' synonym: a bundle is fan-out, map, fan-in.
-bundleSeat :: ([[Post]] -> [Post]) -> [FreeSeat] -> FreeSeat
+bundleSeat :: ([[Post Text]] -> [Post Text]) -> [FreeSeat] -> FreeSeat
 bundleSeat = fanInSeat
 
 -- | Fold a free seat term into a shard by interpreting each generator and
 -- composing the resulting shards with 'composeEnds'.
 --
--- The result lives in 'StateT [Post] IO' so that real process hosts can share
+-- The result lives in 'StateT [Post Text] IO' so that real process hosts can share
 -- the same buffer monad as pure pipeline stages.
 interpretSeat ::
   FreeSeat ->
-  Shard (StateT [Post] IO) [Post] [Post]
+  Shard (StateT [Post Text] IO) [Post Text] [Post Text]
 interpretSeat (SeatPipeline p) = pipelineShard p
 interpretSeat (SeatHost h) = hostShard h
 interpretSeat SeatSilent = silentShard
@@ -147,7 +148,7 @@ interpretSeat (SeatFanIn summary fs) =
 -- transducers; 'SeatAwait'/'SeatRace'/'SeatFanOut'/'SeatFanIn' are the bundle
 -- tensors; 'SeatFork' is identity. 'SeatHost' is not pure and raises a runtime
 -- error.
-type SeatBehaviour = [Post] -> [Post]
+type SeatBehaviour = [Post Text] -> [Post Text]
 
 -- | Fold a free seat term into its pure behaviour.
 --
@@ -171,36 +172,36 @@ interpretSeatA (SeatFanIn summary fs) =
 -- | Existential box around an STM agent, carrying its initial state.
 --
 -- The agent consumes one /batch/ of posts per step, so the whole free-seat
--- semantics @[Post] -> [Post]@ is realised in a single STM step.
+-- semantics @[Post Text] -> [Post Text]@ is realised in a single STM step.
 data AgentSBox where
-  AgentSBox :: s -> Agent (Kleisli STM) s [Post] [Post] -> AgentSBox
+  AgentSBox :: s -> Agent (Kleisli STM) s [Post Text] [Post Text] -> AgentSBox
 
 -- | Run an STM-agent box over a list of posts, returning only the emitted
 -- posts. The state is sealed inside the box; the caller sees the same
 -- list-to-list interface as 'interpretSeatA'.
-runAgentSBox :: AgentSBox -> [Post] -> IO [Post]
+runAgentSBox :: AgentSBox -> [Post Text] -> IO [Post Text]
 runAgentSBox (AgentSBox s0 ag) ins =
   fst <$> atomically (runAgentM ag s0 ins)
 
 -- | Heterogeneous list element for STM agents with varying state types.
 data HAgentS where
-  HAgentS :: s -> Agent (Kleisli STM) s [Post] [Post] -> HAgentS
+  HAgentS :: s -> Agent (Kleisli STM) s [Post Text] [Post Text] -> HAgentS
 
 -- | Lift a pure pipeline into a batch STM agent.
-pipelineS :: Pipeline Post Post -> Agent (Kleisli STM) () [Post] [Post]
+pipelineS :: Pipeline (Post Text) (Post Text) -> Agent (Kleisli STM) () [Post Text] [Post Text]
 pipelineS p = System $ Kleisli $ \((), d) ->
   pure ((), (runPipeline p (monoDir d), ()))
 
 -- | Silent STM agent: emits nothing, state unchanged.
-silentS :: Agent (Kleisli STM) () [Post] [Post]
+silentS :: Agent (Kleisli STM) () [Post Text] [Post Text]
 silentS = System $ Kleisli $ \((), _) -> pure ((), ([], ()))
 
 -- | Sequential composition in STM: outputs of @f@ on the whole batch are fed
 -- as the next batch to @g@.
 composeS ::
-  Agent (Kleisli STM) sg [Post] [Post] ->
-  Agent (Kleisli STM) sf [Post] [Post] ->
-  Agent (Kleisli STM) (sf, sg) [Post] [Post]
+  Agent (Kleisli STM) sg [Post Text] [Post Text] ->
+  Agent (Kleisli STM) sf [Post Text] [Post Text] ->
+  Agent (Kleisli STM) (sf, sg) [Post Text] [Post Text]
 composeS g f = System $ Kleisli $ \((sf, sg), d) -> do
   (outs, sf') <- runAgentM f sf (monoDir d)
   (outs', sg') <- runAgentM g sg outs
@@ -209,9 +210,9 @@ composeS g f = System $ Kleisli $ \((sf, sg), d) -> do
 -- | Product / await in STM: both agents run on the same batch; emits are
 -- concatenated.
 awaitBatchS ::
-  Agent (Kleisli STM) s1 [Post] [Post] ->
-  Agent (Kleisli STM) s2 [Post] [Post] ->
-  Agent (Kleisli STM) (s1, s2) [Post] [Post]
+  Agent (Kleisli STM) s1 [Post Text] [Post Text] ->
+  Agent (Kleisli STM) s2 [Post Text] [Post Text] ->
+  Agent (Kleisli STM) (s1, s2) [Post Text] [Post Text]
 awaitBatchS f g = System $ Kleisli $ \((sf, sg), d) -> do
   (outsF, sf') <- runAgentM f sf (monoDir d)
   (outsG, sg') <- runAgentM g sg (monoDir d)
@@ -219,9 +220,9 @@ awaitBatchS f g = System $ Kleisli $ \((sf, sg), d) -> do
 
 -- | Coproduct / race in STM: left emit wins if non-empty, otherwise right.
 raceBatchS ::
-  Agent (Kleisli STM) s1 [Post] [Post] ->
-  Agent (Kleisli STM) s2 [Post] [Post] ->
-  Agent (Kleisli STM) (s1, s2) [Post] [Post]
+  Agent (Kleisli STM) s1 [Post Text] [Post Text] ->
+  Agent (Kleisli STM) s2 [Post Text] [Post Text] ->
+  Agent (Kleisli STM) (s1, s2) [Post Text] [Post Text]
 raceBatchS f g = System $ Kleisli $ \((sf, sg), d) -> do
   (outsF, sf') <- runAgentM f sf (monoDir d)
   (outsG, sg') <- runAgentM g sg (monoDir d)
@@ -230,7 +231,7 @@ raceBatchS f g = System $ Kleisli $ \((sf, sg), d) -> do
 
 -- | Fan-out in STM: run every branch on the same input batch and concatenate
 -- the outputs. Branch states are kept in a heterogeneous list.
-fanOutS :: Agent (Kleisli STM) [HAgentS] [Post] [Post]
+fanOutS :: Agent (Kleisli STM) [HAgentS] [Post Text] [Post Text]
 fanOutS = System $ Kleisli $ \(hs, d) -> do
   let batch = monoDir d
   pairs <- mapM (\(HAgentS s a) -> do (os, s') <- runAgentM a s batch; pure (HAgentS s' a, os)) hs
@@ -239,7 +240,7 @@ fanOutS = System $ Kleisli $ \(hs, d) -> do
 
 -- | Fan-in in STM: run every branch on the same input batch, then collapse
 -- the branch outputs with the summary function.
-fanInS :: ([[Post]] -> [Post]) -> Agent (Kleisli STM) [HAgentS] [Post] [Post]
+fanInS :: ([[Post Text]] -> [Post Text]) -> Agent (Kleisli STM) [HAgentS] [Post Text] [Post Text]
 fanInS summary = System $ Kleisli $ \(hs, d) -> do
   let batch = monoDir d
   pairs <- mapM (\(HAgentS s a) -> do (os, s') <- runAgentM a s batch; pure (HAgentS s' a, os)) hs

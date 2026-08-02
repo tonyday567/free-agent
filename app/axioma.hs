@@ -68,8 +68,8 @@ assert msg ok =
       putStrLn ("  FAIL " ++ msg)
       exitFailure
 
-mkPost :: Text -> [Text] -> Text -> Post
-mkPost = Post
+mkPost :: Text -> [Text] -> Text -> Post Text
+mkPost a ds = Post a ds Nothing
 
 -- | Close a same-type shard once under State.
 closeShard :: Shard (State s) a a -> a -> s -> (a, s)
@@ -169,12 +169,12 @@ main = do
       runPipeline pid xs == xs
 
   -------------------------------------------------------------------------
-  -- Pipeline round-trip into Shard (State [Post]) [Post] [Post]
+  -- Pipeline round-trip into Shard (State [Post Text]) [Post Text] [Post Text]
   -------------------------------------------------------------------------
   putStrLn "Pipeline round-trip"
 
   do
-    let p :: Pipeline Post Post
+    let p :: Pipeline (Post Text) (Post Text)
         -- Category-style: map after filter
         p = mapP (\x -> x {body = "map:" <> body x}) `P.Compose` filterP (\x -> body x /= "noise")
         posts =
@@ -182,7 +182,7 @@ main = do
             mkPost "human" ["bot"] "noise",
             mkPost "human" ["bot"] "world"
           ]
-        sh :: Shard (State [Post]) [Post] [Post]
+        sh :: Shard (State [Post Text]) [Post Text] [Post Text]
         sh = pipelineShard p
         (outs, st) = closeShard sh posts []
     assert "runPipeline agrees with shard emit" $
@@ -198,7 +198,7 @@ main = do
 
   do
     let h = mkHost "echo" (pure . map ("echo:" <>))
-        sh :: Shard (State [Post]) [Post] [Post]
+        sh :: Shard (State [Post Text]) [Post Text] [Post Text]
         sh = hostShard h
         p = mkPost "human" ["echo"] "hi there"
         (outs, st) = closeShard sh [p] []
@@ -206,11 +206,12 @@ main = do
       map body outs == ["echo:hi", "echo:there"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
+        && all (\x -> thread x == Just "human") outs
     assert "host buffer cleared after emit" $ st == []
 
   do
     let h = mkHost "echo" (pure . map ("echo:" <>))
-        sh :: Shard (State [Post]) [Post] [Post]
+        sh :: Shard (State [Post Text]) [Post Text] [Post Text]
         sh = hostShard h
         posts =
           [ mkPost "human" ["echo"] "one two",
@@ -226,7 +227,7 @@ main = do
 
   do
     let h = (mkHost "echo" (pure . map ("echo:" <>))) {hostBodyMode = BodyLines}
-        sh :: Shard (State [Post]) [Post] [Post]
+        sh :: Shard (State [Post Text]) [Post Text] [Post Text]
         sh = hostShard h
         p = mkPost "human" ["echo"] "hi\nthere"
         (outs, st) = closeShard sh [p] []
@@ -242,12 +243,12 @@ main = do
   putStrLn "FreeSeat multi-stage close"
 
   do
-    let p :: Pipeline Post Post
+    let p :: Pipeline (Post Text) (Post Text)
         p = mapP (\x -> x {body = "map:" <> body x}) `P.Compose` filterP (\x -> body x /= "noise")
         h = mkHost "echo" (pure . map ("echo:" <>))
         seat :: FreeSeat
         seat = SeatCompose (hostSeat h) (pipelineSeat p)
-        sh :: Shard (StateT [Post] IO) [Post] [Post]
+        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
         sh = interpretSeat seat
         posts =
           [ mkPost "human" ["bot"] "hello world",
@@ -259,6 +260,7 @@ main = do
       map body outs == ["echo:map:hello", "echo:world", "echo:map:again"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
+        && all (\x -> thread x == Just "human") outs
     assert "free seat buffer cleared after emit" $ st == []
 
   -------------------------------------------------------------------------
@@ -271,7 +273,7 @@ main = do
           [ mkPost "human" ["bot"] "one",
             mkPost "human" ["bot"] "two"
           ]
-        p = routeTo "router" :: Pipeline Post Post
+        p = routeTo "router" :: Pipeline (Post Text) (Post Text)
     assert "routeTo sets single recipient" $
       all (\x -> to x == ["router"]) (runPipeline p posts)
 
@@ -280,7 +282,7 @@ main = do
           [ mkPost "human" [] "one",
             mkPost "human" [] "two"
           ]
-        p = broadcast ["a", "b"] :: Pipeline Post Post
+        p = broadcast ["a", "b"] :: Pipeline (Post Text) (Post Text)
         routed = runPipeline p posts
     assert "broadcast sets multiple recipients" $
       all (\x -> to x == ["a", "b"]) routed && length routed == 2
@@ -304,7 +306,7 @@ main = do
 
   do
     let h = processHost "shell" "echo" ["hello"]
-        sh :: Shard (StateT [Post] IO) [Post] [Post]
+        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
         sh = hostShard h
         p = mkPost "human" ["shell"] "ignored"
     (outs, st) <- closeShardIO sh [p] []
@@ -334,9 +336,9 @@ main = do
   putStrLn "FreeSeat Compose assoc"
 
   do
-    let p1 = forName "bot" :: Pipeline Post Post
-        p2 = mapP (\x -> x {body = "m:" <> body x}) :: Pipeline Post Post
-        p3 = routeTo "out" :: Pipeline Post Post
+    let p1 = forName "bot" :: Pipeline (Post Text) (Post Text)
+        p2 = mapP (\x -> x {body = "m:" <> body x}) :: Pipeline (Post Text) (Post Text)
+        p3 = routeTo "out" :: Pipeline (Post Text) (Post Text)
         leftA = SeatCompose (pipelineSeat p3) (SeatCompose (pipelineSeat p2) (pipelineSeat p1))
         rightA = SeatCompose (SeatCompose (pipelineSeat p3) (pipelineSeat p2)) (pipelineSeat p1)
         posts =
@@ -356,11 +358,11 @@ main = do
   putStrLn "Real host in shared StateT IO buffer"
 
   do
-    let p = forName "shell" :: Pipeline Post Post
+    let p = forName "shell" :: Pipeline (Post Text) (Post Text)
         h = processHost "shell" "echo" ["ok"]
         seat :: FreeSeat
         seat = SeatCompose (hostSeat h) (pipelineSeat p)
-        sh :: Shard (StateT [Post] IO) [Post] [Post]
+        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
         sh = interpretSeat seat
         posts =
           [ mkPost "human" ["shell"] "world",
@@ -406,7 +408,7 @@ main = do
               cliScrub = id
             }
         h = cliHost "fake" cli
-        sh :: Shard (StateT [Post] IO) [Post] [Post]
+        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
         sh = hostShard h
         p = mkPost "human" ["fake"] "hello\nworld"
     (outs, st) <- closeShardIO sh [p] []
@@ -441,7 +443,7 @@ main = do
 
   putStrLn "fork is id"
   do
-    let p :: Pipeline Post Post
+    let p :: Pipeline (Post Text) (Post Text)
         p = mapP (\x -> x {body = "m:" <> body x})
         posts = [mkPost "human" ["bot"] "hi"]
     (outs1, _) <- closeShardIO (interpretSeat (pipelineSeat p)) posts []
@@ -614,8 +616,8 @@ main = do
 
   putStrLn "STM composition agrees with pure behaviour"
   do
-    let p1 = filterP (\x -> body x /= "noise") :: Pipeline Post Post
-        p2 = mapP (\x -> x {body = "m:" <> body x}) :: Pipeline Post Post
+    let p1 = filterP (\x -> body x /= "noise") :: Pipeline (Post Text) (Post Text)
+        p2 = mapP (\x -> x {body = "m:" <> body x}) :: Pipeline (Post Text) (Post Text)
         seat = SeatCompose (pipelineSeat p2) (pipelineSeat p1)
         posts =
           [ mkPost "human" ["bot"] "hello",
@@ -657,7 +659,7 @@ main = do
 
   putStrLn "STM bag invariant under input permutation"
   do
-    let p = mapP (\x -> x {body = "p:" <> body x}) :: Pipeline Post Post
+    let p = mapP (\x -> x {body = "p:" <> body x}) :: Pipeline (Post Text) (Post Text)
         posts =
           [ mkPost "human" ["bot"] "one",
             mkPost "human" ["bot"] "two",

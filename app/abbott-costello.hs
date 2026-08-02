@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Two real process-backed agents (Abbott and Costello) wired through a
--- shared addressed log. Each agent is a 'Shard (StateT [Post] IO) [Post] [Post]'
+-- shared addressed log. Each agent is a 'Shard (StateT [Post Text] IO) [Post Text] [Post Text]'
 -- backed by a Perl script.
 module Main (main) where
 
@@ -17,22 +17,22 @@ import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import Prelude
 
-mkPost :: Text -> [Text] -> Text -> Post
-mkPost = Post
+mkPost :: Text -> [Text] -> Text -> Post Text
+mkPost a ds = Post a ds Nothing
 
--- | Close a same-type shard once under 'StateT [Post] IO'.
-runShardIO :: Shard (StateT [Post] IO) [Post] [Post] -> [Post] -> IO [Post]
+-- | Close a same-type shard once under 'StateT [Post Text] IO'.
+runShardIO :: Shard (StateT [Post Text] IO) [Post Text] [Post Text] -> [Post Text] -> IO [Post Text]
 runShardIO sh ins =
   fst <$> runStateT (runKleisli (close (conjoint sh) (companion sh)) ins) []
 
 -- | Build a process-backed shard named @who@ that replies to the sender.
-agentShard :: Text -> FilePath -> [String] -> Shard (StateT [Post] IO) [Post] [Post]
+agentShard :: Text -> FilePath -> [String] -> Shard (StateT [Post Text] IO) [Post Text] [Post Text]
 agentShard who script args =
   let h = (processHost who "perl" (script : args)) {Host.hostBodyMode = Host.BodyWhole}
    in Host.hostShard h
 
 -- | Pretty-print one post.
-printPost :: Post -> IO ()
+printPost :: Post Text -> IO ()
 printPost p =
   putStrLn $
     T.unpack (from p)
@@ -43,11 +43,11 @@ printPost p =
 
 -- | Run alternating turns until nobody replies or we hit the round limit.
 runDialogue ::
-  Shard (StateT [Post] IO) [Post] [Post] ->
-  Shard (StateT [Post] IO) [Post] [Post] ->
-  [Post] ->
+  Shard (StateT [Post Text] IO) [Post Text] [Post Text] ->
+  Shard (StateT [Post Text] IO) [Post Text] [Post Text] ->
+  [Post Text] ->
   Int ->
-  IO [Post]
+  IO [Post Text]
 runDialogue _ _ log0 0 = pure log0
 runDialogue abbott costello log0 rounds = go log0 0
   where

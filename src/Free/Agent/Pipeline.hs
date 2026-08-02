@@ -27,6 +27,7 @@ import Circuit (Ends (..), endsK)
 import Circuit.Agent (Name, Post (..), Shard, deliversTo)
 import Circuit.Category (Category (..))
 import Control.Monad.State.Class (MonadState (..))
+import Data.Text (Text)
 import Prelude hiding (id, (.))
 
 -- $setup
@@ -64,23 +65,23 @@ routeP :: (a -> [b]) -> Pipeline a b
 routeP = Route
 
 -- | Route every post to a single recipient.
-routeTo :: Name -> Pipeline Post Post
+routeTo :: Name -> Pipeline (Post Text) (Post Text)
 routeTo name = Map (\p -> p {to = [name]})
 
 -- | Route posts using a function from the post to a recipient list.
-routeBy :: (Post -> [Name]) -> Pipeline Post Post
+routeBy :: (Post Text -> [Name]) -> Pipeline (Post Text) (Post Text)
 routeBy f = Map (\p -> p {to = f p})
 
 -- | Broadcast every post to a list of recipients.
-broadcast :: [Name] -> Pipeline Post Post
+broadcast :: [Name] -> Pipeline (Post Text) (Post Text)
 broadcast names = Map (\p -> p {to = names})
 
 -- | Keep posts addressed to @name@ (via 'deliversTo').
-forName :: Name -> Pipeline Post Post
+forName :: Name -> Pipeline (Post Text) (Post Text)
 forName name = Filter (`deliversTo` [name])
 
 -- | Keep posts whose sender is @name@.
-fromName :: Name -> Pipeline Post Post
+fromName :: Name -> Pipeline (Post Text) (Post Text)
 fromName name = Filter (\p -> from p == name)
 
 -- | Fold a pipeline into a pure list function.
