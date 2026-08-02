@@ -18,7 +18,7 @@ import System.Exit (exitFailure)
 import Prelude
 
 mkPost :: Text -> [Text] -> Text -> Post Text
-mkPost a ds = Post a ds Nothing
+mkPost a ds = Post a ds []
 
 -- | Close a same-type shard once under 'StateT [Post Text] IO'.
 runShardIO :: Shard (StateT [Post Text] IO) [Post Text] [Post Text] -> [Post Text] -> IO [Post Text]

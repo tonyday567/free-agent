@@ -80,8 +80,8 @@ bodyArgs BodyWhole = (:[])
 -- The shard remembers the committed posts in its state.  On emit it runs the
 -- host on each post's body (prepared by 'hostBodyMode'), in order, and emits
 -- one reply post per output line per input post.  Each reply is addressed back
--- to the sender of its input post and threads onto that sender ('Just' the
--- sender's name).
+-- to the sender of its input post and threads onto that sender (the sender's
+-- name as sole parent).
 hostShard ::
   (MonadState [Post Text] m) =>
   Host m ->
@@ -96,7 +96,7 @@ hostShard h =
           traverse
             ( \p -> do
                 outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
-                pure [Post (hostName h) [from p] (Just (from p)) o | o <- outs]
+                pure [Post (hostName h) [from p] [from p] o | o <- outs]
             )
             xs
     )

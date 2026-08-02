@@ -69,7 +69,7 @@ assert msg ok =
       exitFailure
 
 mkPost :: Text -> [Text] -> Text -> Post Text
-mkPost a ds = Post a ds Nothing
+mkPost a ds = Post a ds []
 
 -- | Close a same-type shard once under State.
 closeShard :: Shard (State s) a a -> a -> s -> (a, s)
@@ -206,7 +206,7 @@ main = do
       map body outs == ["echo:hi", "echo:there"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
-        && all (\x -> thread x == Just "human") outs
+        && all (\x -> thread x == ["human"]) outs
     assert "host buffer cleared after emit" $ st == []
 
   do
@@ -260,7 +260,7 @@ main = do
       map body outs == ["echo:map:hello", "echo:world", "echo:map:again"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
-        && all (\x -> thread x == Just "human") outs
+        && all (\x -> thread x == ["human"]) outs
     assert "free seat buffer cleared after emit" $ st == []
 
   -------------------------------------------------------------------------
