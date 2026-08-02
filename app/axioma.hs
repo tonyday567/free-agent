@@ -5,6 +5,7 @@ module Main (main) where
 
 import Circuit (Ends (..), close)
 import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, raceA, runAgentShard, tape, toBag)
+import Circuit.Channel (Strength (..), Traced (..))
 import Circuit.Agent.Tensor
   ( awaitShard,
     fanInShard,
@@ -16,13 +17,14 @@ import Circuit.Category (Category (id, (.)), ObDict (..))
 import Circuit.Layer ((:~>))
 import Circuit.Poly (Mono, System (..), monoDir)
 import Circuit.Poly.Process (iterateSystem, runSystem)
+import Circuit.Process (delay, register, scan)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (when)
 import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Free.Agent.Diagram (diagramStep, diagramSteps)
+import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, mooreProcess)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, mkHost, hostShard, processHost)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Pipeline qualified as P
@@ -702,5 +704,44 @@ main = do
         == (snd (runSystem echo []) p0, fst (runSystem echo []))
     assert "tape agent: diagram steps mirror iterateSystem" $
       diagramSteps echo [] ins == iterateSystem echo [] ins
+
+  -------------------------------------------------------------------------
+  -- Bend with delay (endgame stage 1b): a stateful agent decomposes as a
+  -- stateless body plus cross-tick feedback; 'register' closes the state
+  -- wire with the one-tick 'delay' explicit in the wiring.
+  -------------------------------------------------------------------------
+  putStrLn "bend with delay"
+  do
+    -- scan's inject consumes the first input as state initialisation, so a
+    -- standalone delay emits the initial value, then echoes the tail.
+    -- (Inside register, where the feedback wire carries the body's own
+    -- state output, this is exactly "observable one tick late".)
+    assert "delay emits initial value, then the tail one tick late" $
+      scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 2, 3, 4]
+
+  do
+    let sysN = System (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: System (->) Int (Mono Int Int)
+    assert "register body with delay mirrors iterateSystem" $
+      scan (mooreProcess sysN 0) [1 .. 5] == iterateSystem sysN 0 [1 .. 5]
+
+  do
+    let echo =
+          tape (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
+            Agent (->) [Post Text] (Post Text) [Post Text]
+        ins = [mkPost "human" ["bot"] "one", mkPost "human" ["bot"] "two"]
+    assert "tape agent: register body with delay mirrors iterateSystem" $
+      scan (mooreProcess echo []) ins == iterateSystem echo [] ins
+
+  -- The bend-and-delay identity from Circuit.Process: for bodies whose
+  -- fixed point is independent of the initial feedback value, register's
+  -- wiring equals the cartesian trace with delay on the feedback wire.
+  do
+    let body = liftProcess (\(i, _s) -> (i * 2, 0 :: Int))
+        swapP = liftProcess (\(a, b) -> (b, a))
+        ins = [1, 2, 3, 4 :: Int]
+        viaRegister = scan (register 99 body) ins
+        viaTrace = scan (trace (swapP . (body . strength (delay 99)) . swapP)) ins
+    assert "register ≡ trace with delay on the feedback wire" $
+      viaRegister == viaTrace && viaRegister == [2, 4, 6, 8]
 
   putStrLn "All tests passed"
