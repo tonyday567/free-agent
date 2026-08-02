@@ -27,6 +27,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, meetingSkeleton, mooreProcess, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, mkHost, hostShard, processHost)
+import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Pipeline qualified as P
 import Free.Agent.Pipeline
@@ -769,5 +770,40 @@ main = do
       case branches [seed, a1, b1] a2 of
         [path] -> skeletonLabels (meetingSkeleton convo) == reverse (map T.unpack path)
         _ -> False
+
+  -------------------------------------------------------------------------
+  -- Hyper generators (endgame stage 3): copy/merge/braid for streams, and
+  -- 'both' — the merge of two agents.  Semantics on record: bag at the
+  -- wire, set at the name.
+  -------------------------------------------------------------------------
+  putStrLn "hyper generators"
+  do
+    let xs = [mkPost "a" [] "a1", mkPost "a" [] "a2"]
+        ys = [mkPost "b" [] "b1"]
+        lhs = copyP (mergeP (xs, ys))
+        rhs = merge2 (braidP (copy2 (xs, ys)))
+    assert "bialgebra holds exactly for singleton blocks" $
+      copyP (mergeP ([mkPost "a" [] "a1"], [mkPost "b" [] "b1"]))
+        == merge2 (braidP (copy2 ([mkPost "a" [] "a1"], [mkPost "b" [] "b1"])))
+    assert "bialgebra holds exactly for general streams" $
+      lhs == rhs
+
+  do
+    let agA = tape (\hist -> [mkPost "a" [] ("a:" <> T.pack (show (length hist)))]) :: Agent (->) [Post Text] (Post Text) [Post Text]
+        agB = tape (\hist -> [mkPost "b" [] ("b:" <> T.pack (show (length hist)))]) :: Agent (->) [Post Text] (Post Text) [Post Text]
+        ins = [mkPost "human" ["x"] "one", mkPost "human" ["x"] "two"]
+        outsAB = concat (iterateSystem (both agA agB) ([], []) ins)
+        outsBA = concat (iterateSystem (both agB agA) ([], []) ins)
+    assert "both commutes as a bag of outputs" $
+      toBag outsAB == toBag outsBA
+    assert "both emits left then right per step" $
+      map from outsAB == ["a", "b", "a", "b"]
+    assert "silent is a left zero for both" $
+      iterateSystem (both silent agA) ((), []) ins == iterateSystem agA [] ins
+    assert "silent is a right zero for both" $
+      iterateSystem (both agA silent) ([], ()) ins == iterateSystem agA [] ins
+    assert "both is not idempotent: bag at the wire (double-post)" $
+      length (concat (iterateSystem (both agA agA) ([], []) ins))
+        == 2 * length (concat (iterateSystem agA [] ins))
 
   putStrLn "All tests passed"
