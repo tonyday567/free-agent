@@ -28,6 +28,7 @@ import Data.Text.IO qualified as TIO
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, meetingSkeleton, mooreProcess, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, mkHost, hostShard, processHost)
 import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
+import Free.Agent.Meeting (AgentBox (..), meetLog, quoter, unchanged)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Pipeline qualified as P
 import Free.Agent.Pipeline
@@ -805,5 +806,27 @@ main = do
     assert "both is not idempotent: bag at the wire (double-post)" $
       length (concat (iterateSystem (both agA agA) ([], []) ins))
         == 2 * length (concat (iterateSystem agA [] ins))
+
+  -- Replay (endgame stage 5): swap one box, re-derive the meeting.
+  -- Deterministic quoters stand in for models; the tag is the "model".
+  putStrLn "replay"
+  do
+    let box who tg = AgentBox ([], []) (quoter who tg)
+        roster tg = [box "a" "A", box "b" tg, box "c" "C"]
+        seed = [mkPost "human" ["panel"] "Q"]
+        log1 = meetLog 2 (roster "B") seed
+        log2 = meetLog 2 (roster "B-ALT") seed
+    assert "replay with a fresh identical roster reproduces the log" $
+      log1 == meetLog 2 (roster "B") seed
+    assert "the swap takes effect in round 1" $
+      log1 !! 2 /= log2 !! 2
+    assert "unchanged subtrees reproduce identical posts" $
+      unchanged ["b"] log1 == unchanged ["b"] log2
+    assert "unchanged subtree is seed plus the unswapped round-1 posts" $
+      length (unchanged ["b"] log1) == 3
+    assert "posts downstream of the swap differ" $
+      drop 4 log1 /= drop 4 log2
+    assert "a same-named swap is structurally invisible" $
+      map thread log1 == map thread log2
 
   putStrLn "All tests passed"
