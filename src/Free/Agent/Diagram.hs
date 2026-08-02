@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 
 -- | Bridge: agents as string diagrams (stage 1 of endgame-path).
 --
@@ -21,6 +22,10 @@
 -- 'Circuit.Poly.StringDiagram' surface itself (a delay box and a trace
 -- combinator over a 'Process' base); the oracles pin the semantics the
 -- surface will need to reproduce.
+--
+-- Stage 2: 'meetingSkeleton' reads a conversation back as a drawing tree —
+-- the sequential fragment of the unification claim (the log records the
+-- wiring).  Forks and merges wait for the stage-3 generators.
 module Free.Agent.Diagram
   ( agentDiagram,
     diagramStep,
@@ -28,13 +33,17 @@ module Free.Agent.Diagram
     liftProcess,
     mooreBody,
     mooreProcess,
+    meetingSkeleton,
+    skeletonLabels,
   )
 where
 
+import Circuit.Agent (Post (..))
 import Circuit.Poly (Mono, System)
 import Circuit.Poly.Process (runSystem, systemAsLens)
-import Circuit.Poly.StringDiagram (Diagram, box, runDiagram)
+import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
 import Circuit.Process (Process, pattern P, register)
+import Data.Text qualified as T
 
 -- | A monomial system as a one-box diagram.
 --
@@ -82,3 +91,29 @@ mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runSystem sys s) i in (fst
 -- Oracle-pinned: @scan (mooreProcess sys s0) is == iterateSystem sys s0 is@.
 mooreProcess :: System (->) s (Mono i o) -> s -> Process i o
 mooreProcess sys s0 = register s0 (mooreBody sys)
+
+-- | The drawing skeleton of a conversation: each post is a box labelled by
+-- its sender, chained in log order (oldest first).  This is the sequential
+-- fragment of "the log is the diagram of the meeting that produced it".
+-- Forks (one parent, many replies) and merges ('synthesis') need the
+-- copy/merge generators of stage 3 — chains are all this skeleton can see.
+meetingSkeleton :: [Post a] -> SDiagram
+meetingSkeleton = foldr (SThenD . SBox . T.unpack . from) SWire
+
+-- | The box labels of a skeleton, in composition order.
+skeletonLabels :: SDiagram -> [String]
+skeletonLabels SWire = []
+skeletonLabels (SBox l) = [l]
+skeletonLabels SPrismBox = ["prism"]
+skeletonLabels (SBeside f g) = skeletonLabels f ++ skeletonLabels g
+skeletonLabels (SThenD f g) = skeletonLabels f ++ skeletonLabels g
+skeletonLabels SBend = ["cup"]
+skeletonLabels SBend' = ["cap"]
+skeletonLabels (STurn f) = skeletonLabels f
+skeletonLabels SUnitL = ["unitL"]
+skeletonLabels SUnitL' = ["unitL'"]
+skeletonLabels SUnitR = ["unitR"]
+skeletonLabels SUnitR' = ["unitR'"]
+skeletonLabels SAssoc = ["assoc"]
+skeletonLabels SAssoc' = ["assoc'"]
+skeletonLabels SSwap = ["swap"]

@@ -4,7 +4,7 @@
 module Main (main) where
 
 import Circuit (Ends (..), close)
-import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, raceA, runAgentShard, tape, toBag)
+import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, branches, raceA, runAgentShard, tape, toBag)
 import Circuit.Channel (Strength (..), Traced (..))
 import Circuit.Agent.Tensor
   ( awaitShard,
@@ -17,6 +17,7 @@ import Circuit.Category (Category (id, (.)), ObDict (..))
 import Circuit.Layer ((:~>))
 import Circuit.Poly (Mono, System (..), monoDir)
 import Circuit.Poly.Process (iterateSystem, runSystem)
+import Circuit.Poly.StringDiagram (SDiagram (..))
 import Circuit.Process (delay, register, scan)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (when)
@@ -24,7 +25,7 @@ import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, mooreProcess)
+import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, meetingSkeleton, mooreProcess, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, mkHost, hostShard, processHost)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Pipeline qualified as P
@@ -743,5 +744,30 @@ main = do
         viaTrace = scan (trace (swapP . (body . strength (delay 99)) . swapP)) ins
     assert "register ≡ trace with delay on the feedback wire" $
       viaRegister == viaTrace && viaRegister == [2, 4, 6, 8]
+
+  -------------------------------------------------------------------------
+  -- Meeting skeleton (endgame stage 2): a conversation reads back as a
+  -- drawing tree.  Sequential fragment only — forks and merges wait for
+  -- the stage-3 copy/merge generators.
+  -------------------------------------------------------------------------
+  putStrLn "meeting skeleton"
+  do
+    let seatA = hostShard (mkHost "a" (pure . map ("a:" <>)))
+        seatB = hostShard (mkHost "b" (pure . map ("b:" <>)))
+        turn sh p = case closeShard sh [p] [] of
+          ([r], _) -> r
+          _ -> error "expected one reply"
+        seed = mkPost "human" ["a"] "start"
+        a1 = turn seatA seed
+        b1 = turn seatB a1
+        a2 = turn seatA b1
+        convo = [seed, a1, b1, a2]
+    assert "skeleton of a ping-pong is the speaker chain" $
+      meetingSkeleton convo
+        == SThenD (SBox "human") (SThenD (SBox "a") (SThenD (SBox "b") (SThenD (SBox "a") SWire)))
+    assert "single-thread ancestry is the skeleton's label sequence" $
+      case branches [seed, a1, b1] a2 of
+        [path] -> skeletonLabels (meetingSkeleton convo) == reverse (map T.unpack path)
+        _ -> False
 
   putStrLn "All tests passed"

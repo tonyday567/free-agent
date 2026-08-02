@@ -82,6 +82,7 @@ executable free-agent-axioma
     filepath >=1.4 && <1.6,
     free-agent,
     mtl >=2.3 && <2.4,
+    string-diagrams,
     text >=2.0 && <3,
 
 executable free-agent-abbott-costello
