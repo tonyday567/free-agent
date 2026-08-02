@@ -1,26 +1,39 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | One-shot host algebra without a hermes dependency.
+-- | One-shot host algebra over circuits-agent seats.
 --
 -- A 'Host' is a named effectful seat that receives arguments drawn from the
--- body of an incoming post and produces lines of output.  It is intentionally
--- minimal: real session management stays in the host harness (hermes,
--- muster-agent, etc.).
+-- body of an incoming post and produces lines of output.  Live CLI agents
+-- are 'Cli' recipes from 'Circuit.Agent.Cli' — session management (scrape,
+-- resume, stale fallback) lives there, not here.
 module Free.Agent.Host
   ( BodyMode (..),
     Host (..),
-    host,
+    HostConfig (..),
+    mkHost,
     hostShard,
     processHost,
+    cliHost,
+    hermesHost,
+    apiHost,
+    defaultHostConfig,
   )
 where
 
 import Circuit (Ends (..), endsK)
 import Circuit.Agent (Post (..), Shard)
+import Circuit.Agent.Cli (Cli, cliQuery, hermesCli)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.State.Class (MonadState (..))
+import Data.Aeson
+import Data.ByteString.Char8 qualified as BC8
+import Data.ByteString.Lazy qualified as BL
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import Network.HTTP.Client
+import Network.HTTP.Client.TLS (tlsManagerSettings)
+import Network.HTTP.Types.Status (statusCode)
 import System.Process (readProcess)
 
 -- $setup
@@ -53,8 +66,8 @@ data Host m = Host
   }
 
 -- | Smart constructor with the default 'BodyWords' mode.
-host :: Text -> ([Text] -> m [Text]) -> Host m
-host name f = Host name BodyWords f
+mkHost :: Text -> ([Text] -> m [Text]) -> Host m
+mkHost name f = Host name BodyWords f
 
 -- | Split a post body according to the host's 'BodyMode'.
 bodyArgs :: BodyMode -> Text -> [Text]
@@ -87,12 +100,11 @@ hostShard h =
             xs
     )
 
--- | Sketch of a real host backed by an external process.
+-- | A host backed by an external process.
 --
 -- The command receives the fixed @args@ followed by the prepared post body
 -- (one argument when 'BodyWhole', whitespace-split words by default).  Output
--- lines become reply posts.  This uses 'System.Process.readProcess' and lives
--- in 'IO' lifted through whatever state transformer holds the shard buffer.
+-- lines become reply posts.  Uses 'System.Process.readProcess'.
 processHost ::
   (MonadIO m) =>
   -- | Host name.
@@ -110,3 +122,149 @@ processHost name cmd args =
         out <- liftIO (readProcess cmd (args ++ map T.unpack ws) "")
         pure (map T.pack (lines out))
     }
+
+-- | A host backed by a live CLI agent recipe ('Circuit.Agent.Cli').
+--
+-- Each prepared body becomes one 'cliQuery'; session scrape/resume/stale
+-- fallback happens inside the recipe.  One reply text per body (multi-line
+-- bodies and replies are preserved).
+cliHost ::
+  (MonadIO m) =>
+  -- | Host name (used as the 'from' field of reply posts).
+  Text ->
+  -- | Invocation recipe.
+  Cli ->
+  Host m
+cliHost name cli =
+  Host
+    { hostName = name,
+      hostBodyMode = BodyWhole,
+      hostRun = traverse (liftIO . cliQuery cli)
+    }
+
+-- | Hermes host on the shared 'Cli' seat.
+--
+-- Runs @hermes chat -q@ per body (see 'hermesCli'), prepending the supplied
+-- system prompt to the body in the query.  Sessions persist across calls
+-- via @sessionFile@; a stale session falls back to fresh.
+--
+-- The caller is responsible for building the system prompt; this function
+-- knows nothing about design documents, protocol cards, or magic wording.
+hermesHost ::
+  (MonadIO m) =>
+  -- | Host name (used as the 'from' field of reply posts).
+  Text ->
+  -- | System prompt text prepended to every body.
+  Text ->
+  -- | Session file for cross-call context.
+  FilePath ->
+  Host m
+hermesHost name systemPrompt sessionFile =
+  Host
+    { hostName = name,
+      hostBodyMode = BodyWhole,
+      hostRun = traverse runOne
+    }
+  where
+    cli = hermesCli (Just "deepseek-v4-pro") (Just "deepseek") sessionFile
+    runOne body =
+      liftIO (cliQuery cli (systemPrompt <> "\n\nUser message:\n" <> body))
+
+-- | Connection configuration for a direct API host.
+data HostConfig = HostConfig
+  { -- | Identity / from-field for reply posts.
+    agentName :: Text,
+    -- | API base URL, e.g. "https://api.deepseek.com/v1".
+    baseUrl :: Text,
+    -- | Model name, e.g. "deepseek-v4-pro".
+    model :: Text,
+    -- | API key.
+    key :: Text
+  }
+  deriving (Show, Eq)
+
+-- | Sensible defaults for an OpenAI-compatible DeepSeek host.
+defaultHostConfig :: HostConfig
+defaultHostConfig =
+  HostConfig
+    { agentName = "agent",
+      baseUrl = "https://api.deepseek.com/v1",
+      model = "deepseek-v4-pro",
+      key = ""
+    }
+
+-- | A host backed by a direct OpenAI-compatible chat completions API call.
+--
+-- The caller supplies the system prompt; the post body becomes the user
+-- message. There is no tooling, memory, or context-file injection.
+apiHost ::
+  (MonadIO m) =>
+  -- | Connection configuration.
+  HostConfig ->
+  -- | System prompt.
+  Text ->
+  Host m
+apiHost cfg systemPrompt =
+  Host
+    { hostName = agentName cfg,
+      hostBodyMode = BodyWhole,
+      hostRun = \bodies -> do
+        let userMessage = T.unlines bodies
+        rsp <- liftIO $ chatCompletion cfg systemPrompt userMessage
+        pure [rsp]
+    }
+
+chatCompletion :: HostConfig -> Text -> Text -> IO Text
+chatCompletion cfg systemPrompt userMessage = do
+  manager <- newManager tlsManagerSettings
+  initialRequest <- parseRequest (T.unpack (baseUrl cfg <> "/chat/completions"))
+  let request =
+        initialRequest
+          { method = "POST",
+            requestHeaders =
+              [ ("Content-Type", "application/json"),
+                ("Authorization", "Bearer " <> BC8.pack (T.unpack (key cfg)))
+              ],
+            requestBody =
+              RequestBodyLBS $
+                encode $
+                  object
+                    [ "model" .= model cfg,
+                      "messages"
+                        .= [ object ["role" .= ("system" :: Text), "content" .= systemPrompt],
+                             object ["role" .= ("user" :: Text), "content" .= userMessage]
+                           ],
+                      "max_tokens" .= (4096 :: Int)
+                    ]
+          }
+  response <- httpLbs request manager
+  let status = statusCode (responseStatus response)
+      body = responseBody response
+  if status < 200 || status >= 300
+    then pure ("🔴 HTTP " <> T.pack (show status) <> ": " <> TE.decodeUtf8 (BL.toStrict body))
+    else case eitherDecode body of
+      Left err -> pure ("🔴 JSON error: " <> T.pack err)
+      Right cr -> case responseChoices cr of
+        [] -> pure "🔴 empty choices"
+        (c : _) -> pure (messageContent (message c))
+
+newtype ChatResponse = ChatResponse {responseChoices :: [Choice]}
+  deriving (Show)
+
+newtype Choice = Choice {message :: Message}
+  deriving (Show)
+
+newtype Message = Message {messageContent :: Text}
+  deriving (Show)
+
+instance FromJSON ChatResponse where
+  parseJSON = withObject "ChatResponse" $ \v ->
+    ChatResponse <$> v .: "choices"
+
+instance FromJSON Choice where
+  parseJSON = withObject "Choice" $ \v ->
+    Choice <$> v .: "message"
+
+instance FromJSON Message where
+  parseJSON = withObject "Message" $ \v ->
+    Message <$> v .: "content"
