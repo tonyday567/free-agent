@@ -58,7 +58,7 @@ library
     Free.Agent.Meeting
     Free.Agent.Derivation
   build-depends:
-    aeson >=2.1 && <2.3,
+    aeson >=2.1 && <2.4,
     base >=4.18 && <5,
     bytestring >=0.11 && <0.13,
     circuits >=0.3 && <0.4,
@@ -86,6 +86,21 @@ executable free-agent-axioma
     free-agent,
     mtl >=2.3 && <2.4,
     string-diagrams,
+    text >=2.0 && <3,
+
+executable free-agent-render-meeting
+  import: ghc-options-stanza
+  import: ghc2024-stanza
+  hs-source-dirs: app
+  main-is: render-meeting.hs
+  build-depends:
+    base >=4.18 && <5,
+    chart-svg >=0.8 && <0.9,
+    circuits-agent,
+    directory >=1.3 && <1.4,
+    filepath >=1.4 && <1.6,
+    free-agent,
+    strings-svg >=0.1 && <0.2,
     text >=2.0 && <3,
 
 executable free-agent-abbott-costello

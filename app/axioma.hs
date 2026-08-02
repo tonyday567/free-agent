@@ -82,6 +82,18 @@ assert msg ok =
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a ds []
 
+-- | The 'SBox' labels of a meeting skeleton, in composition order (meeting
+-- skeletons contain only boxes, spiders and swaps besides wires).
+boxLabels :: SDiagram -> [String]
+boxLabels = filter (`notElem` ["spider", "swap"]) . skeletonLabels
+
+-- | Count the spiders of a given arity in a diagram tree.
+countSpiders :: (Int, Int) -> SDiagram -> Int
+countSpiders (m, n) (SSpider m' n') = if m == m' && n == n' then 1 else 0
+countSpiders mn (SBeside f g) = countSpiders mn f + countSpiders mn g
+countSpiders mn (SThenD f g) = countSpiders mn f + countSpiders mn g
+countSpiders _ _ = 0
+
 -- | Close a same-type shard once under State.
 closeShard :: Shard (State s) a a -> a -> s -> (a, s)
 closeShard sh x s0 =
@@ -808,6 +820,29 @@ main = do
         hgD = normalise (meetingSkeleton [d])
     assert "dangling parent: a free input wire feeds the box" $
       hgInArity hgD == 1 && Wire [InB 0] [PortEnd "a" In 0] `elem` hgWires hgD
+
+  -------------------------------------------------------------------------
+  -- Panel meeting (stage L2d): the shape of the committed SVG artifact —
+  -- one seed fork, crossing round-2 wires, one synthesis merge.
+  -------------------------------------------------------------------------
+  putStrLn "panel meeting"
+  do
+    let seed = mkPost "human" ["agent-1", "agent-2", "agent-3"] "Q"
+        a1 = replyTo "agent-1" seed "A1"
+        b1 = replyTo "agent-2" seed "B1"
+        c1 = replyTo "agent-3" seed "C1"
+        a2 = replyTo "agent-1" b1 "A2"
+        b2 = replyTo "agent-2" c1 "B2"
+        c2 = replyTo "agent-3" a1 "C2"
+        synth = synthesis "synth" ["human"] [a2, b2, c2] "S"
+        skel = meetingSkeleton [seed, a1, b1, c1, a2, b2, c2, synth]
+    assert "panel skeleton has the 8 boxes in label order" $
+      boxLabels skel
+        == ["human", "agent-1", "agent-2", "agent-3", "agent-1", "agent-2", "agent-3", "synth"]
+    assert "the seed's fork spider is visible (SSpider 1 3)" $
+      countSpiders (1, 3) skel == 1
+    assert "the synthesis merge spider is visible (SSpider 3 1)" $
+      countSpiders (3, 1) skel == 1
 
   -------------------------------------------------------------------------
   -- Hyper generators (endgame stage 3): copy/merge/braid for streams, and
