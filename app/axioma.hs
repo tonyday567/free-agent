@@ -4,7 +4,7 @@
 module Main (main) where
 
 import Circuit (Ends (..), close)
-import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, branches, raceA, runAgentShard, tape, toBag)
+import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, branches, cone, raceA, runAgentShard, sortNub, tape, toBag)
 import Circuit.Channel (Strength (..), Traced (..))
 import Circuit.Agent.Tensor
   ( awaitShard,
@@ -23,8 +23,10 @@ import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (when)
 import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Text (Text)
+import Data.List (inits)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Free.Agent.Derivation (chaseLog, dParents, derivation, valid)
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, meetingSkeleton, mooreProcess, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, mkHost, hostShard, processHost)
 import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
@@ -828,5 +830,28 @@ main = do
       drop 4 log1 /= drop 4 log2
     assert "a same-named swap is structurally invisible" $
       map thread log1 == map thread log2
+
+  -- Derivations as 2-cells (endgame stage 6): the squares are recoverable
+  -- from the log; pasting is roster merge (horizontal) and time (vertical).
+  putStrLn "derivations as 2-cells"
+  do
+    let box who tg = AgentBox ([], []) (quoter who tg)
+        seed = [mkPost "human" ["panel"] "Q"]
+        log3 = meetLog 2 [box "a" "A", box "b" "B", box "c" "C"] seed
+    assert "every square in a meeting log is valid" $
+      and [valid prior p | (prior, p) <- zip (inits log3) log3]
+    assert "vertical pasting: the chase from the last post covers the log" $
+      toBag (chaseLog log3) == toBag log3
+    assert "vertical pasting: the chase visits exactly the cone names" $
+      sortNub (map from (chaseLog (take 4 log3))) == cone (take 3 log3) (log3 !! 3)
+    assert "a square's vertical sources are the resolved parents" $
+      case drop 5 log3 of
+        (p : _) -> map from (dParents (derivation (take 5 log3) p)) == thread p
+        _ -> False
+    let boxA = AgentBox ([], []) (quoter "a" "A")
+        boxB = AgentBox ([], []) (quoter "b" "B")
+        merged = AgentBox (([], []), ([], [])) (both (quoter "a" "A") (quoter "b" "B"))
+    assert "horizontal pasting: loop [both a b] ≡ loop [a, b]" $
+      meetLog 2 [merged] seed == meetLog 2 [boxA, boxB] seed
 
   putStrLn "All tests passed"
