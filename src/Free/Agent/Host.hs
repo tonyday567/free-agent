@@ -15,6 +15,7 @@ module Free.Agent.Host
     processHost,
     cliHost,
     hermesHost,
+    kimiHost,
     apiHost,
     defaultHostConfig,
   )
@@ -22,7 +23,7 @@ where
 
 import Circuit (Ends (..), endsK)
 import Circuit.Agent (Post (..), Shard)
-import Circuit.Agent.Cli (Cli, cliQuery, hermesCli)
+import Circuit.Agent.Cli (Cli, cliQuery, hermesCli, kimiCli)
 import Circuit.Parser.Json (Json (..), encodeJson)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.State.Class (MonadState (..))
@@ -144,6 +145,21 @@ cliHost name cli =
       hostBodyMode = BodyWhole,
       hostRun = traverse (liftIO . cliQuery cli)
     }
+
+-- | Kimi host on the shared 'Cli' seat.
+--
+-- Runs @kimi -p@ per body (see 'kimiCli'), with optional @-m <model>@ and
+-- session resume via @sessionFile@.  A stale session falls back to fresh.
+kimiHost ::
+  (MonadIO m) =>
+  -- | Host name (used as the 'from' field of reply posts).
+  Text ->
+  -- | Model name passed to @kimi -m@, if any.
+  Maybe Text ->
+  -- | Session file for cross-call context.
+  FilePath ->
+  Host m
+kimiHost name model sessionFile = cliHost name (kimiCli model sessionFile)
 
 -- | Hermes host on the shared 'Cli' seat.
 --
