@@ -23,14 +23,16 @@ where
 import Circuit (Ends (..), endsK)
 import Circuit.Agent (Post (..), Shard)
 import Circuit.Agent.Cli (Cli, cliQuery, hermesCli)
+import Circuit.Parser.Json (Json (..), encodeJson)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.State.Class (MonadState (..))
-import Data.Aeson
+import Data.Aeson (FromJSON (..), eitherDecode, withObject, (.:))
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Vector qualified as V
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -228,15 +230,20 @@ chatCompletion cfg systemPrompt userMessage = do
               ],
             requestBody =
               RequestBodyLBS $
-                encode $
-                  object
-                    [ "model" .= model cfg,
-                      "messages"
-                        .= [ object ["role" .= ("system" :: Text), "content" .= systemPrompt],
-                             object ["role" .= ("user" :: Text), "content" .= userMessage]
-                           ],
-                      "max_tokens" .= (4096 :: Int)
-                    ]
+                BL.fromStrict $
+                  encodeJson $
+                    JObject
+                      [ ("model", JString (model cfg)),
+                        ( "messages",
+                          JArray
+                            ( V.fromList
+                                [ JObject [("role", JString "system"), ("content", JString systemPrompt)],
+                                  JObject [("role", JString "user"), ("content", JString userMessage)]
+                                ]
+                            )
+                        ),
+                        ("max_tokens", JNumber 4096)
+                      ]
           }
   response <- httpLbs request manager
   let status = statusCode (responseStatus response)
