@@ -11,9 +11,10 @@
 --   watch:
 --     free-agent-bus watch [ROOT] NAME [NAME...]
 --
--- Watch tails ROOT/log.jsonl and prints stamped JSONL lines addressed to any
--- of the given names. This is the out-of-process agent read path; agents can
--- pipe watch output into their loop and write replies back through the scribe.
+-- Watch tails ROOT/log.jsonl via fsnotify and prints stamped JSONL lines
+-- addressed to any of the given names. This is the out-of-process agent read
+-- path; agents can pipe watch output into their loop and write replies back
+-- through the scribe.
 module Main (main) where
 
 import Circuit.Agent (Name, Post (..), deliversTo)
@@ -29,11 +30,17 @@ import Free.Agent.Bus (closeBus, openBus, scribeIO)
 import System.Directory (doesFileExist)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FSNotify
+  ( Event (..),
+    WatchManager,
+    watchDir,
+    withManager,
+  )
 import System.IO
   ( BufferMode (LineBuffering),
     Handle,
-    IOMode (ReadMode),
+    IOMode (AppendMode, ReadMode),
     SeekMode (AbsoluteSeek),
     hFileSize,
     hIsEOF,
@@ -41,6 +48,7 @@ import System.IO
     hSetBuffering,
     openFile,
     stdout,
+    withFile,
   )
 
 main :: IO ()
@@ -87,22 +95,30 @@ runWatch args = do
     TIO.putStrLn "🔴 watch requires at least one name"
     exitFailure
   let path = root </> "log.jsonl"
+      logName = takeFileName path
+      dir = takeDirectory path
   exists <- doesFileExist path
   unless exists $ do
-    TIO.putStrLn ("🔴 log not found: " <> T.pack path)
-    exitFailure
+    -- Create an empty log so watchers have something to tail.
+    withFile path AppendMode (\_ -> pure ())
   h <- openFile path ReadMode
+  hSetBuffering h LineBuffering
   hSeek h AbsoluteSeek 0
   -- Skip existing content; agents start watching from now.
   size <- hFileSize h
   hSeek h AbsoluteSeek size
-  forever $ do
-    eof <- hIsEOF h
-    if eof
-      then threadDelay 500000 -- 0.5s poll
-      else do
+  withManager $ \mgr -> do
+    _ <- watchDir mgr dir (\ev -> takeFileName (eventPath ev) == logName) $ \_ev -> do
+      drain h names
+    -- Block forever; the watch listener runs in the background.
+    forever (threadDelay 1000000)
+  where
+    drain h names' = do
+      eof <- hIsEOF h
+      unless eof $ do
         line <- TIO.hGetLine h
-        traverse_ TIO.putStrLn (filterStored names line)
+        traverse_ TIO.putStrLn (filterStored names' line)
+        drain h names'
 
 -- | Parse a raw log line and return it only if it is addressed to one of the
 -- subscribed names.

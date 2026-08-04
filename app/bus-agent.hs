@@ -34,7 +34,13 @@ import Free.Agent.Seat (FreeSeat, hostSeat, interpretSeat)
 import System.Directory (doesFileExist, findExecutable)
 import System.Environment (getArgs, getExecutablePath)
 import System.Exit (exitFailure)
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FSNotify
+  ( Event (..),
+    WatchManager,
+    watchDir,
+    withManager,
+  )
 import System.IO
   ( BufferMode (LineBuffering),
     Handle,
@@ -113,7 +119,7 @@ runOne seat stored = do
   (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
   pure [out {thread = sortNub (parentId : thread out)} | out <- outs]
 
--- | Poll-tail a log file and invoke the callback for every new stored post
+-- | Event-tail a log file and invoke the callback for every new stored post
 -- addressed to any of the subscribed names.
 tailLog :: FilePath -> [Name] -> (StoredPost -> IO ()) -> IO ()
 tailLog path names cb = do
@@ -125,14 +131,21 @@ tailLog path names cb = do
   hSetBuffering h LineBuffering
   size <- hFileSize h
   hSeek h AbsoluteSeek size
-  forever $ do
-    eof <- hIsEOF h
-    if eof
-      then threadDelay 500000 -- 0.5s poll
-      else do
-        line <- TIO.hGetLine h
-        traverse_ cb (filterStored names line)
+  let logName = takeFileName path
+      dir = takeDirectory path
+  withManager $ \mgr -> do
+    _ <- watchDir mgr dir (\ev -> takeFileName (eventPath ev) == logName) $ \_ev -> do
+      drain h names cb
+    -- Block forever; the watch listener runs in the background.
+    forever (threadDelay 1000000)
   where
+    drain h names' cb' = do
+      eof <- hIsEOF h
+      unless eof $ do
+        line <- TIO.hGetLine h
+        traverse_ cb' (filterStored names' line)
+        drain h names' cb'
+
     filterStored :: [Name] -> Text -> Maybe StoredPost
     filterStored names' line = do
       stored <- parseLine line
