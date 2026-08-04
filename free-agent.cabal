@@ -153,3 +153,20 @@ executable free-agent-bus-agent
     process >=1.6 && <1.7,
     text >=2.0 && <3,
 
+executable free-agent-bus-hermes
+  import: ghc-options-stanza
+  import: ghc2024-stanza
+  hs-source-dirs: app
+  main-is: bus-hermes.hs
+  build-depends:
+    base >=4.18 && <5,
+    circuits,
+    circuits-agent,
+    directory >=1.3 && <1.4,
+    filepath >=1.4 && <1.6,
+    free-agent,
+    fsnotify >=0.4 && <0.5,
+    mtl >=2.3 && <2.4,
+    process >=1.6 && <1.7,
+    text >=2.0 && <3,
+
