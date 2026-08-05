@@ -229,7 +229,7 @@ main = do
       map body outs == ["echo:hi", "echo:there"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
-        && all (\x -> thread x == ["human"]) outs
+        && all (\x -> thread x == []) outs
     assert "host buffer cleared after emit" $ st == []
 
   do
@@ -283,7 +283,7 @@ main = do
       map body outs == ["echo:map:hello", "echo:world", "echo:map:again"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
-        && all (\x -> thread x == ["human"]) outs
+        && all (\x -> thread x == []) outs
     assert "free seat buffer cleared after emit" $ st == []
 
   -------------------------------------------------------------------------
@@ -769,15 +769,10 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "meeting skeleton"
   do
-    let seatA = hostShard (mkHost "a" (pure . map ("a:" <>)))
-        seatB = hostShard (mkHost "b" (pure . map ("b:" <>)))
-        turn sh p = case closeShard sh [p] [] of
-          ([r], _) -> r
-          _ -> error "expected one reply"
-        seed = mkPost "human" ["a"] "start"
-        a1 = turn seatA seed
-        b1 = turn seatB a1
-        a2 = turn seatA b1
+    let seed = mkPost "human" ["a"] "start"
+        a1 = replyTo "a" 0 seed "ack"
+        b1 = replyTo "b" 1 a1 "ack"
+        a2 = replyTo "a" 2 b1 "ack"
         convo = [seed, a1, b1, a2]
     assert "skeleton of a ping-pong is the speaker chain (hyper-normal form)" $
       hyperEquiv (meetingSkeleton convo) $
@@ -790,8 +785,8 @@ main = do
   putStrLn "meeting skeleton: forks, syntheses, dangling parents"
   do
     let p0 = mkPost "a" [] "seed"
-        r1 = replyTo "b" p0 "r1"
-        r2 = replyTo "c" p0 "r2"
+        r1 = replyTo "b" 0 p0 "r1"
+        r2 = replyTo "c" 0 p0 "r2"
         forkSkel = meetingSkeleton [p0, r1, r2]
         hgFork = normalise forkSkel
     assert "fork: one wire joins the parent's output to both replies' inputs" $
@@ -805,7 +800,7 @@ main = do
     let pA = mkPost "a" [] "1"
         pB = mkPost "b" [] "2"
         pC = mkPost "c" [] "3"
-        s = synthesis "s" [] [pA, pB, pC] "sum"
+        s = synthesis "s" [] [0, 1, 2] "sum"
         synSkel = meetingSkeleton [pA, pB, pC, s]
         hgSyn = normalise synSkel
     assert "synthesis: the box input descends from a merge of exactly the three parents' outputs" $
@@ -816,7 +811,7 @@ main = do
       "spider" `elem` skeletonLabels synSkel
 
   do
-    let d = (mkPost "a" [] "x") {thread = ["ghost"]}
+    let d = (mkPost "a" [] "x") {thread = [99]}
         hgD = normalise (meetingSkeleton [d])
     assert "dangling parent: a free input wire feeds the box" $
       hgInArity hgD == 1 && Wire [InB 0] [PortEnd "a" In 0] `elem` hgWires hgD
@@ -828,13 +823,13 @@ main = do
   putStrLn "panel meeting"
   do
     let seed = mkPost "human" ["agent-1", "agent-2", "agent-3"] "Q"
-        a1 = replyTo "agent-1" seed "A1"
-        b1 = replyTo "agent-2" seed "B1"
-        c1 = replyTo "agent-3" seed "C1"
-        a2 = replyTo "agent-1" b1 "A2"
-        b2 = replyTo "agent-2" c1 "B2"
-        c2 = replyTo "agent-3" a1 "C2"
-        synth = synthesis "synth" ["human"] [a2, b2, c2] "S"
+        a1 = replyTo "agent-1" 0 seed "A1"
+        b1 = replyTo "agent-2" 0 seed "B1"
+        c1 = replyTo "agent-3" 0 seed "C1"
+        a2 = replyTo "agent-1" 2 b1 "A2"
+        b2 = replyTo "agent-2" 3 c1 "B2"
+        c2 = replyTo "agent-3" 1 a1 "C2"
+        synth = synthesis "synth" ["human"] [4, 5, 6] "S"
         skel = meetingSkeleton [seed, a1, b1, c1, a2, b2, c2, synth]
     assert "panel skeleton has the 8 boxes in label order" $
       boxLabels skel
@@ -883,7 +878,7 @@ main = do
   -- Deterministic quoters stand in for models; the tag is the "model".
   putStrLn "replay"
   do
-    let box who tg = AgentBox ([], []) (quoter who tg)
+    let box who tg = AgentBox ([], [], [], []) (quoter who tg)
         roster tg = [box "a" "A", box "b" tg, box "c" "C"]
         seed = [mkPost "human" ["panel"] "Q"]
         log1 = meetLog 2 (roster "B") seed
@@ -898,29 +893,32 @@ main = do
       length (unchanged ["b"] log1) == 3
     assert "posts downstream of the swap differ" $
       drop 4 log1 /= drop 4 log2
-    assert "a same-named swap is structurally invisible" $
+    assert "thread ids reproduce exactly between identical replays" $
       map thread log1 == map thread log2
 
   -- Derivations as 2-cells (endgame stage 6): the squares are recoverable
   -- from the log; pasting is roster merge (horizontal) and time (vertical).
   putStrLn "derivations as 2-cells"
   do
-    let box who tg = AgentBox ([], []) (quoter who tg)
+    let box who tg = AgentBox ([], [], [], []) (quoter who tg)
         seed = [mkPost "human" ["panel"] "Q"]
         log3 = meetLog 2 [box "a" "A", box "b" "B", box "c" "C"] seed
     assert "every square in a meeting log is valid" $
       and [valid prior p | (prior, p) <- zip (inits log3) log3]
-    assert "vertical pasting: the chase from the last post covers the log" $
-      toBag (chaseLog log3) == toBag log3
+    assert "vertical pasting: the chase from the last post covers its cone" $
+      sortNub (map from (chaseLog log3)) == cone (init log3) (last log3)
     assert "vertical pasting: the chase visits exactly the cone names" $
       sortNub (map from (chaseLog (take 4 log3))) == cone (take 3 log3) (log3 !! 3)
     assert "a square's vertical sources are the resolved parents" $
       case drop 5 log3 of
-        (p : _) -> map from (dParents (derivation (take 5 log3) p)) == thread p
+        (p : _) ->
+          let prior = take 5 log3
+           in map from (dParents (derivation prior p))
+                == map (\i -> from (prior !! fromIntegral i)) (thread p)
         _ -> False
-    let boxA = AgentBox ([], []) (quoter "a" "A")
-        boxB = AgentBox ([], []) (quoter "b" "B")
-        merged = AgentBox (([], []), ([], [])) (both (quoter "a" "A") (quoter "b" "B"))
+    let boxA = AgentBox ([], [], [], []) (quoter "a" "A")
+        boxB = AgentBox ([], [], [], []) (quoter "b" "B")
+        merged = AgentBox (([], [], [], []), ([], [], [], [])) (both (quoter "a" "A") (quoter "b" "B"))
     assert "horizontal pasting: loop [both a b] ≡ loop [a, b]" $
       meetLog 2 [merged] seed == meetLog 2 [boxA, boxB] seed
 

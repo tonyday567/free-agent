@@ -18,11 +18,11 @@
 module Main (main) where
 
 import Circuit (close, companion, conjoint)
-import Circuit.Agent (Name, Post (..), deliversTo, sortNub)
+import Circuit.Agent (Name, Post (..), PostId, deliversTo, sortNub)
 import Circuit.Agent.Framing (StoredPost, framePost, parseLine, stampId, stamped)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (threadDelay)
-import Control.Monad (filterM, forever, unless, when)
+import Control.Monad (filterM, forever, guard, unless, when)
 import Control.Monad.State (runStateT)
 import Data.Foldable (traverse_)
 import Data.Maybe (mapMaybe)
@@ -35,6 +35,7 @@ import System.Directory (doesFileExist, findExecutable)
 import System.Environment (getArgs, getExecutablePath)
 import System.Exit (exitFailure)
 import System.FilePath (takeDirectory, takeFileName, (</>))
+import Text.Read (readMaybe)
 import System.FSNotify
   ( Event (..),
     WatchManager,
@@ -119,16 +120,44 @@ runOne seat stored = do
   (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
   pure [out {thread = sortNub (parentId : thread out)} | out <- outs]
 
+-- | Path to the cursor file for an agent.
+cursorPath :: FilePath -> Name -> FilePath
+cursorPath root name = root </> (".cursor-" <> T.unpack name)
+
+-- | Read the cursor for an agent. Returns 0 if no cursor exists yet.
+readCursor :: FilePath -> Name -> IO PostId
+readCursor root name = do
+  let path = cursorPath root name
+  exists <- doesFileExist path
+  if not exists
+    then pure 0
+    else do
+      txt <- TIO.readFile path
+      pure $ maybe 0 fromIntegral (readMaybe @Integer (T.unpack (T.strip txt)))
+
+-- | Persist the cursor for an agent.
+writeCursor :: FilePath -> Name -> PostId -> IO ()
+writeCursor root name pid =
+  TIO.writeFile (cursorPath root name) (T.pack (show pid))
+
 -- | Event-tail a log file and invoke the callback for every new stored post
 -- addressed to any of the subscribed names.
-tailLog :: FilePath -> [Name] -> (StoredPost -> IO ()) -> IO ()
-tailLog path names cb = do
+--
+-- On startup the file is scanned from the beginning; posts with 'stampId'
+-- greater than the supplied cursor and addressed to any subscribed name are
+-- delivered. After catch-up the handle is parked at EOF and fsnotify wakes it
+-- for new lines.
+tailLog :: FilePath -> [Name] -> PostId -> (StoredPost -> IO ()) -> IO ()
+tailLog path names startCursor cb = do
   exists <- doesFileExist path
   unless exists $ do
     -- Touch an empty log so the scribe has a file to append to.
     withFile path AppendMode (\_ -> pure ())
   h <- openFile path ReadMode
   hSetBuffering h LineBuffering
+  -- Catch up on any posts missed while this agent was offline.
+  catchUp h startCursor
+  -- Park at EOF and wait for new posts via fsnotify.
   size <- hFileSize h
   hSeek h AbsoluteSeek size
   let logName = takeFileName path
@@ -139,12 +168,25 @@ tailLog path names cb = do
     -- Block forever; the watch listener runs in the background.
     forever (threadDelay 1000000)
   where
+    catchUp h cursor = do
+      eof <- hIsEOF h
+      unless eof $ do
+        line <- TIO.hGetLine h
+        traverse_ cb (filterStoredSince names cursor line)
+        catchUp h cursor
+
     drain h names' cb' = do
       eof <- hIsEOF h
       unless eof $ do
         line <- TIO.hGetLine h
         traverse_ cb' (filterStored names' line)
         drain h names' cb'
+
+    filterStoredSince names' cursor line = do
+      stored <- parseLine line
+      guard (stampId stored > cursor)
+      guard (deliversTo (stamped stored) names')
+      pure stored
 
     filterStored :: [Name] -> Text -> Maybe StoredPost
     filterStored names' line = do
@@ -172,6 +214,9 @@ main = do
       TIO.putStrLn $ "   command: " <> T.pack cmd <> " " <> T.intercalate " " (map T.pack cmdArgs)
       TIO.putStrLn $ "   scribe: " <> T.pack scribe
       let path = root </> "log.jsonl"
-      tailLog path names $ \stored -> do
+      cursor <- readCursor root agentName
+      TIO.putStrLn $ "   cursor: " <> T.pack (cursorPath root agentName) <> " @ " <> T.pack (show cursor)
+      tailLog path names cursor $ \stored -> do
         replies <- runOne seat stored
         traverse_ (scribePost scribe root) replies
+        writeCursor root agentName (stampId stored)

@@ -21,7 +21,13 @@ module Free.Agent.Bus
     scribe,
     scribeIO,
 
+    -- * Durable append (shared with card-archive)
+    appendStoredPosts,
+    appendStoredPostsUnlocked,
+    scribeCard,
+
     -- * Subscription
+    busDeliversTo,
     readSince,
     awaitSince,
 
@@ -62,9 +68,10 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Seat (FreeSeat, interpretSeat)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath ((</>), (<.>))
+import System.FilePath (takeDirectory, (</>), (<.>))
 import System.FileLock (SharedExclusive (Exclusive), withFileLock)
 import System.IO (IOMode (AppendMode), withFile)
+import Text.Printf (printf)
 
 -- | Live bus handle.
 data Bus = Bus
@@ -133,6 +140,51 @@ scribeIO bus p = do
   atomically (takeTMVar ack)
   pure stored
 
+-- | Append stamped posts under the exclusive file lock.
+--
+-- Shared durable image primitive for the live bus persistence loop and the
+-- single-writer card archive. Does not assign ids or timestamps.
+appendStoredPosts :: FilePath -> [StoredPost] -> IO ()
+appendStoredPosts path posts =
+  withFileLock (path <.> "lock") Exclusive $ \_lock ->
+    appendStoredPostsUnlocked path posts
+
+-- | Append stamped posts without taking the lock. Caller must already hold
+-- @path.lock@ (or otherwise guarantee exclusive writers).
+appendStoredPostsUnlocked :: FilePath -> [StoredPost] -> IO ()
+appendStoredPostsUnlocked path posts =
+  withFile path AppendMode $ \h ->
+    traverse_ (TIO.hPutStrLn h . frameStored) posts
+
+-- | Single-writer card scribe: assign @postId@ = current line count, stamp
+-- @ts@, and append one 'StoredPost' under the file lock. No STM bus image.
+--
+-- Creates an empty log file when missing. Suitable for batch migration and
+-- one-shot archivist appends — not for the multi-consumer live bus.
+scribeCard :: FilePath -> Post Text -> IO StoredPost
+scribeCard path p = do
+  createDirectoryIfMissing True (takeDirectory path)
+  exists <- doesFileExist path
+  unless exists $ withFile path AppendMode (\_ -> pure ())
+  withFileLock (path <.> "lock") Exclusive $ \_lock -> do
+    pid <- fromIntegral . length . T.lines <$> TIO.readFile path
+    ts <- formatNow
+    let stored = Stamped pid ts p
+    appendStoredPostsUnlocked path [stored]
+    pure stored
+
+-- | Free-agent-bus delivery predicate.
+--
+-- * @to = []@ broadcasts to every subscriber.
+-- * @to = [""]@ is the discard channel (delivers to no one).
+-- * Named recipients deliver to subscribers whose name appears in @to@.
+busDeliversTo :: Post a -> [Name] -> Bool
+busDeliversTo p subs =
+  case to p of
+    [] -> True
+    [""] -> False
+    ts -> any (`elem` ts) subs
+
 -- | Read all posts matching any of the names with id greater than the cursor.
 --
 -- Does not retry; returns an empty list if nothing matches.
@@ -140,7 +192,7 @@ readSince :: Bus -> [Name] -> PostId -> STM [StoredPost]
 readSince bus names since = do
   log0 <- readTVar (busLog bus)
   let posts = jsonlToList log0
-  pure [s | s <- posts, stampId s > since, deliversTo (stamped s) names]
+  pure [s | s <- posts, stampId s > since, busDeliversTo (stamped s) names]
 
 -- | Wait until at least one matching post exists after the cursor.
 awaitSince :: Bus -> [Name] -> PostId -> STM [StoredPost]
@@ -189,16 +241,17 @@ jsonlToList = go
 -- | Background persistence loop.
 --
 -- Batches all posts currently in the queue, appends them under a file lock,
--- then repeats. Empty queue blocks via 'readTQueue'.
+-- writes per-agent ping files, then repeats. Empty queue blocks via
+-- 'readTQueue'.
 persistLoop :: FilePath -> TQueue (StoredPost, TMVar ()) -> IO ()
 persistLoop path q = forever $ do
   pairs <- atomically $ do
     first <- readTQueue q
     rest <- drainQueue
     pure (first : rest)
-  withFileLock (path <.> "lock") Exclusive $ \_lock ->
-    withFile path AppendMode $ \h ->
-      traverse_ (TIO.hPutStrLn h . frameStored . fst) pairs
+  let posts = map fst pairs
+  appendStoredPosts path posts
+  writePings path posts
   atomically $ traverse_ (\(_, ack) -> putTMVar ack ()) pairs
   where
     drainQueue = do
@@ -209,3 +262,21 @@ persistLoop path q = forever $ do
           x <- readTQueue q
           xs <- drainQueue
           pure (x : xs)
+
+-- | Write a @.ping-NAME@ file for each named recipient of each post.
+--
+-- The file contains the latest post id addressed to that recipient. Agents can
+-- watch this file cheaply instead of re-parsing the log on every wake.
+writePings :: FilePath -> [StoredPost] -> IO ()
+writePings path posts = traverse_ writeOne recipients
+  where
+    root = takeDirectory path
+    pingFile name = root </> printf ".ping-%s" (T.unpack name)
+    recipients = concatMap postRecipients posts
+    postRecipients stored =
+      case to (stamped stored) of
+        [] -> []
+        [""] -> []
+        ts -> [(name, stampId stored) | name <- ts]
+    writeOne (name, pid) =
+      TIO.writeFile (pingFile name) (T.pack (show pid))

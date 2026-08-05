@@ -26,12 +26,11 @@ module Free.Agent.Derivation
 where
 
 import Circuit.Agent (Post (..))
-import Data.List (find)
+import Data.List (genericIndex)
 
 -- | A derivation square: @dPost@ is the output (the square's target);
 -- @dParents@ are the resolved vertical sources, in 'thread' order.
--- Dangling edges resolve to nothing, so @dParents@ may be shorter than
--- @thread dPost@ — 'valid' checks exactly this.
+-- Dangling ids are an error (the log is expected to be well-formed).
 data Derivation a = Derivation
   { dPost :: Post a,
     dParents :: [Post a]
@@ -39,21 +38,20 @@ data Derivation a = Derivation
   deriving (Show, Eq)
 
 -- | The square of a post against the posts prior to it (oldest first).
--- Each thread edge resolves to the most recent prior post by that name —
--- the same resolution as 'branches'.
-derivation :: (Eq a) => [Post a] -> Post a -> Derivation a
+-- Each 'thread' edge is a 'PostId' interpreted as a positional index into
+-- @prior@, exactly as in 'Circuit.Agent.branches'.
+derivation :: [Post a] -> Post a -> Derivation a
 derivation prior p =
   Derivation
     p
-    [ q
-    | n <- thread p,
-      Just q <- [find ((== n) . from) (reverse prior)]
+    [ prior `genericIndex` i
+    | i <- thread p
     ]
 
 -- | A square is valid when every vertical edge resolves to a
 -- strictly-earlier post — no dangling ancestry.
-valid :: (Eq a) => [Post a] -> Post a -> Bool
-valid prior p = length (dParents (derivation prior p)) == length (thread p)
+valid :: [Post a] -> Post a -> Bool
+valid prior p = all (< fromIntegral (length prior)) (thread p)
 
 -- | The posts reachable from the last post by chasing derivations back
 -- through the log (vertical pasting made executable).  When ancestry is

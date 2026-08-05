@@ -22,7 +22,7 @@ module Free.Agent.Host
 where
 
 import Circuit (Ends (..), endsK)
-import Circuit.Agent (Post (..), Shard)
+import Circuit.Agent (Post (..), Shard, mkPost)
 import Circuit.Agent.Cli (Cli, cliQuery, hermesCli, kimiCli)
 import Circuit.Parser.Json (Json (..), encodeJson)
 import Control.Monad.IO.Class (MonadIO (..))
@@ -83,8 +83,11 @@ bodyArgs BodyWhole = (:[])
 -- The shard remembers the committed posts in its state.  On emit it runs the
 -- host on each post's body (prepared by 'hostBodyMode'), in order, and emits
 -- one reply post per output line per input post.  Each reply is addressed back
--- to the sender of its input post and threads onto that sender (the sender's
--- name as sole parent).
+-- to the sender of its input post.
+--
+-- Note: a generic host has no access to stamped log ids, so emitted replies
+-- carry no thread edge.  Callers that need provenance should thread by id
+-- outside the host.
 hostShard ::
   (MonadState [Post Text] m) =>
   Host m ->
@@ -99,7 +102,7 @@ hostShard h =
           traverse
             ( \p -> do
                 outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
-                pure [Post (hostName h) [from p] [from p] o | o <- outs]
+                pure [mkPost (hostName h) [from p] o | o <- outs]
             )
             xs
     )

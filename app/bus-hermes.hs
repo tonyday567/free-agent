@@ -14,7 +14,7 @@
 module Main (main) where
 
 import Circuit (close, companion, conjoint)
-import Circuit.Agent (Name, Post (..), deliversTo, sortNub)
+import Circuit.Agent (Name, Post (..), PostId, deliversTo, sortNub)
 import Circuit.Agent.Framing (StoredPost, framePost, parseLine, stampId, stamped)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (threadDelay)
@@ -32,6 +32,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable
 import System.Environment (getArgs, getExecutablePath)
 import System.Exit (exitFailure)
 import System.FilePath (takeDirectory, takeFileName, (</>))
+import Text.Read (readMaybe)
 import System.FSNotify
   ( Event (..),
     WatchManager,
@@ -111,26 +112,96 @@ scribePost scribe root p = do
   _ <- readProcess scribe [root] (T.unpack (framePost p))
   pure ()
 
+-- | Drop Hermes CLI noise lines that can precede the actual reply text,
+-- so routing and empty-reply filtering work on the real model output.
+scrubReply :: Post Text -> Post Text
+scrubReply p =
+  let ls = T.lines (body p)
+      clean = filter (not . noise) ls
+      noise l =
+        T.null l
+          || "↪" `T.isPrefixOf` l
+          || "session_id:" `T.isPrefixOf` l
+          || "Warning:" `T.isPrefixOf` l
+          || "Resumed session" `T.isInfixOf` l
+          || "Resume this session with:" `T.isInfixOf` l
+          || "⚕" `T.isPrefixOf` l
+          || "❯" `T.isPrefixOf` l
+   in p {body = T.strip (T.unlines clean)}
+
+-- | Parse a leading @name: prefix from a reply body. When present, redirect
+-- the post to that name and strip the prefix. This lets the LLM route a reply
+-- to another bus participant instead of always replying to the sender.
+routeReply :: Post Text -> Post Text
+routeReply p =
+  case T.stripPrefix "@" (body p) of
+    Nothing -> p
+    Just rest ->
+      let (name, afterName) = T.break (== ':') rest
+          name' = T.strip name
+       in if T.null name' || T.null afterName
+            then p
+            else p {to = [name'], body = T.strip (T.drop 1 afterName)}
+
+-- | Decorate an incoming post body with its sender so the LLM can tell who is
+-- speaking on the bus. The original stamped post is untouched; only the copy
+-- fed to the seat is decorated.
+decorateSender :: StoredPost -> StoredPost
+decorateSender stored =
+  let p = stamped stored
+   in stored {stamped = p {body = from p <> ": " <> body p}}
+
 -- | Run one stored post through the seat and produce reply posts with thread
 -- edges citing the parent id.
 runOne :: FreeSeat -> StoredPost -> IO [Post Text]
 runOne seat stored = do
-  let p = stamped stored
+  let stored' = decorateSender stored
+      p = stamped stored'
       parentId = stampId stored
       sh = interpretSeat seat
   (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
-  pure [out {thread = sortNub (parentId : thread out)} | out <- outs]
+  pure [routeReply (scrubReply out) {thread = sortNub (parentId : thread out)} | out <- outs]
+
+-- | Path to the cursor file for an agent. The cursor stores the last
+-- `postId` the agent has processed, so restarts catch up without re-reading
+-- the whole log.
+cursorPath :: FilePath -> Name -> FilePath
+cursorPath root name = root </> (".cursor-" <> T.unpack name)
+
+-- | Read the cursor for an agent. Returns 0 if no cursor exists yet.
+readCursor :: FilePath -> Name -> IO PostId
+readCursor root name = do
+  let path = cursorPath root name
+  exists <- doesFileExist path
+  if not exists
+    then pure 0
+    else do
+      txt <- TIO.readFile path
+      pure $ maybe 0 fromIntegral (readMaybe @Integer (T.unpack (T.strip txt)))
+
+-- | Persist the cursor for an agent.
+writeCursor :: FilePath -> Name -> PostId -> IO ()
+writeCursor root name pid =
+  TIO.writeFile (cursorPath root name) (T.pack (show pid))
 
 -- | Event-tail a log file and invoke the callback for every new stored post
 -- addressed to any of the subscribed names.
-tailLog :: FilePath -> [Name] -> (StoredPost -> IO ()) -> IO ()
-tailLog path names cb = do
+--
+-- On startup the file is scanned from the beginning; posts with 'stampId'
+-- greater than the supplied cursor and addressed to any subscribed name are
+-- delivered. After catch-up the handle is parked at EOF and fsnotify wakes it
+-- for new lines.
+tailLog :: FilePath -> [Name] -> PostId -> (StoredPost -> IO ()) -> IO ()
+tailLog path names startCursor cb = do
   exists <- doesFileExist path
   unless exists $ do
     -- Touch an empty log so the scribe has a file to append to.
     withFile path AppendMode (\_ -> pure ())
   h <- openFile path ReadMode
   hSetBuffering h LineBuffering
+  -- Catch up on any posts missed while this agent was offline.
+  catchUp h startCursor
+  -- Park at EOF and wait for new posts via fsnotify.
   size <- hFileSize h
   hSeek h AbsoluteSeek size
   let logName = takeFileName path
@@ -141,12 +212,25 @@ tailLog path names cb = do
     -- Block forever; the watch listener runs in the background.
     forever (threadDelay 1000000)
   where
+    catchUp h cursor = do
+      eof <- hIsEOF h
+      unless eof $ do
+        line <- TIO.hGetLine h
+        traverse_ cb (filterStoredSince names cursor line)
+        catchUp h cursor
+
     drain h names' cb' = do
       eof <- hIsEOF h
       unless eof $ do
         line <- TIO.hGetLine h
         traverse_ cb' (filterStored names' line)
         drain h names' cb'
+
+    filterStoredSince names' cursor line = do
+      stored <- parseLine line
+      guard (stampId stored > cursor)
+      guard (deliversTo (stamped stored) names')
+      pure stored
 
     filterStored :: [Name] -> Text -> Maybe StoredPost
     filterStored names' line = do
@@ -177,6 +261,13 @@ main = do
       TIO.putStrLn $ "   session: " <> T.pack sessionFile
       TIO.putStrLn $ "   scribe: " <> T.pack scribe
       let path = root </> "log.jsonl"
-      tailLog path names $ \stored -> do
-        replies <- runOne seat stored
+          -- Drop empty replies and Hermes "no reply" error placeholders.
+          keepReply p =
+            let b = T.strip (body p)
+             in not (T.null b) && not ("⚠️" `T.isPrefixOf` b)
+      cursor <- readCursor root agentName
+      TIO.putStrLn $ "   cursor: " <> T.pack (cursorPath root agentName) <> " @ " <> T.pack (show cursor)
+      tailLog path names cursor $ \stored -> do
+        replies <- filter keepReply <$> runOne seat stored
         traverse_ (scribePost scribe root) replies
+        writeCursor root agentName (stampId stored)

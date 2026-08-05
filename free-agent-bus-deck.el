@@ -8,6 +8,7 @@
 ;;         :prefix ("y" . "fab")
 ;;         :desc "send"  "RET" #'free-agent-bus-send
 ;;         :desc "send"  "SPC" #'free-agent-bus-send
+;;         :desc "board" "b"   #'free-agent-bus-board
 ;;         :desc "post"  "p"   #'free-agent-bus-post
 ;;         :desc "log"   "l"   #'free-agent-bus-log
 ;;         :desc "deck"  "d"   #'free-agent-bus-deck)
@@ -46,9 +47,19 @@
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-channel "bus"
-  "Default channel. Used as the single `to' recipient when posting,
-and as a display filter in the log buffer."
+  "Legacy channel name. Kept for compatibility with older logs.
+New posts default to broadcast (`[]'); this name is added to the
+log filter when `free-agent-bus-log-filter' is nil."
   :type 'string
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-post-to nil
+  "Recipient list for the current or next post.
+If nil, the post is a broadcast (`to: []').
+If a list of strings, each string is a recipient name.
+The special list `[\"\"]' posts to the discard channel."
+  :type '(choice (const :tag "Broadcast (to: [])" nil)
+                 (repeat string))
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-name "deck"
@@ -63,6 +74,12 @@ and as a display filter in the log buffer."
 
 (defcustom free-agent-bus-log-buffer-name "*free-agent-bus-log*"
   "Name of the log buffer."
+  :type 'string
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-board-file "~/coffee/loom/board.md"
+  "Path to the board markdown file.
+This is a regular file; `free-agent-bus-board' simply opens it."
   :type 'string
   :group 'free-agent-bus-deck)
 
@@ -90,7 +107,8 @@ and as a display filter in the log buffer."
   "Send active region from BEGIN to END to the bus as `free-agent-bus-name'.
 If no region is active, send the whole buffer, but only when in
 `free-agent-bus-post-mode' to avoid accidentally posting source files.
-The post is addressed to `free-agent-bus-channel'."
+The post is addressed to `free-agent-bus-post-to' if set, otherwise
+`free-agent-bus-channel'."
   (interactive "r")
   (let* ((use-region (use-region-p))
          (begin (if use-region begin (point-min)))
@@ -104,8 +122,10 @@ The post is addressed to `free-agent-bus-channel'."
       (when (string-empty-p text)
         (user-error "Nothing to send"))
       (let* ((root (free-agent-bus--expand-root))
+             (recipients (and (boundp 'free-agent-bus-post-to)
+                              free-agent-bus-post-to))
              (post `((from . ,free-agent-bus-name)
-                     (to . [,free-agent-bus-channel])
+                     (to . ,(vconcat recipients))
                      (thread . [])
                      (body . ,text)))
              (json (json-encode post))
@@ -122,8 +142,9 @@ The post is addressed to `free-agent-bus-channel'."
               (when (/= status 0)
                 (error "free-agent-bus exited with code %d: %s"
                        status (with-current-buffer stdout-buffer (buffer-string))))
-              (message "%s" (string-trim
-                             (with-current-buffer stdout-buffer (buffer-string)))))
+              (message "%s -> %s"
+                       (string-trim (with-current-buffer stdout-buffer (buffer-string)))
+                       recipients))
           (kill-buffer stdout-buffer))))
     (when (derived-mode-p 'free-agent-bus-post-mode)
       (erase-buffer))))
@@ -133,13 +154,43 @@ The post is addressed to `free-agent-bus-channel'."
 (defvar free-agent-bus-post-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-<return>") #'free-agent-bus-send)
+    (define-key map (kbd "C-c C-a") #'free-agent-bus-set-recipients)
     map)
   "Keymap for `free-agent-bus-post-mode'.")
 
-(define-derived-mode free-agent-bus-post-mode text-mode "FreeAgentBus-Post"
+;; Ensure bindings survive reloads (defvar does not overwrite an existing map).
+(define-key free-agent-bus-post-mode-map (kbd "C-<return>") #'free-agent-bus-send)
+(define-key free-agent-bus-post-mode-map (kbd "C-c C-a") #'free-agent-bus-set-recipients)
+
+;;;###autoload
+(defun free-agent-bus-set-recipients (recipients)
+  "Set the recipient list for the current post.
+RECIPIENTS is a comma or space separated string of names, e.g.
+\"kimi, hermes\".  With empty input, resets to broadcast (to: [])."
+  (interactive
+   (list (read-string
+          "Recipients (empty = broadcast): "
+          nil nil "")))
+  (setq-local free-agent-bus-post-to
+              (let ((trimmed (string-trim recipients)))
+                (cond
+                  ((string-empty-p trimmed) nil)              ; broadcast
+                  ((string= trimmed "\"\"") '(""))           ; discard
+                  (t (split-string trimmed "[ ,]+" t)))))
+  (message "Post recipients: %s"
+           (or free-agent-bus-post-to "broadcast")))
+
+(defun free-agent-bus--post-mode-name ()
+  "Return the mode name including current recipients."
+  (if (and (boundp 'free-agent-bus-post-to) free-agent-bus-post-to)
+      (format "FAB-Post[%s]" (mapconcat #'identity free-agent-bus-post-to ","))
+    "FAB-Post[broadcast]"))
+
+(define-derived-mode free-agent-bus-post-mode text-mode (free-agent-bus--post-mode-name)
   "Major mode for composing free-agent-bus posts."
   (setq-local truncate-lines nil)
-  (setq-local word-wrap t))
+  (setq-local word-wrap t)
+  (setq-local free-agent-bus-post-to nil))
 
 ;;;###autoload
 (defun free-agent-bus-post ()
@@ -148,6 +199,14 @@ The post is addressed to `free-agent-bus-channel'."
   (pop-to-buffer free-agent-bus-post-buffer-name)
   (unless (derived-mode-p 'free-agent-bus-post-mode)
     (free-agent-bus-post-mode)))
+
+;;; Board file
+
+;;;###autoload
+(defun free-agent-bus-board ()
+  "Open the board file as a regular file."
+  (interactive)
+  (find-file (expand-file-name free-agent-bus-board-file)))
 
 ;;; Log buffer
 
@@ -161,6 +220,18 @@ The post is addressed to `free-agent-bus-channel'."
   :type 'boolean
   :group 'free-agent-bus-deck)
 
+(defcustom free-agent-bus-log-filter-choices '("tony" "hermes" "kimi")
+  "Common directed-recipient filter choices for the log buffer.
+Broadcasts (`to: []') are always shown."
+  :type '(repeat string)
+  :group 'free-agent-bus-deck)
+
+(defvar-local free-agent-bus-log-filter nil
+  "Current recipient filter for the log buffer.
+A list of names; a post is shown if it is a broadcast (`to: []') or if its
+`to' field contains any of them.  If nil, defaults to the user's name plus
+the legacy channel name.")
+
 (defvar free-agent-bus-log--timer nil
   "Fallback timer for periodic log refresh.")
 
@@ -170,6 +241,7 @@ The post is addressed to `free-agent-bus-channel'."
 (defvar free-agent-bus-log-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "t") #'free-agent-bus-log-toggle-timestamps)
+    (define-key map (kbd "f") #'free-agent-bus-log-set-filter)
     map)
   "Keymap for `free-agent-bus-log-mode'.")
 
@@ -198,7 +270,12 @@ Unparseable lines are returned as-is."
                             (to (cdr (assoc 'to obj)))
                             (body (cdr (assoc 'body obj))))
                        (when (and id ts from body
-                                  (seq-find (lambda (c) (string= c free-agent-bus-channel)) to))
+                                  (not (equal to [""]))
+                                  (or (seq-empty-p to)
+                                      (let ((filter (or free-agent-bus-log-filter
+                                                        (list free-agent-bus-name
+                                                              free-agent-bus-channel))))
+                                        (seq-find (lambda (c) (member c filter)) to))))
                          (if free-agent-bus-log-show-timestamps
                              (format "[%s@%s] %s: %s" id ts from body)
                            (format "%s: %s" from body)))))))
@@ -249,6 +326,29 @@ Multiple file-notify events in quick succession collapse into one refresh."
   (setq free-agent-bus-log-show-timestamps (not free-agent-bus-log-show-timestamps))
   (message "free-agent-bus log timestamps %s"
            (if free-agent-bus-log-show-timestamps "on" "off"))
+  (free-agent-bus-log-refresh t))
+
+;;;###autoload
+(defun free-agent-bus-log-set-filter (filter)
+  "Set the directed-recipient filter for the current log buffer.
+FILTER is a comma or space separated list of names. Broadcasts (`to: []')
+are always shown; directed posts are shown only if their `to' field
+contains one of the filter names. Common choices are offered via completion."
+  (interactive
+   (let* ((default (mapconcat #'identity
+                              (or free-agent-bus-log-filter
+                                  (list free-agent-bus-name
+                                        free-agent-bus-channel))
+                              ","))
+          (choice (completing-read
+                   (format-prompt "Log filter" default)
+                   (seq-uniq (append free-agent-bus-log-filter-choices
+                                     (list free-agent-bus-name)))
+                   nil nil nil nil default)))
+     (list (split-string (string-trim choice) "[ ,]+" t))))
+  (setq-local free-agent-bus-log-filter
+              (if (stringp filter) (list filter) filter))
+  (message "Log filter: %s" free-agent-bus-log-filter)
   (free-agent-bus-log-refresh t))
 
 (defun free-agent-bus-log-start-watch ()
@@ -329,6 +429,11 @@ Prefer file-notify events; fall back to a polling timer if unavailable."
                      free-agent-bus-log-buffer-name))
     (when-let ((b (get-buffer buf)))
       (kill-buffer b))))
+
+;; Doom leader binding, if available. Keeps the deck self-contained so
+;; `SPC y f' works without a full Doom reload after loading this file.
+(when (boundp 'doom-leader-map)
+  (define-key doom-leader-map "yf" #'free-agent-bus-log-set-filter))
 
 (provide 'free-agent-bus-deck)
 ;;; free-agent-bus-deck.el ends here

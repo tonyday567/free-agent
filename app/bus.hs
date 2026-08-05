@@ -17,7 +17,7 @@
 -- through the scribe.
 module Main (main) where
 
-import Circuit.Agent (Name, Post (..), deliversTo)
+import Circuit.Agent (Name, Post (..))
 import Circuit.Agent.Framing (StoredPost, frameStored, parseLine, parsePost, stamped)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, when)
@@ -26,7 +26,7 @@ import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Free.Agent.Bus (closeBus, openBus, scribeIO)
+import Free.Agent.Bus (busDeliversTo, closeBus, openBus, scribeIO)
 import System.Directory (doesFileExist)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
@@ -126,4 +126,4 @@ filterStored :: [Name] -> Text -> Maybe Text
 filterStored names line = do
   stored <- parseLine line
   let p = stamped stored
-  if deliversTo p names then Just line else Nothing
+  if Free.Agent.Bus.busDeliversTo p names then Just line else Nothing

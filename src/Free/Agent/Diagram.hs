@@ -112,14 +112,15 @@ meetingSkeleton :: [Post a] -> SDiagram
 meetingSkeleton [] = SWire
 meetingSkeleton ps = foldr1 SThenD (snd (mapAccumL step dangling [0 .. length ps - 1]))
   where
-    -- thread edges resolved against the prior log (most recent prior post
-    -- by that name); 'Nothing' is a dangling edge
+    -- thread edges are exact positional ids into the oldest-first log;
+    -- 'Nothing' is a dangling id (expected not to happen for a well-formed
+    -- stamped meeting).
     sources =
-      [ [lookup n (reverse (zip (map from (take i ps)) [0 ..])) | n <- thread p]
-        | (i, p) <- zip [0 ..] ps
+      [ [if i < fromIntegral j then Just i else Nothing | i <- thread p]
+        | (j, p) <- zip [0 ..] ps
       ]
     -- the citation edges of post j, in consumer (log) order
-    cited j = [(i, pos) | (i, ss) <- zip [0 ..] sources, (pos, Just j') <- zip [0 ..] ss, j' == j]
+    cited j = [(i, pos) | (i, ss) <- zip [0 ..] sources, (pos, Just j') <- zip [0 ..] ss, j' == fromIntegral j]
     -- one free input wire per dangling edge
     dangling = [Right (i, pos) | (i, ss) <- zip [0 ..] sources, (pos, Nothing) <- zip [0 ..] ss]
 
