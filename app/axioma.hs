@@ -64,7 +64,7 @@ import Free.Agent.Seat
     runAgentSBox,
     silentSeat,
   )
-import Circuit.Agent.Cli (Cli (..), parseSessionId)
+import Circuit.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
 import Circuit.Agent.Framing (Stamped (..))
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Syntax (FreeAgent (..))
@@ -430,7 +430,9 @@ main = do
               cliSessionFile = sf,
               cliSessionId = parseSessionId,
               cliStale = \code _ -> code /= ExitSuccess,
-              cliScrub = id
+              cliScrub = id,
+              cliStderr = StderrMerge,
+              cliStderrTee = Nothing
             }
         h = cliHost "fake" cli
         sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
