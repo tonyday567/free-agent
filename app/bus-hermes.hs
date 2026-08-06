@@ -8,14 +8,14 @@
 --
 -- Usage:
 --   free-agent-bus-hermes ROOT NAME [NAME...] PROMPT.md [SESSION-FILE]
---     [--quiesce N] [--pitboss NAME]
+--     [--quiesce N] [--pitboss NAME] [--model MODEL] [--provider PROVIDER]
 module Main (main) where
 
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, mkPost, sortNub)
 import Circuit.Agent.Framing (StoredPost, stampId, stamped)
 import Control.Arrow (Kleisli (..), runKleisli)
-import Control.Monad (guard)
+import Control.Monad (guard, when)
 import Control.Monad.State (runStateT)
 import Data.Foldable (traverse_)
 import Data.List (isPrefixOf, isSuffixOf)
@@ -36,33 +36,36 @@ import Free.Agent.Host (hermesHost)
 import Free.Agent.Seat (FreeSeat, hostSeat, interpretSeat)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (getArgs)
-import System.Exit (exitFailure)
+import System.Exit (exitFailure, exitSuccess)
 import System.FilePath (takeDirectory, (</>))
 import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 import Text.Read (readMaybe)
 
--- | Parse optional quiescence flags, returning the remaining positional args.
-parseQuiesceFlags :: [String] -> Maybe (Maybe QuiesceConfig, [String])
-parseQuiesceFlags = go Nothing
+-- | Parse optional flags, returning the remaining positional args.
+parseFlags :: [String] -> Maybe (Maybe QuiesceConfig, Maybe Text, Maybe Text, [String])
+parseFlags = go Nothing Nothing Nothing
   where
-    go mq [] = Just (mq, [])
-    go _ ("--quiesce" : n : rest) = case readMaybe @Int n of
-      Just k | k > 0 -> go (Just (QuiesceConfig k "pitboss" 1000000)) rest
+    go mq mm mp [] = Just (mq, mm, mp, [])
+    go _ mm mp ("--quiesce" : n : rest) = case readMaybe @Int n of
+      Just k | k > 0 -> go (Just (QuiesceConfig k "pitboss" 1000000)) mm mp rest
       _ -> Nothing
-    go (Just qc) ("--pitboss" : name : rest) =
-      go (Just (qc {qcPitboss = T.pack name})) rest
-    go Nothing ("--pitboss" : _) = Nothing
-    go mq (arg : rest)
+    go (Just qc) mm mp ("--pitboss" : name : rest) =
+      go (Just (qc {qcPitboss = T.pack name})) mm mp rest
+    go Nothing _ _ ("--pitboss" : _) = Nothing
+    go mq _ mp ("--model" : m : rest) = go mq (Just (T.pack m)) mp rest
+    go mq mm _ ("--provider" : p : rest) = go mq mm (Just (T.pack p)) rest
+    go _ _ _ (arg : _)
       | "-" `isPrefixOf` arg = Nothing
-      | otherwise = do
-          (mq', rest') <- go mq rest
-          pure (mq', arg : rest')
+    go mq mm mp (arg : rest) = do
+      (mq', mm', mp', rest') <- go mq mm mp rest
+      pure (mq', mm', mp', arg : rest')
 
 -- | Parse arguments of the form:
---   ROOT NAME [NAME...] PROMPT.md [SESSION-FILE] [--quiesce N] [--pitboss NAME]
-parseArgs :: [String] -> Maybe (FilePath, [Name], FilePath, FilePath, Maybe QuiesceConfig)
+--   ROOT NAME [NAME...] PROMPT.md [SESSION-FILE]
+--     [--quiesce N] [--pitboss NAME] [--model MODEL] [--provider PROVIDER]
+parseArgs :: [String] -> Maybe (FilePath, [Name], FilePath, FilePath, Maybe QuiesceConfig, Maybe Text, Maybe Text)
 parseArgs args = do
-  (mQuiesce, posArgs) <- parseQuiesceFlags args
+  (mQuiesce, mModel, mProvider, posArgs) <- parseFlags args
   case posArgs of
     [] -> Nothing
     (root : rest) -> do
@@ -74,7 +77,7 @@ parseArgs args = do
               [s] -> s
               _ -> root </> ".sessions" </> agentNameOf names <> ".sid"
       guard (not (null names))
-      pure (root, map T.pack names, promptFile, sessionFile, mQuiesce)
+      pure (root, map T.pack names, promptFile, sessionFile, mQuiesce, mModel, mProvider)
   where
     agentNameOf [] = "agent"
     agentNameOf (n : _) = n
@@ -83,6 +86,7 @@ usage :: IO ()
 usage = do
   TIO.putStrLn "Usage: free-agent-bus-hermes ROOT NAME [NAME...] PROMPT.md [SESSION-FILE]"
   TIO.putStrLn "                                          [--quiesce N] [--pitboss NAME]"
+  TIO.putStrLn "                                          [--model MODEL] [--provider PROVIDER]"
   TIO.putStrLn ""
   TIO.putStrLn "  ROOT            directory containing log.jsonl"
   TIO.putStrLn "  NAME            agent name(s) to subscribe to"
@@ -90,6 +94,8 @@ usage = do
   TIO.putStrLn "  SESSION-FILE    optional Hermes session file (default: ROOT/.sessions/NAME.sid)"
   TIO.putStrLn "  --quiesce N     exit after N empty one-second cycles"
   TIO.putStrLn "  --pitboss NAME  recipient for the quiescence marker (default: pitboss)"
+  TIO.putStrLn "  --model MODEL   model passed to hermes -m (default: CLI default)"
+  TIO.putStrLn "  --provider P    provider passed to hermes --provider (default: CLI default)"
 
 -- | Drop Hermes CLI noise lines that can precede the actual reply text,
 -- so routing and empty-reply filtering work on the real model output.
@@ -143,15 +149,18 @@ main :: IO ()
 main = do
   hSetBuffering stdout LineBuffering
   args <- getArgs
+  when ("--help" `elem` args) $ do
+    usage
+    exitSuccess
   case parseArgs args of
     Nothing -> do
       usage
       exitFailure
-    Just (root, names, promptFile, sessionFile, mQuiesce) -> do
+    Just (root, names, promptFile, sessionFile, mQuiesce, mModel, mProvider) -> do
       systemPrompt <- TIO.readFile promptFile
       createDirectoryIfMissing True (takeDirectory sessionFile)
       let agentName = case names of (n : _) -> n; [] -> "agent"
-          host = hermesHost agentName systemPrompt sessionFile
+          host = hermesHost agentName systemPrompt mModel mProvider sessionFile
           seat = hostSeat host
       scribe <- findScribe
       TIO.putStrLn $ "🟢 bus hermes agent starting: " <> T.intercalate "," names

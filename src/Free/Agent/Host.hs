@@ -151,24 +151,29 @@ cliHost name cli =
 
 -- | Kimi host on the shared 'Cli' seat.
 --
--- Runs @kimi -p@ per body (see 'kimiCli'), with optional @-m <model>@ and
--- session resume via @sessionFile@.  A stale session falls back to fresh.
+-- Runs @kimi -p@ per body (see 'kimiCli'), with optional @-m <model>@,
+-- @--provider <provider>@, and session resume via @sessionFile@.  A stale
+-- session falls back to fresh.
 kimiHost ::
   (MonadIO m) =>
   -- | Host name (used as the 'from' field of reply posts).
   Text ->
   -- | Model name passed to @kimi -m@, if any.
   Maybe Text ->
+  -- | Provider passed to @kimi --provider@, if any.
+  Maybe Text ->
   -- | Session file for cross-call context.
   FilePath ->
   Host m
-kimiHost name model sessionFile = cliHost name (kimiCli model sessionFile)
+kimiHost name model provider sessionFile = cliHost name (kimiCli model provider sessionFile)
 
 -- | Hermes host on the shared 'Cli' seat.
 --
 -- Runs @hermes chat -q@ per body (see 'hermesCli'), prepending the supplied
--- system prompt to the body in the query.  Sessions persist across calls
--- via @sessionFile@; a stale session falls back to fresh.
+-- system prompt to the body in the query.  The optional model and provider
+-- override the CLI defaults; @Nothing@ keeps the hermes CLI default.
+-- Sessions persist across calls via @sessionFile@; a stale session falls
+-- back to fresh.
 --
 -- The caller is responsible for building the system prompt; this function
 -- knows nothing about design documents, protocol cards, or magic wording.
@@ -178,17 +183,21 @@ hermesHost ::
   Text ->
   -- | System prompt text prepended to every body.
   Text ->
+  -- | Model name passed to @hermes -m@, if any.
+  Maybe Text ->
+  -- | Provider passed to @hermes --provider@, if any.
+  Maybe Text ->
   -- | Session file for cross-call context.
   FilePath ->
   Host m
-hermesHost name systemPrompt sessionFile =
+hermesHost name systemPrompt model provider sessionFile =
   Host
     { hostName = name,
       hostBodyMode = BodyWhole,
       hostRun = traverse runOne
     }
   where
-    cli = hermesCli (Just "deepseek-v4-pro") (Just "deepseek") sessionFile
+    cli = hermesCli model provider sessionFile
     runOne body =
       liftIO (cliQuery cli (systemPrompt <> "\n\nUser message:\n" <> body))
 
