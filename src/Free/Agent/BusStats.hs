@@ -128,6 +128,8 @@ data SliceMode
     WindowMinutes Int
   | -- | One slice per thread tree (grouped by root post id).
     ByThread
+  | -- | One slice per authoring agent.
+    ByAgent
   deriving (Eq, Show)
 
 -- | Partition stamped posts into slices.  Posts without a parseable timestamp
@@ -158,6 +160,10 @@ slicePosts ByThread posts =
         [] -> minimum ts
         ps -> rootOf (minimumBy (comparing stampId) ps)
     roots = Map.fromListWith (++) [(rootOf p, [p]) | p <- posts]
+slicePosts ByAgent posts =
+  sortOn fst [(k, v) | (k, v) <- Map.toList byAuthor]
+  where
+    byAuthor = Map.fromListWith (++) [(from (stamped p), [p]) | p <- posts]
 
 addMinutes :: UTCTime -> Int -> UTCTime
 addMinutes t n = addUTCTime (fromIntegral (n * 60) :: NominalDiffTime) t
@@ -177,7 +183,9 @@ data Stats = Stats
     statReBus :: Double,
     statSignal :: Int,
     statNoise :: Int,
+    statUnclassified :: Int,
     statSNR :: Maybe Double,
+    statSNRPrime :: Maybe Double,
     statDeliverables :: Int,
     statDoneClaims :: Int,
     statPostsPerDeliverable :: Maybe Double,
@@ -198,7 +206,9 @@ computeStats rules damping label posts =
       statReBus = reBus,
       statSignal = signalCount,
       statNoise = noiseCount,
+      statUnclassified = unclassifiedCount,
       statSNR = snr,
+      statSNRPrime = snrPrime,
       statDeliverables = deliverables,
       statDoneClaims = doneClaims,
       statPostsPerDeliverable = ppd,
@@ -220,8 +230,14 @@ computeStats rules damping label posts =
     classified = map (classify rules . stamped) posts
     signalCount = length (filter (== Signal) classified)
     noiseCount = length (filter (== Noise) classified)
+    unclassifiedCount = n - signalCount - noiseCount
     snr
       | noiseCount > 0 = Just (fromIntegral signalCount / fromIntegral noiseCount)
+      | signalCount > 0 = Nothing -- conceptually infinite
+      | otherwise = Just 0
+    snrPrime
+      | unclassifiedCount + noiseCount > 0 =
+          Just (fromIntegral signalCount / fromIntegral (unclassifiedCount + noiseCount))
       | signalCount > 0 = Nothing -- conceptually infinite
       | otherwise = Just 0
     deliverables = length (filter (isDeliverable rules . stamped) posts)
@@ -262,7 +278,9 @@ renderStats rules stats =
         "  Re_bus:              " <> showd (statReBus s),
         "  signal:              " <> showt (statSignal s),
         "  noise:               " <> showt (statNoise s),
+        "  unclassified:        " <> showt (statUnclassified s),
         "  SNR:                 " <> maybe "inf" showd (statSNR s),
+        "  SNR':                " <> maybe "inf" showd (statSNRPrime s),
         "  deliverables:        " <> showt (statDeliverables s),
         "  done claims:         " <> showt (statDoneClaims s),
         "  posts/deliverable:   " <> maybe "n/a" showd (statPostsPerDeliverable s),
@@ -298,7 +316,9 @@ renderStatsJson rules stats =
           "re_bus" .= statReBus s,
           "signal" .= statSignal s,
           "noise" .= statNoise s,
+          "unclassified" .= statUnclassified s,
           "snr" .= statSNR s,
+          "snr_prime" .= statSNRPrime s,
           "deliverables" .= statDeliverables s,
           "done_claims" .= statDoneClaims s,
           "posts_per_deliverable" .= statPostsPerDeliverable s,

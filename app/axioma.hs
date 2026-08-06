@@ -966,6 +966,7 @@ main = do
     assert "counts agents" $ statAgents stats == 2
     assert "signal = deliverable mark" $ statSignal stats == 1
     assert "noise = status pings" $ statNoise stats == 2
+    assert "unclassified = neutral posts" $ statUnclassified stats == 1
     assert "deliverables = conductor marks" $ statDeliverables stats == 1
 
   do
@@ -978,5 +979,26 @@ main = do
           ]
         slices = slicePosts (WindowMinutes 60) posts
     assert "60m window splits four posts into two slices" $ length slices == 2
+
+  do
+    let mkStored i ts f t body = Stamped i ts (Post f t [] body)
+        posts =
+          [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
+            mkStored 1 "2026-08-05T00:10:00" "b" ["a"] "ack",
+            mkStored 2 "2026-08-05T00:20:00" "a" ["b"] "standing by",
+            mkStored 3 "2026-08-05T00:30:00" "b" ["a"] "🟢 card done"
+          ]
+        slices = slicePosts ByAgent posts
+    assert "by-agent splits into two author slices" $ length slices == 2
+    assert "author a has one post" $
+      case filter ((== "a") . fst) slices of
+        [(_, ps)] -> length ps == 2
+        _ -> False
+    assert "author b has one signal and one noise post" $
+      case filter ((== "b") . fst) slices of
+        [(_, ps)] ->
+          let stats = computeStats defaultRules 1 "b" ps
+           in statSignal stats == 1 && statNoise stats == 1
+        _ -> False
 
   putStrLn "All tests passed"

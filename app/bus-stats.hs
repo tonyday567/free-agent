@@ -50,6 +50,7 @@ helpText =
       "  --signal REGEX     override signal regex",
       "  --window DURATION  slice by time bucket (e.g. 15m, 1h)",
       "  --thread           slice by thread root",
+      "  --by-agent         slice by authoring agent",
       "  --damping N        damping rules count (default 1)",
       "  --json             output JSON",
       "  -h, --help         show this help"
@@ -90,6 +91,8 @@ parseArgs = go defaultOptions
         Just m -> go (opts {optSliceMode = WindowMinutes m}) rest
     go opts ("--thread" : rest) =
       go (opts {optSliceMode = ByThread}) rest
+    go opts ("--by-agent" : rest) =
+      go (opts {optSliceMode = ByAgent}) rest
     go opts ("--damping" : v : rest) =
       case reads v of
         [(n, "")] | n > 0 -> go (opts {optDamping = n}) rest
