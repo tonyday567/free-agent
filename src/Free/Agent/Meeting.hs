@@ -34,7 +34,7 @@ module Free.Agent.Meeting
   )
 where
 
-import Circuit.Agent (Agent, Name, Post (..), PostId, cone)
+import Circuit.Agent (Agent, Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Cli (synthesisPosts)
 import Circuit.Poly (System (..), monoDir, monoIn)
 import Circuit.Poly.Process (runSystem)
@@ -108,7 +108,8 @@ runRound boxes ins ids =
 
 -- | The full log of a meeting: seed followed by the rounds, oldest first.
 -- Ids are assigned positionally by the driver, so 'thread' fields in the
--- returned posts are valid indices into this log.
+-- returned posts are valid ids against this log ('indexToIdMap' reproduces
+-- the same assignment).
 meetLog :: Int -> [AgentBox] -> [Post Text] -> [Post Text]
 meetLog n boxes seed = seed ++ concat (meet n boxes seed)
 
@@ -118,5 +119,5 @@ unchanged :: [Name] -> [Post Text] -> [Post Text]
 unchanged banned posts =
   [ p
   | (prior, p) <- zip (inits posts) posts,
-    null (cone prior p `intersect` banned)
+    null (coneByIndex prior p `intersect` banned)
   ]

@@ -38,6 +38,7 @@ import System.Directory (createDirectoryIfMissing)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath (takeDirectory, (</>))
+import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 import Text.Read (readMaybe)
 
 -- | Parse optional quiescence flags, returning the remaining positional args.
@@ -142,6 +143,7 @@ runOne seat stored = do
 
 main :: IO ()
 main = do
+  hSetBuffering stdout LineBuffering
   args <- getArgs
   case parseArgs args of
     Nothing -> do

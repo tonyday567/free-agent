@@ -4,7 +4,7 @@
 module Main (main) where
 
 import Circuit (Ends (..), close)
-import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, branches, cone, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
+import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, branchesByIndex, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
 import Circuit.Channel (Strength (..), Traced (..))
 import Circuit.Agent.Tensor
   ( awaitShard,
@@ -782,7 +782,7 @@ main = do
       hyperEquiv (meetingSkeleton convo) $
         SThenD (SBox "human" 0 1) (SThenD (SBox "a" 1 1) (SThenD (SBox "b" 1 1) (SBox "a" 1 1)))
     assert "single-thread ancestry is the skeleton's label sequence" $
-      case branches [seed, a1, b1] a2 of
+      case branchesByIndex [seed, a1, b1] a2 of
         [path] -> skeletonLabels (meetingSkeleton convo) == reverse (map T.unpack path)
         _ -> False
 
@@ -910,9 +910,9 @@ main = do
     assert "every square in a meeting log is valid" $
       and [valid prior p | (prior, p) <- zip (inits log3) log3]
     assert "vertical pasting: the chase from the last post covers its cone" $
-      sortNub (map from (chaseLog log3)) == cone (init log3) (last log3)
+      sortNub (map from (chaseLog log3)) == coneByIndex (init log3) (last log3)
     assert "vertical pasting: the chase visits exactly the cone names" $
-      sortNub (map from (chaseLog (take 4 log3))) == cone (take 3 log3) (log3 !! 3)
+      sortNub (map from (chaseLog (take 4 log3))) == coneByIndex (take 3 log3) (log3 !! 3)
     assert "a square's vertical sources are the resolved parents" $
       case drop 5 log3 of
         (p : _) ->
