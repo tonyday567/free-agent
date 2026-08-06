@@ -65,6 +65,8 @@ import Free.Agent.Seat
     silentSeat,
   )
 import Circuit.Agent.Cli (Cli (..), parseSessionId)
+import Circuit.Agent.Framing (Stamped (..))
+import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Syntax (FreeAgent (..))
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode (..), exitFailure)
@@ -921,5 +923,60 @@ main = do
         merged = AgentBox (([], [], [], []), ([], [], [], [])) (both (quoter "a" "A") (quoter "b" "B"))
     assert "horizontal pasting: loop [both a b] ≡ loop [a, b]" $
       meetLog 2 [merged] seed == meetLog 2 [boxA, boxB] seed
+
+  -------------------------------------------------------------------------
+  -- Bus stats (flow metrics)
+  -------------------------------------------------------------------------
+  putStrLn "bus stats"
+
+  do
+    let p = mkPost "a" ["b"] "standing by"
+    assert "plain status ping is noise" $ classify defaultRules p == Noise
+
+  do
+    let p = mkPost "a" ["b"] "standing by with loom/foo.md"
+    assert "noise carrying a path is signal" $ classify defaultRules p == Signal
+
+  do
+    let p = mkPost "a" ["b"] "decided to keep the current design"
+    assert "decision word is signal" $ classify defaultRules p == Signal
+
+  do
+    let p = mkPost "a" ["b"] "DONE: stuff/foo.md"
+    assert "DONE plus path is a done claim" $ isDoneClaim p
+
+  do
+    let p = mkPost "a" ["b"] "done with the task"
+    assert "DONE without path is not a done claim" $ not (isDoneClaim p)
+
+  do
+    let mkStored i ts f t body = Stamped i ts (Post f t [] body)
+        posts =
+          [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
+            mkStored 1 "2026-08-05T00:10:00" "b" ["a"] "ack",
+            mkStored 2 "2026-08-05T00:20:00" "a" ["b"] "standing by",
+            mkStored 3 "2026-08-05T00:30:00" "a" ["b"] "🟢 card done"
+          ]
+        slices = slicePosts WholeLog posts
+        stats = case map (uncurry (computeStats defaultRules 1)) slices of
+          [s] -> s
+          _ -> error "expected exactly one slice"
+    assert "whole log is one slice" $ length slices == 1
+    assert "counts all posts" $ statPosts stats == 4
+    assert "counts agents" $ statAgents stats == 2
+    assert "signal = deliverable mark" $ statSignal stats == 1
+    assert "noise = status pings" $ statNoise stats == 2
+    assert "deliverables = conductor marks" $ statDeliverables stats == 1
+
+  do
+    let mkStored i ts f t body = Stamped i ts (Post f t [] body)
+        posts =
+          [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
+            mkStored 1 "2026-08-05T00:10:00" "b" ["a"] "ack",
+            mkStored 2 "2026-08-05T01:05:00" "a" ["b"] "standing by",
+            mkStored 3 "2026-08-05T01:20:00" "a" ["b"] "🟢 card done"
+          ]
+        slices = slicePosts (WindowMinutes 60) posts
+    assert "60m window splits four posts into two slices" $ length slices == 2
 
   putStrLn "All tests passed"
