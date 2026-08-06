@@ -9,15 +9,15 @@
 module Free.Agent.Host
   ( BodyMode (..),
     Host (..),
-    HostConfig (..),
+    BareConfig (..),
     mkHost,
     hostShard,
     processHost,
     cliHost,
     hermesHost,
     kimiHost,
-    apiHost,
-    defaultHostConfig,
+    bareHost,
+    defaultBareConfig,
   )
 where
 
@@ -193,7 +193,7 @@ hermesHost name systemPrompt sessionFile =
       liftIO (cliQuery cli (systemPrompt <> "\n\nUser message:\n" <> body))
 
 -- | Connection configuration for a direct API host.
-data HostConfig = HostConfig
+data BareConfig = BareConfig
   { -- | Identity / from-field for reply posts.
     agentName :: Text,
     -- | API base URL, e.g. "https://api.deepseek.com/v1".
@@ -206,9 +206,9 @@ data HostConfig = HostConfig
   deriving (Show, Eq)
 
 -- | Sensible defaults for an OpenAI-compatible DeepSeek host.
-defaultHostConfig :: HostConfig
-defaultHostConfig =
-  HostConfig
+defaultBareConfig :: BareConfig
+defaultBareConfig =
+  BareConfig
     { agentName = "agent",
       baseUrl = "https://api.deepseek.com/v1",
       model = "deepseek-v4-pro",
@@ -219,14 +219,14 @@ defaultHostConfig =
 --
 -- The caller supplies the system prompt; the post body becomes the user
 -- message. There is no tooling, memory, or context-file injection.
-apiHost ::
+bareHost ::
   (MonadIO m) =>
   -- | Connection configuration.
-  HostConfig ->
+  BareConfig ->
   -- | System prompt.
   Text ->
   Host m
-apiHost cfg systemPrompt =
+bareHost cfg systemPrompt =
   Host
     { hostName = agentName cfg,
       hostBodyMode = BodyWhole,
@@ -236,7 +236,7 @@ apiHost cfg systemPrompt =
         pure [rsp]
     }
 
-chatCompletion :: HostConfig -> Text -> Text -> IO Text
+chatCompletion :: BareConfig -> Text -> Text -> IO Text
 chatCompletion cfg systemPrompt userMessage = do
   manager <- newManager tlsManagerSettings
   initialRequest <- parseRequest (T.unpack (baseUrl cfg <> "/chat/completions"))

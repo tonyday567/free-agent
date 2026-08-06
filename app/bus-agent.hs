@@ -25,6 +25,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad (filterM, forever, guard, unless, when)
 import Control.Monad.State (runStateT)
 import Data.Foldable (traverse_)
+import Data.List (isPrefixOf)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -107,7 +108,7 @@ findScribe = do
 -- | Scribe one post by invoking the external scribe executable.
 scribePost :: FilePath -> FilePath -> Post Text -> IO ()
 scribePost scribe root p = do
-  _ <- readProcess scribe [root] (T.unpack (framePost p))
+  _ <- readProcess scribe ["post", "--root", root] (T.unpack (framePost p))
   pure ()
 
 -- | Run one stored post through the seat and produce reply posts with thread
@@ -201,6 +202,9 @@ main :: IO ()
 main = do
   hSetBuffering stdout LineBuffering
   args <- getArgs
+  when (any (\a -> "-" `isPrefixOf` a && a /= "--") args) $ do
+    usage
+    exitFailure
   case parseArgs args of
     Nothing -> do
       usage
