@@ -11,7 +11,7 @@ module Main (main) where
 
 import Circuit.Agent.Framing (Jsonl (..), StoredPost, parseLine)
 import Data.Char (isDigit)
-import Data.List (foldl')
+import Data.List (foldl', isPrefixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -75,37 +75,51 @@ defaultOptions =
     }
 
 parseArgs :: [String] -> Either String Options
-parseArgs = go defaultOptions
-  where
-    go opts [] =
-      if null (optLogPath opts)
-        then Left "missing LOG.jsonl"
-        else Right opts
-    go opts ("--noise" : v : rest) =
-      go (opts {optRules = (optRules opts) {noiseRE = T.pack v}}) rest
-    go opts ("--signal" : v : rest) =
-      go (opts {optRules = (optRules opts) {signalRE = T.pack v}}) rest
-    go opts ("--window" : v : rest) =
-      case parseDuration v of
-        Nothing -> Left ("bad duration: " ++ v)
-        Just m -> go (opts {optSliceMode = WindowMinutes m}) rest
-    go opts ("--thread" : rest) =
-      go (opts {optSliceMode = ByThread}) rest
-    go opts ("--by-agent" : rest) =
-      go (opts {optSliceMode = ByAgent}) rest
-    go opts ("--damping" : v : rest) =
-      case reads v of
-        [(n, "")] | n > 0 -> go (opts {optDamping = n}) rest
-        _ -> Left ("bad damping count: " ++ v)
-    go opts ("--json" : rest) =
-      go (opts {optJson = True}) rest
-    go _ ("-h" : _) = Left helpText
-    go _ ("--help" : _) = Left helpText
-    go opts [path] =
-      if null (optLogPath opts)
-        then go (opts {optLogPath = path}) []
-        else Left ("unexpected argument: " ++ path)
-    go _ (x : _) = Left ("unknown option: " ++ x)
+parseArgs args = do
+  (flags, positionals) <- parseFlags args [] []
+  case positionals of
+    [] -> Left "missing LOG.jsonl"
+    [path] -> applyFlags flags (defaultOptions {optLogPath = path})
+    _ -> Left ("unexpected extra arguments: " ++ unwords (drop 1 positionals))
+
+-- | Separate flags (and their values) from positional arguments.
+-- Flags may appear before or after the positional LOG path.
+parseFlags :: [String] -> [String] -> [String] -> Either String ([String], [String])
+parseFlags [] flags pos = Right (reverse flags, reverse pos)
+parseFlags ("-h" : _) _ _ = Left helpText
+parseFlags ("--help" : _) _ _ = Left helpText
+parseFlags ("--noise" : v : rest) flags pos = parseFlags rest ("--noise" : v : flags) pos
+parseFlags ("--signal" : v : rest) flags pos = parseFlags rest ("--signal" : v : flags) pos
+parseFlags ("--window" : v : rest) flags pos = parseFlags rest ("--window" : v : flags) pos
+parseFlags ("--damping" : v : rest) flags pos = parseFlags rest ("--damping" : v : flags) pos
+parseFlags ("--thread" : rest) flags pos = parseFlags rest ("--thread" : flags) pos
+parseFlags ("--by-agent" : rest) flags pos = parseFlags rest ("--by-agent" : flags) pos
+parseFlags ("--json" : rest) flags pos = parseFlags rest ("--json" : flags) pos
+parseFlags (x : rest) flags pos
+  | "--" `isPrefixOf` x = Left ("unknown option: " ++ x)
+  | otherwise = parseFlags rest flags (x : pos)
+
+applyFlags :: [String] -> Options -> Either String Options
+applyFlags [] opts = Right opts
+applyFlags ("--noise" : v : rest) opts =
+  applyFlags rest (opts {optRules = (optRules opts) {noiseRE = T.pack v}})
+applyFlags ("--signal" : v : rest) opts =
+  applyFlags rest (opts {optRules = (optRules opts) {signalRE = T.pack v}})
+applyFlags ("--window" : v : rest) opts =
+  case parseDuration v of
+    Nothing -> Left ("bad duration: " ++ v)
+    Just m -> applyFlags rest (opts {optSliceMode = WindowMinutes m})
+applyFlags ("--thread" : rest) opts =
+  applyFlags rest (opts {optSliceMode = ByThread})
+applyFlags ("--by-agent" : rest) opts =
+  applyFlags rest (opts {optSliceMode = ByAgent})
+applyFlags ("--damping" : v : rest) opts =
+  case reads v of
+    [(n, "")] | n > 0 -> applyFlags rest (opts {optDamping = n})
+    _ -> Left ("bad damping count: " ++ v)
+applyFlags ("--json" : rest) opts =
+  applyFlags rest (opts {optJson = True})
+applyFlags (_ : rest) opts = applyFlags rest opts
 
 parseDuration :: String -> Maybe Int
 parseDuration s =
