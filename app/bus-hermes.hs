@@ -162,9 +162,10 @@ runOne seat stored = do
   (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
   pure [routeReply (scrubReply out) {thread = sortNub (parentId : thread out)} | out <- outs]
 
--- | Path to the cursor file for an agent. The cursor stores the last
--- `postId` the agent has processed, so restarts catch up without re-reading
--- the whole log.
+-- | Path to the cursor file for an agent. The cursor stores the next
+-- `postId` the agent should process, so restarts catch up without re-reading
+-- the whole log. A missing cursor defaults to 0, meaning "start from the
+-- first post".
 cursorPath :: FilePath -> Name -> FilePath
 cursorPath root name = root </> (".cursor-" <> T.unpack name)
 
@@ -179,7 +180,8 @@ readCursor root name = do
       txt <- TIO.readFile path
       pure $ maybe 0 fromIntegral (readMaybe @Integer (T.unpack (T.strip txt)))
 
--- | Persist the cursor for an agent.
+-- | Persist the cursor for an agent. Writes @stampId + 1@ so the next wake
+-- starts after the post just processed.
 writeCursor :: FilePath -> Name -> PostId -> IO ()
 writeCursor root name pid =
   TIO.writeFile (cursorPath root name) (T.pack (show pid))
@@ -188,9 +190,9 @@ writeCursor root name pid =
 -- addressed to any of the subscribed names.
 --
 -- On startup the file is scanned from the beginning; posts with 'stampId'
--- greater than the supplied cursor and addressed to any subscribed name are
--- delivered. After catch-up the handle is parked at EOF and fsnotify wakes it
--- for new lines.
+-- greater than or equal to the supplied cursor and addressed to any subscribed
+-- name are delivered. After catch-up the handle is parked at EOF and fsnotify
+-- wakes it for new lines.
 tailLog :: FilePath -> [Name] -> PostId -> (StoredPost -> IO ()) -> IO ()
 tailLog path names startCursor cb = do
   exists <- doesFileExist path
@@ -228,7 +230,7 @@ tailLog path names startCursor cb = do
 
     filterStoredSince names' cursor line = do
       stored <- parseLine line
-      guard (stampId stored > cursor)
+      guard (stampId stored >= cursor)
       guard (deliversTo (stamped stored) names')
       pure stored
 
@@ -270,4 +272,4 @@ main = do
       tailLog path names cursor $ \stored -> do
         replies <- filter keepReply <$> runOne seat stored
         traverse_ (scribePost scribe root) replies
-        writeCursor root agentName (stampId stored)
+        writeCursor root agentName (stampId stored + 1)

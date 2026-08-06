@@ -37,7 +37,7 @@ module Free.Agent.Bus
 where
 
 import Circuit (close, companion, conjoint)
-import Circuit.Agent (Name, Post (..), PostId, deliversTo, sortNub)
+import Circuit.Agent (Name, Post (..), PostId, sortNub)
 import Circuit.Agent.Framing (Jsonl (..), Snoc (..), StoredPost, Stamped (..), These (..), Uncons (..), frameStored, formatNow)
 import Control.Arrow (runKleisli)
 import Control.Concurrent (ThreadId, forkIO, killThread)
@@ -175,15 +175,15 @@ scribeCard path p = do
 
 -- | Free-agent-bus delivery predicate.
 --
--- * @to = []@ broadcasts to every subscriber.
--- * @to = [""]@ is the discard channel (delivers to no one).
+-- * @to = ["all"]@ broadcasts to every subscriber.
+-- * @to = []@ and @to = [""]@ are discard (deliver to no one).
 -- * Named recipients deliver to subscribers whose name appears in @to@.
 busDeliversTo :: Post a -> [Name] -> Bool
 busDeliversTo p subs =
   case to p of
-    [] -> True
-    [""] -> False
-    ts -> any (`elem` ts) subs
+    [] -> False
+    [t] | t == T.empty -> False
+    ts -> ("all" :: Text) `elem` ts || any (`elem` ts) subs
 
 -- | Read all posts matching any of the names with id greater than the cursor.
 --
