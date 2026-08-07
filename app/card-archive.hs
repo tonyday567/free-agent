@@ -2,20 +2,24 @@
 
 -- | Card archive CLI.
 --
---   card-archive scribe [--log PATH] <card.md>
+--   card-archive scribe  [--log PATH] [--from NAME] [--to NAME]... [--thread ID]... <card.md>
 --   card-archive migrate [--log PATH] <dir>
 --   card-archive edges [--log PATH]
 --   card-archive lookup [--log PATH] <postId|name>
 --
 -- Default log: ./coffee-permanent.jsonl  (for migrate: <dir>/coffee-permanent.jsonl when --log omitted)
+--
+-- The scribe does NOT scrape edges from the card body. --from defaults to the
+-- card basename; --to and --thread default to empty. Caller supplies exactly
+-- what they want in the log.
 module Main (main) where
 
 import Circuit.Agent (Post (..), PostId)
 import Circuit.Agent.Framing (StoredPost, Stamped (..), frameStored)
 import Control.Monad (unless, when)
 import Data.Foldable (traverse_)
-import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.List (isPrefixOf)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (scribeCard)
@@ -23,7 +27,6 @@ import Free.Agent.CardArchive
   ( cardNameOf,
     cardStatus,
     cardTitle,
-    extractResidualOf,
     loadJsonl,
     migrateDir,
     nameEdges,
@@ -49,7 +52,7 @@ main = do
 usage :: IO ()
 usage = do
   TIO.putStrLn "Usage:"
-  TIO.putStrLn "  card-archive scribe  [--log PATH] <card.md>"
+  TIO.putStrLn "  card-archive scribe  [--log PATH] [--from NAME] [--to NAME]... [--thread ID]... <card.md>"
   TIO.putStrLn "  card-archive migrate [--log PATH] <dir>"
   TIO.putStrLn "  card-archive edges   [--log PATH]"
   TIO.putStrLn "  card-archive lookup  [--log PATH] <postId|name>"
@@ -79,41 +82,52 @@ defaultLog = "coffee-permanent.jsonl"
 -- ---------------------------------------------------------------------------
 
 runScribe :: [String] -> IO ()
-runScribe args = do
-  let (mlog, rest) = parseFlags args
-  case rest of
-    [cardPath] -> do
+runScribe args =
+  case parseScribeArgs args of
+    Left err -> TIO.putStrLn ("🔴 " <> T.pack err) >> usage >> exitFailure
+    Right (mlog, mfrom, toNames, threadIds, cardPath) -> do
       exists <- doesFileExist cardPath
       if not exists
         then TIO.putStrLn ("🔴 missing card: " <> T.pack cardPath) >> exitFailure
         else do
           body <- TIO.readFile cardPath
-          let name = cardNameOf cardPath
+          let fromName = maybe (cardNameOf cardPath) T.pack mfrom
               logPath = fromMaybe defaultLog mlog
-          existing <- loadJsonl logPath
-          let nameToId =
-                Map.fromList
-                  [(from (stamped s), stampId s) | s <- existing]
-              deps = extractResidualOf body
-              thread = mapMaybe (`Map.lookup` nameToId) deps
-              post = Post name [] thread body
+              post = Post fromName (map T.pack toNames) threadIds body
           stored <- scribeCard logPath post
           TIO.putStrLn (frameStored stored)
           TIO.putStrLn $
             "🟢 scribed "
-              <> name
+              <> fromName
               <> " id="
               <> T.pack (show (stampId stored))
               <> " → "
               <> T.pack logPath
-          unless (null deps) $
-            TIO.putStrLn $
-              "   thread: "
-                <> T.intercalate "," (map (T.pack . show) thread)
-                <> " ("
-                <> T.pack (show (length deps - length thread))
-                <> " unresolved)"
-    _ -> usage >> exitFailure
+
+-- | Parse scribe flags. --from defaults to the card basename if omitted.
+-- --to and --thread are repeatable and default to empty. No body scraping.
+parseScribeArgs :: [String] -> Either String (Maybe FilePath, Maybe String, [String], [PostId], FilePath)
+parseScribeArgs = go Nothing Nothing [] [] []
+  where
+    go _mlog mfrom tos threads pos ("--log" : p : rest) = go (Just p) mfrom tos threads pos rest
+    go _ _ _ _ _ ("--log" : []) = Left "--log requires a path"
+    go mlog _ tos threads pos ("--from" : n : rest) = go mlog (Just n) tos threads pos rest
+    go _ _ _ _ _ ("--from" : []) = Left "--from requires a name"
+    go mlog mfrom tos threads pos ("--to" : n : rest) = go mlog mfrom (n : tos) threads pos rest
+    go _ _ _ _ _ ("--to" : []) = Left "--to requires a name"
+    go mlog mfrom tos threads pos ("--thread" : n : rest) =
+      case readMaybe n of
+        Nothing -> Left ("invalid --thread id: " ++ n)
+        Just pid -> go mlog mfrom tos (pid : threads) pos rest
+    go _ _ _ _ _ ("--thread" : []) = Left "--thread requires an id"
+    go mlog mfrom tos threads pos (x : rest)
+      | "--" `isPrefixOf` x = Left ("unknown flag: " ++ x)
+      | otherwise = go mlog mfrom tos threads (pos ++ [x]) rest
+    go mlog mfrom tos threads pos [] =
+      case pos of
+        [cardPath] -> Right (mlog, mfrom, reverse tos, reverse threads, cardPath)
+        [] -> Left "missing card path"
+        _ -> Left "expected exactly one card path"
 
 -- ---------------------------------------------------------------------------
 -- migrate

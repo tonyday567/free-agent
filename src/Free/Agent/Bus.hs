@@ -38,7 +38,7 @@ where
 
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, sortNub)
-import Circuit.Agent.Framing (Jsonl (..), Snoc (..), StoredPost, Stamped (..), These (..), Uncons (..), frameStored, formatNow)
+import Circuit.Agent.Framing (Jsonl (..), Snoc (..), StoredPost, Stamped (..), These (..), Uncons (..), frameStored, formatNow, parseLine)
 import Control.Arrow (runKleisli)
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.STM
@@ -63,6 +63,7 @@ import Control.Monad (forever, unless)
 import Control.Monad.State (runStateT)
 import Data.Foldable (traverse_)
 import Data.List (maximum)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -167,7 +168,8 @@ scribeCard path p = do
   exists <- doesFileExist path
   unless exists $ withFile path AppendMode (\_ -> pure ())
   withFileLock (path <.> "lock") Exclusive $ \_lock -> do
-    pid <- fromIntegral . length . T.lines <$> TIO.readFile path
+    existing <- mapMaybe parseLine . T.lines <$> TIO.readFile path
+    let pid = if null existing then 0 else maximum (map stampId existing) + 1
     ts <- formatNow
     let stored = Stamped pid ts p
     appendStoredPostsUnlocked path [stored]
