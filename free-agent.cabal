@@ -144,6 +144,7 @@ executable free-agent-bus
     fsnotify >=0.4 && <0.5,
     optparse-applicative >=0.18 && <0.19,
     text >=2.0 && <3,
+    time >=1.12 && <1.15,
 
 executable free-agent-bus-agent
   import: ghc-options-stanza

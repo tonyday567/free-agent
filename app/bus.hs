@@ -11,20 +11,25 @@
 --   cursor [ROOT] get NAME
 --   cursor [ROOT] set NAME ID
 --   ping-watch [ROOT] NAME
+--   status [ROOT]
 module Main (main) where
 
 import Circuit.Agent (Name, Post (..), PostId, mkPost)
-import Circuit.Agent.Framing (StoredPost, frameStored, parseLine, parsePost, stampId, stamped)
+import Circuit.Agent.Framing (StoredPost, frameStored, parseLine, parsePost, stampId, stampTs, stamped)
+import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Monad (forever, guard, unless, when)
 import Data.Foldable (traverse_)
-import Data.Maybe (mapMaybe)
+import Data.List (isPrefixOf, sort)
+import Data.Maybe (mapMaybe, maybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.Time (LocalTime, NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, localTimeToUTC, utc)
+import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Free.Agent.Bus (busDeliversTo, closeBus, openBus, scribeIO)
 import Options.Applicative
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, listDirectory)
 import System.Exit (exitFailure)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.FSNotify (Event (..), watchDir, withManager)
@@ -52,6 +57,7 @@ data Command
   | CursorGetCommand FilePath Text
   | CursorSetCommand FilePath Text PostId
   | PingWatchCommand FilePath Text
+  | StatusCommand FilePath
 
 -- ---------------------------------------------------------------------------
 -- Parsers
@@ -136,6 +142,9 @@ cursorCmd =
 pingWatchCmd :: Parser Command
 pingWatchCmd = PingWatchCommand <$> rootOpt <*> nameArg
 
+statusCmd :: Parser Command
+statusCmd = StatusCommand <$> rootOpt
+
 commandParser :: Parser Command
 commandParser =
   subparser
@@ -144,6 +153,7 @@ commandParser =
         <> command "read" (info (readCmd <**> helper) (progDesc "Read posts addressed to NAMEs"))
         <> command "cursor" (info (cursorCmd <**> helper) (progDesc "Read or write agent cursor"))
         <> command "ping-watch" (info (pingWatchCmd <**> helper) (progDesc "Watch the ping file for NAME and exit on change"))
+        <> command "status" (info (statusCmd <**> helper) (progDesc "Bus health: post count, last post, seats"))
     )
 
 opts :: ParserInfo Command
@@ -166,6 +176,7 @@ runCommand (ReadCommand root names since) = runRead root names since
 runCommand (CursorGetCommand root name) = runCursorGet root name
 runCommand (CursorSetCommand root name pid) = runCursorSet root name pid
 runCommand (PingWatchCommand root name) = runPingWatch root name
+runCommand (StatusCommand root) = runStatus root
 
 -- ---------------------------------------------------------------------------
 -- post
@@ -300,3 +311,67 @@ runPingWatch root name = do
       TIO.putStrLn txt
       putMVar done ()
     takeMVar done
+
+-- ---------------------------------------------------------------------------
+-- status
+-- ---------------------------------------------------------------------------
+
+runStatus :: FilePath -> IO ()
+runStatus root = do
+  let path = root </> "log.jsonl"
+  exists <- doesFileExist path
+  unless exists $ do
+    TIO.putStrLn ("🔴 " <> T.pack root <> " — no log.jsonl; not a bus")
+    exitFailure
+  content <- TIO.readFile path
+  let ls = filter (not . T.null) (T.lines content)
+      posts = mapMaybe parseLine ls
+      idless = length ls - length posts
+      maxId = maximum (0 : map stampId posts)
+  now <- getCurrentTime
+  case posts of
+    [] ->
+      TIO.putStrLn ("🟡 " <> T.pack root <> " — empty bus (0 posts)")
+    _ -> do
+      let lastPost = last posts
+          age = diffUTCTime now <$> parseTs (stampTs lastPost)
+          live = maybe False (< 900) age
+      TIO.putStrLn
+        ( (if live then "🟢 " else "🟡 ")
+            <> T.pack root
+            <> (if live then " — live; " else " — quiet; ")
+            <> T.pack (show (length posts))
+            <> " posts"
+            <> (if idless > 0 then " (" <> T.pack (show idless) <> " id-less)" else "")
+            <> "; last id="
+            <> T.pack (show (stampId lastPost))
+            <> " from="
+            <> from (stamped lastPost)
+            <> " at "
+            <> stampTs lastPost
+            <> maybe "" (\a -> " (" <> fmtAge a <> " ago)") age
+        )
+  entries <- listDirectory root
+  let names = sort [n | e <- entries, Just n <- [T.stripPrefix ".cursor-" (T.pack e)]]
+  cursors <- traverse (\n -> (n,) <$> readCursor root n) names
+  let behind = [(n, c) | (n, c) <- cursors, c <= maxId]
+  if null names
+    then TIO.putStrLn "seats: no cursors — nothing has ever read this bus"
+    else do
+      TIO.putStrLn ("seats: " <> T.pack (show (length names)) <> " cursors, " <> T.pack (show (length behind)) <> " behind")
+      traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " (" <> T.pack (show (maxId - c + 1)) <> " unread)")) behind
+
+-- | Scribe stamps naive UTC; raw appends may carry an offset. Take both.
+parseTs :: Text -> Maybe UTCTime
+parseTs t =
+  iso8601ParseM s
+    <|> (localTimeToUTC utc <$> (iso8601ParseM s :: Maybe LocalTime))
+  where
+    s = T.unpack t
+
+fmtAge :: NominalDiffTime -> Text
+fmtAge s
+  | s < 120 = T.pack (show (round s :: Int)) <> "s"
+  | s < 7200 = T.pack (show (round (s / 60) :: Int)) <> "m"
+  | s < 172800 = T.pack (show (round (s / 3600) :: Int)) <> "h"
+  | otherwise = T.pack (show (round (s / 86400) :: Int)) <> "d"
