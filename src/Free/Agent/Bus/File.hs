@@ -59,6 +59,7 @@ data QuiesceConfig = QuiesceConfig
     -- | Length of one cycle in microseconds.
     qcCycleMicros :: Int
   }
+  deriving (Show)
 
 -- | Path to the cursor file for an agent.
 --

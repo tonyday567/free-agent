@@ -1,7 +1,7 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | free-agent-bus CLI.
+-- | free-agent bus CLI.
 --
 -- Subcommands:
 --
@@ -12,7 +12,12 @@
 --   cursor [ROOT] set NAME ID
 --   ping-watch [ROOT] NAME
 --   status [ROOT]
-module Main (main) where
+module Free.Agent.Bus.Cli
+  ( BusCommand (..),
+    busParser,
+    runBusCommand,
+  )
+where
 
 import Circuit.Agent (Name, Post (..), PostId, mkPost)
 import Circuit.Agent.Framing (StoredPost, frameStored, parseLine, parsePost, stampId, stampTs, stamped)
@@ -49,8 +54,9 @@ import System.IO
 import Text.Read (readMaybe)
 
 data Since = SinceId PostId | SinceCursor Text
+  deriving (Show)
 
-data Command
+data BusCommand
   = PostCommand FilePath (Maybe Text) [Text] (Maybe Text)
   | WatchCommand FilePath [Text]
   | ReadCommand FilePath [Text] (Maybe Since)
@@ -58,6 +64,7 @@ data Command
   | CursorSetCommand FilePath Text PostId
   | PingWatchCommand FilePath Text
   | StatusCommand FilePath
+  deriving (Show)
 
 -- ---------------------------------------------------------------------------
 -- Parsers
@@ -86,7 +93,7 @@ namesArg =
         (metavar "NAME..." <> help "Subscriber name(s)")
     )
 
-postCmd :: Parser Command
+postCmd :: Parser BusCommand
 postCmd = do
   root <- rootOpt
   fromName <-
@@ -109,10 +116,10 @@ postCmd = do
       )
   pure (PostCommand root fromName toNames bodyText)
 
-watchCmd :: Parser Command
+watchCmd :: Parser BusCommand
 watchCmd = WatchCommand <$> rootOpt <*> namesArg
 
-readCmd :: Parser Command
+readCmd :: Parser BusCommand
 readCmd = do
   root <- rootOpt
   names <- namesArg
@@ -124,29 +131,29 @@ sinceParser =
   (SinceId <$> option auto (long "since" <> metavar "ID" <> help "Only posts with id >= ID"))
     <|> (SinceCursor . T.pack <$> strOption (long "cursor" <> metavar "NAME" <> help "Only posts at or after .cursor-NAME"))
 
-cursorGetCmd :: Parser Command
+cursorGetCmd :: Parser BusCommand
 cursorGetCmd = CursorGetCommand <$> rootOpt <*> nameArg
 
-cursorSetCmd :: Parser Command
+cursorSetCmd :: Parser BusCommand
 cursorSetCmd = CursorSetCommand <$> rootOpt <*> nameArg <*> idArg
   where
     idArg = argument auto (metavar "ID" <> help "Cursor value (next post id)")
 
-cursorCmd :: Parser Command
+cursorCmd :: Parser BusCommand
 cursorCmd =
   subparser
     ( command "get" (info (cursorGetCmd <**> helper) (progDesc "Print current cursor"))
         <> command "set" (info (cursorSetCmd <**> helper) (progDesc "Set cursor"))
     )
 
-pingWatchCmd :: Parser Command
+pingWatchCmd :: Parser BusCommand
 pingWatchCmd = PingWatchCommand <$> rootOpt <*> nameArg
 
-statusCmd :: Parser Command
+statusCmd :: Parser BusCommand
 statusCmd = StatusCommand <$> rootOpt
 
-commandParser :: Parser Command
-commandParser =
+busParser :: Parser BusCommand
+busParser =
   subparser
     ( command "post" (info (postCmd <**> helper) (progDesc "Post a message to the bus"))
         <> command "watch" (info (watchCmd <**> helper) (progDesc "Watch the log for posts addressed to NAMEs"))
@@ -156,27 +163,18 @@ commandParser =
         <> command "status" (info (statusCmd <**> helper) (progDesc "Bus health: post count, last post, seats"))
     )
 
-opts :: ParserInfo Command
-opts = info (commandParser <**> helper) (fullDesc <> progDesc "free-agent bus CLI" <> header "free-agent-bus - append-only JSONL message bus")
-
 -- ---------------------------------------------------------------------------
 -- Main dispatch
 -- ---------------------------------------------------------------------------
 
-main :: IO ()
-main = do
-  hSetBuffering stdout LineBuffering
-  cmd <- execParser opts
-  runCommand cmd
-
-runCommand :: Command -> IO ()
-runCommand (PostCommand root mfrom mto mbody) = runPost root mfrom mto mbody
-runCommand (WatchCommand root names) = runWatch root names
-runCommand (ReadCommand root names since) = runRead root names since
-runCommand (CursorGetCommand root name) = runCursorGet root name
-runCommand (CursorSetCommand root name pid) = runCursorSet root name pid
-runCommand (PingWatchCommand root name) = runPingWatch root name
-runCommand (StatusCommand root) = runStatus root
+runBusCommand :: BusCommand -> IO ()
+runBusCommand (PostCommand root mfrom mto mbody) = runPost root mfrom mto mbody
+runBusCommand (WatchCommand root names) = runWatch root names
+runBusCommand (ReadCommand root names since) = runRead root names since
+runBusCommand (CursorGetCommand root name) = runCursorGet root name
+runBusCommand (CursorSetCommand root name pid) = runCursorSet root name pid
+runBusCommand (PingWatchCommand root name) = runPingWatch root name
+runBusCommand (StatusCommand root) = runStatus root
 
 -- ---------------------------------------------------------------------------
 -- post
@@ -290,9 +288,8 @@ runCursorGet root name = do
   TIO.putStrLn (T.pack (show pid))
 
 runCursorSet :: FilePath -> Text -> PostId -> IO ()
-runCursorSet root name pid = do
-  let path = cursorFilePath root name
-  TIO.writeFile path (T.pack (show pid))
+runCursorSet root name pid =
+  TIO.writeFile (cursorFilePath root name) (T.pack (show pid))
 
 -- ---------------------------------------------------------------------------
 -- ping-watch

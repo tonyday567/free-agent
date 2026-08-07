@@ -64,7 +64,7 @@ import Free.Agent.Seat
     runAgentSBox,
     silentSeat,
   )
-import Circuit.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
 import Circuit.Agent.Framing (Stamped (..))
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Syntax (FreeAgent (..))

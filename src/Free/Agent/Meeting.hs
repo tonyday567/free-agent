@@ -35,7 +35,7 @@ module Free.Agent.Meeting
 where
 
 import Circuit.Agent (Agent, Name, Post (..), PostId, coneByIndex)
-import Circuit.Agent.Cli (synthesisPosts)
+import Circuit.Agent.Query (synthesisPosts)
 import Circuit.Poly (System (..), monoDir, monoIn)
 import Circuit.Poly.Process (runSystem)
 import Data.List (inits, intersect)

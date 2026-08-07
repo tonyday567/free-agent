@@ -21,10 +21,9 @@ module Free.Agent.Bus
     scribe,
     scribeIO,
 
-    -- * Durable append (shared with card-archive)
+    -- * Durable append
     appendStoredPosts,
     appendStoredPostsUnlocked,
-    scribeCard,
 
     -- * Subscription
     busDeliversTo,
@@ -38,7 +37,7 @@ where
 
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, sortNub)
-import Circuit.Agent.Framing (Jsonl (..), Snoc (..), StoredPost, Stamped (..), These (..), Uncons (..), frameStored, formatNow, parseLine)
+import Circuit.Agent.Framing (Jsonl (..), Snoc (..), StoredPost, Stamped (..), These (..), Uncons (..), frameStored, formatNow)
 import Control.Arrow (runKleisli)
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.STM
@@ -63,7 +62,7 @@ import Control.Monad (forever, unless)
 import Control.Monad.State (runStateT)
 import Data.Foldable (traverse_)
 import Data.List (maximum)
-import Data.Maybe (mapMaybe)
+
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -143,8 +142,8 @@ scribeIO bus p = do
 
 -- | Append stamped posts under the exclusive file lock.
 --
--- Shared durable image primitive for the live bus persistence loop and the
--- single-writer card archive. Does not assign ids or timestamps.
+-- Shared durable image primitive for the live bus persistence loop. Does not
+-- assign ids or timestamps.
 appendStoredPosts :: FilePath -> [StoredPost] -> IO ()
 appendStoredPosts path posts =
   withFileLock (path <.> "lock") Exclusive $ \_lock ->
@@ -156,24 +155,6 @@ appendStoredPostsUnlocked :: FilePath -> [StoredPost] -> IO ()
 appendStoredPostsUnlocked path posts =
   withFile path AppendMode $ \h ->
     traverse_ (TIO.hPutStrLn h . frameStored) posts
-
--- | Single-writer card scribe: assign @postId@ = current line count, stamp
--- @ts@, and append one 'StoredPost' under the file lock. No STM bus image.
---
--- Creates an empty log file when missing. Suitable for batch migration and
--- one-shot archivist appends — not for the multi-consumer live bus.
-scribeCard :: FilePath -> Post Text -> IO StoredPost
-scribeCard path p = do
-  createDirectoryIfMissing True (takeDirectory path)
-  exists <- doesFileExist path
-  unless exists $ withFile path AppendMode (\_ -> pure ())
-  withFileLock (path <.> "lock") Exclusive $ \_lock -> do
-    existing <- mapMaybe parseLine . T.lines <$> TIO.readFile path
-    let pid = if null existing then 0 else maximum (map stampId existing) + 1
-    ts <- formatNow
-    let stored = Stamped pid ts p
-    appendStoredPostsUnlocked path [stored]
-    pure stored
 
 -- | Free-agent-bus delivery predicate.
 --

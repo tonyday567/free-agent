@@ -55,13 +55,16 @@ library
     Free.Agent.Seat
     Free.Agent.Bus
     Free.Agent.Bus.File
-    Free.Agent.CardArchive
     Free.Agent.Diagram
     Free.Agent.Hyper
     Free.Agent.Meeting
     Free.Agent.Derivation
     Free.Agent.BusStats
     Free.Agent.Acp
+    Free.Agent.Bus.Cli
+    Free.Agent.Agent.Runner
+    Free.Agent.Cli
+    Free.Agent.Cli.Config
   build-depends:
     aeson >=2.1 && <2.4,
     base >=4.18 && <5,
@@ -78,6 +81,7 @@ library
     http-client-tls >=0.3 && <0.4,
     http-types >=0.12 && <0.13,
     mtl >=2.3 && <2.4,
+    optparse-applicative >=0.18 && <0.20,
     process >=1.6 && <1.7,
     regex-tdfa >=1.3 && <1.4,
     stm >=2.5 && <2.6,
@@ -102,153 +106,25 @@ executable free-agent-axioma
     string-diagrams,
     text >=2.0 && <3,
 
-executable free-agent-render-meeting
+executable free-agent
   import: ghc-options-stanza
   import: ghc2024-stanza
   hs-source-dirs: app
-  main-is: render-meeting.hs
-  build-depends:
-    base >=4.18 && <5,
-    chart-svg >=0.8 && <0.9,
-    circuits-agent,
-    directory >=1.3 && <1.4,
-    filepath >=1.4 && <1.6,
-    free-agent,
-    strings-svg >=0.1 && <0.2,
-    text >=2.0 && <3,
-
-executable free-agent-abbott-costello
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: abbott-costello.hs
+  main-is: free-agent.hs
   build-depends:
     base >=4.18 && <5,
     circuits,
-    circuits-agent,
-    free-agent,
-    mtl >=2.3 && <2.4,
-    text >=2.0 && <3,
-
-executable free-agent-bus
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: bus.hs
-  build-depends:
-    base >=4.18 && <5,
     circuits-agent,
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
     free-agent,
     fsnotify >=0.4 && <0.5,
-    optparse-applicative >=0.18 && <0.19,
+    http-client >=0.7 && <0.8,
+    http-client-tls >=0.3 && <0.4,
+    http-types >=0.12 && <0.13,
+    mtl >=2.3 && <2.4,
+    optparse-applicative >=0.18 && <0.20,
+    process >=1.6 && <1.7,
     text >=2.0 && <3,
     time >=1.12 && <1.15,
-
-executable free-agent-bus-agent
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: bus-agent.hs
-  build-depends:
-    base >=4.18 && <5,
-    circuits,
-    circuits-agent,
-    directory >=1.3 && <1.4,
-    filepath >=1.4 && <1.6,
-    free-agent,
-    fsnotify >=0.4 && <0.5,
-    mtl >=2.3 && <2.4,
-    process >=1.6 && <1.7,
-    text >=2.0 && <3,
-
-executable free-agent-bus-hermes
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: bus-hermes.hs
-  build-depends:
-    base >=4.18 && <5,
-    circuits,
-    circuits-agent,
-    directory >=1.3 && <1.4,
-    filepath >=1.4 && <1.6,
-    free-agent,
-    fsnotify >=0.4 && <0.5,
-    mtl >=2.3 && <2.4,
-    process >=1.6 && <1.7,
-    text >=2.0 && <3,
-
-executable free-agent-bus-kimi
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: bus-kimi.hs
-  build-depends:
-    base >=4.18 && <5,
-    circuits,
-    circuits-agent,
-    directory >=1.3 && <1.4,
-    filepath >=1.4 && <1.6,
-    free-agent,
-    fsnotify >=0.4 && <0.5,
-    mtl >=2.3 && <2.4,
-    process >=1.6 && <1.7,
-    text >=2.0 && <3,
-
-executable free-agent-bus-bare
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: bus-bare.hs
-  build-depends:
-    base >=4.18 && <5,
-    circuits,
-    circuits-agent,
-    directory >=1.3 && <1.4,
-    filepath >=1.4 && <1.6,
-    free-agent,
-    fsnotify >=0.4 && <0.5,
-    mtl >=2.3 && <2.4,
-    process >=1.6 && <1.7,
-    text >=2.0 && <3,
-
-executable card-archive
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: card-archive.hs
-  build-depends:
-    base >=4.18 && <5,
-    circuits-agent,
-    containers >=0.6 && <0.9,
-    directory >=1.3 && <1.4,
-    filepath >=1.4 && <1.6,
-    free-agent,
-    text >=2.0 && <3,
-
-executable free-agent-bus-stats
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: bus-stats.hs
-  build-depends:
-    base >=4.18 && <5,
-    circuits-agent,
-    free-agent,
-    text >=2.0 && <3,
-    time >=1.12 && <1.15,
-
-executable free-agent-acp-probe
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: acp-probe.hs
-  build-depends:
-    base >=4.18 && <5,
-    directory >=1.3 && <1.4,
-    filepath >=1.4 && <1.6,
-    free-agent,
-    text >=2.0 && <3,
 

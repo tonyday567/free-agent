@@ -23,7 +23,7 @@ where
 
 import Circuit (Ends (..), endsK)
 import Circuit.Agent (Post (..), Shard, mkPost)
-import Circuit.Agent.Cli (Cli, cliQuery, hermesCli, kimiCli)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, kimiCli, parseSessionId)
 import Circuit.Parser.Json (Json (..), encodeJson)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.State.Class (MonadState (..))
@@ -37,6 +37,7 @@ import Data.Vector qualified as V
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
+import System.Exit (ExitCode (..))
 import System.Process (readProcess)
 
 -- $setup
@@ -169,9 +170,10 @@ kimiHost name model provider sessionFile = cliHost name (kimiCli model provider 
 
 -- | Hermes host on the shared 'Cli' seat.
 --
--- Runs @hermes chat -q@ per body (see 'hermesCli'), prepending the supplied
--- system prompt to the body in the query.  The optional model and provider
--- override the CLI defaults; @Nothing@ keeps the hermes CLI default.
+-- Runs @hermes chat -q@ per body, prepending the supplied system prompt to
+-- the body in the query.  The optional model and provider override the CLI
+-- defaults; @Nothing@ keeps the hermes CLI default.  @yolo@ controls whether
+-- @--yolo -Q@ is passed to hermes.
 -- Sessions persist across calls via @sessionFile@; a stale session falls
 -- back to fresh.
 --
@@ -187,17 +189,38 @@ hermesHost ::
   Maybe Text ->
   -- | Provider passed to @hermes --provider@, if any.
   Maybe Text ->
+  -- | Pass @--yolo -Q@ to hermes.
+  Bool ->
   -- | Session file for cross-call context.
   FilePath ->
   Host m
-hermesHost name systemPrompt model provider sessionFile =
+hermesHost name systemPrompt model provider yolo sessionFile =
   Host
     { hostName = name,
       hostBodyMode = BodyWhole,
       hostRun = traverse runOne
     }
   where
-    cli = hermesCli model provider sessionFile
+    cli =
+      Cli
+        { cliCommand = "hermes",
+          cliArgv = \prompt mSid ->
+            ["chat", "-q", T.unpack prompt]
+              <> maybe [] (\m -> ["-m", T.unpack m]) model
+              <> maybe [] (\p -> ["--provider", T.unpack p]) provider
+              <> if yolo then ["--yolo", "-Q"] else []
+              <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
+          cliStdin = const "",
+          cliSessionFile = sessionFile,
+          cliSessionId = parseSessionId,
+          cliStale = \code out ->
+            code /= ExitSuccess
+              || "No session found matching" `T.isInfixOf` out
+              || "Session not found" `T.isInfixOf` out,
+          cliScrub = cleanCliOut,
+          cliStderr = StderrMerge,
+          cliStderrTee = Nothing
+        }
     runOne body =
       liftIO (cliQuery cli (systemPrompt <> "\n\nUser message:\n" <> body))
 
