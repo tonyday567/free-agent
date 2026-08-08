@@ -17,6 +17,7 @@ module Free.Agent.Cli
 
     -- * Query
     cliQuery,
+    cliQueryBS,
 
     -- * Shard adapters
     cliShard,
@@ -54,7 +55,19 @@ import Data.Text.IO qualified as TIO
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (-<.>))
-import System.Process (proc, readCreateProcessWithExitCode)
+import System.IO (hClose)
+import System.Process
+  ( CreateProcess (std_err, std_out),
+    StdStream (CreatePipe),
+    createProcess,
+    proc,
+    readCreateProcessWithExitCode,
+    waitForProcess,
+  )
+
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
+import GHC.IO.Handle (hGetContents)
 
 -- | Invocation recipe for a CLI agent.
 --
@@ -303,6 +316,28 @@ cliQuery cli prompt = do
       pure (cliScrub cli routedOut)
     scrape out =
       for_ (cliSessionId cli out) (writeStoredSession (cliSessionFile cli))
+
+-- | Like 'cliQuery' but returns raw stdout as 'BS.ByteString' before
+-- any decoding or filtering.  Uses 'CreatePipe' to read bytes directly
+-- from the process rather than going through the locale-aware 'String'
+-- path of 'readCreateProcessWithExitCode'.
+cliQueryBS :: Cli -> Text -> IO BS.ByteString
+cliQueryBS cli prompt = do
+  let cp =
+        (proc (cliCommand cli) (cliArgv cli prompt Nothing))
+          { std_out = CreatePipe,
+            std_err = CreatePipe
+          }
+  (_, Just outH, Just errH, ph) <- createProcess cp
+  -- Read the error handle fully so the process doesn't block.
+  _ <- BS.hGetContents errH
+  raw <- BS.hGetContents outH
+  code <- waitForProcess ph
+  hClose errH
+  hClose outH
+  if code /= ExitSuccess
+    then fail ("cliQueryBS: " <> cliCommand cli <> " exited " <> show code)
+    else pure raw
 
 readStoredSession :: FilePath -> IO (Maybe Text)
 readStoredSession path = do
