@@ -171,9 +171,31 @@ tailLog path names startCursor mQuiesce cb = do
           _ <- tryPutTMVar signal ()
           pure ()
     case mQuiesce of
-      Nothing -> atomically (readTVar halted >>= check)
+      Nothing -> pollLoop offRef signal halted
       Just (qc, onQuiesce) -> quiesceLoop qc signal halted 0 onQuiesce
   where
+    -- | No-quiesce poll loop: wait on fsnotify with a 1 s timeout, then
+    -- manually re-drain.  FSEvents on macOS does not reliably fire on
+    -- append, so the timeout fallback ensures delivery within ~1 s.
+    pollLoop offRef signal halted = do
+      h <- atomically (readTVar halted)
+      if h
+        then pure ()
+        else do
+          m <- timeout 1_000_000 (atomically (takeTMVar signal))
+          case m of
+            Just () -> do
+              off <- readIORef offRef
+              (off', h') <- drainFrom off filterStored
+              writeIORef offRef off'
+              when h' (atomically (writeTVar halted True))
+            Nothing -> do
+              -- timeout: poll the file manually
+              off <- readIORef offRef
+              (off', h') <- drainFrom off filterStored
+              writeIORef offRef off'
+              when h' (atomically (writeTVar halted True))
+          pollLoop offRef signal halted
     drainFrom off filt = do
       (ls, off') <- readCompleteLines off
       halted <- deliver (mapMaybe filt ls)
