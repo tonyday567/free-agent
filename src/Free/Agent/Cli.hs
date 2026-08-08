@@ -219,9 +219,9 @@ unescapeJson t = case T.uncons t of
 -- | Scrape a @session_id:@ line from CLI output.
 parseSessionId :: Text -> Maybe Text
 parseSessionId out =
-  case filter ("session_id:" `T.isPrefixOf`) (T.lines out) of
+  case filter ("Session:" `T.isPrefixOf`) (T.lines out) of
     (line : _) ->
-      let sid = T.strip (T.drop (T.length "session_id:") line)
+      let sid = T.strip (T.drop (T.length "Session:") line)
        in if T.null sid then Nothing else Just sid
     [] -> Nothing
 

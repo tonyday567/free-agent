@@ -249,8 +249,10 @@ runHermes cfg = do
   let names = hcNames cfg
       agentName = agentNameOf names
       sessionFile = fromMaybe (defaultSessionFile (hcRoot cfg) names) (hcSessionFile cfg)
+      -- F3: inject agent name so the LLM knows its posting identity
+      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ". Use this name for all --from fields and cursor checks.\n\n" <> systemPrompt
   createDirectoryIfMissing True (takeDirectory sessionFile)
-  let host = hermesHostBatch agentName systemPrompt (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile
+  let host = hermesHostBatch agentName framedPrompt (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile
       seat = hostSeat host
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
       handle stored = filter keepReplyHermes <$> runOneSeat seat stored

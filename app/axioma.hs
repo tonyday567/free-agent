@@ -422,7 +422,7 @@ main = do
       T.pack $
         unlines
           [ "#!/bin/sh",
-            "echo \"session_id: free-fake\"",
+            "echo \"Session: free-fake\"",
             "echo \"argv:$*\"",
             "printf 'stdin:'",
             "cat"

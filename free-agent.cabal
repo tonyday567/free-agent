@@ -88,6 +88,7 @@ library
     string-diagrams >=0.1 && <0.2,
     text >=2.0 && <3,
     time >=1.12 && <1.15,
+    unix >=2.8 && <2.9,
     vector,
 
 executable free-agent-axioma

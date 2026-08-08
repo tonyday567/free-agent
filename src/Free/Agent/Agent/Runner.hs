@@ -29,6 +29,7 @@ import Free.Agent.Bus.File
     writeCursor,
   )
 import System.FilePath ((</>))
+import System.Posix.Process (getProcessID)
 import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
 
 -- | Start a seat loop.
@@ -57,7 +58,8 @@ runAgentLoop ::
   IO ()
 runAgentLoop agentName names root mQuiesce handlePost = do
   hSetBuffering stdout LineBuffering
-  TIO.putStrLn $ "🟢 free-agent seat starting: " <> T.intercalate "," names
+  pid <- getProcessID
+  TIO.putStrLn $ "🟢 free-agent seat starting: " <> T.intercalate "," names <> " (pid=" <> T.pack (show pid) <> ")"
   TIO.putStrLn $ "   root: " <> T.pack root
   let path = root </> "log.jsonl"
       onQuiesce = do
@@ -84,21 +86,27 @@ runAgentLoop agentName names root mQuiesce handlePost = do
         writeCursor root agentName (stampId stored + 1)
         pure flow
       Nothing -> do
-        ereplies <- try @SomeException (handlePost stored)
-        case ereplies of
-          Left e -> do
-            let p = stamped stored
-                exc = T.pack (displayException e)
-                recipients = from p : maybe [] (pure . qcPitboss) mQuiesce
-            hPutStrLn stderr $
-              "🔴 " ++ T.unpack agentName ++ " handler failed on post "
-                ++ show (stampId stored)
-                ++ ": "
-                ++ T.unpack exc
-            _ <-
-              postLocal root $
-                mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc)
-            pure ()
-          Right replies -> traverse_ (postLocal root) replies
-        writeCursor root agentName (stampId stored + 1)
-        pure Continue
+        -- F2: skip self-posts — an agent should never receive its own posts
+        if from (stamped stored) == agentName
+          then do
+            writeCursor root agentName (stampId stored + 1)
+            pure Continue
+          else do
+            ereplies <- try @SomeException (handlePost stored)
+            case ereplies of
+              Left e -> do
+                let p = stamped stored
+                    exc = T.pack (displayException e)
+                    recipients = from p : maybe [] (pure . qcPitboss) mQuiesce
+                hPutStrLn stderr $
+                  "🔴 " ++ T.unpack agentName ++ " handler failed on post "
+                    ++ show (stampId stored)
+                    ++ ": "
+                    ++ T.unpack exc
+                _ <-
+                  postLocal root $
+                    mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc)
+                pure ()
+              Right replies -> traverse_ (postLocal root) replies
+            writeCursor root agentName (stampId stored + 1)
+            pure Continue
