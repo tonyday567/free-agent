@@ -37,12 +37,12 @@ module Free.Agent.Bus
 where
 
 import Circuit (close, companion, conjoint)
-import Circuit.Agent (Name, Post (..), PostId, deliversTo, sortNub)
-import Circuit.Agent.Mark (isEscalate, isHalt, markOf)
+import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
+import Circuit.Agent.Mark (Mark (Escalate), isEscalate, isHalt, markGlyph, markOf)
 import Circuit.Agent.Framing (Jsonl (..), Snoc (..), StoredPost, Stamped (..), These (..), Uncons (..), frameStored, formatNow)
 import Control.Arrow (runKleisli)
 import Control.Concurrent (ThreadId, forkIO, killThread)
-import Control.Exception (bracket)
+import Control.Exception (SomeException, bracket, displayException, try)
 import Control.Concurrent.STM
   ( STM,
     TMVar,
@@ -220,8 +220,8 @@ awaitSince bus names since = do
 -- Decided quiet: a delivered post carrying a halt (🟢 / 🔵) or escalation
 -- (🔴) mark stops the loop. Marks are control, not content: they are not
 -- handed to the seat.
-runSeatBus :: Bus -> [Name] -> FreeSeat -> IO ()
-runSeatBus bus names seat = loop 0
+runSeatBus :: Bus -> Name -> [Name] -> FreeSeat -> IO ()
+runSeatBus bus agentName names seat = loop 0
   where
     sh = interpretSeat seat
     loop lastId = do
@@ -234,10 +234,20 @@ runSeatBus bus names seat = loop 0
         loop (maximum (map stampId posts) + 1)
     halts p = maybe False (\m -> isHalt m || isEscalate m) (markOf p)
     processOne stored = do
-      let p = stamped stored
-          parentId = stampId stored
-      (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
-      pure [out {thread = sortNub (parentId : thread out)} | out <- outs]
+      er <-
+        try @SomeException $ do
+          let p = stamped stored
+              parentId = stampId stored
+          (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
+          pure [out {thread = sortNub (parentId : thread out)} | out <- outs]
+      case er of
+        Left e -> do
+          let p = stamped stored
+              exc = T.pack (displayException e)
+              msg = markGlyph Escalate <> " handler failed: " <> exc
+          _ <- scribeIO bus (mkPost agentName [from p] msg)
+          pure []
+        Right outs -> pure outs
 
 -- ---------------------------------------------------------------------------
 -- Internal helpers

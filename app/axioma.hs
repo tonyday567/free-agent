@@ -67,7 +67,10 @@ import Free.Agent.Seat
   )
 import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
-import Circuit.Agent.Framing (Stamped (..), parseLine, stampId, stamped)
+import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, stampId, stamped)
+import Circuit.Agent.Mark (isEscalate, markOf)
+import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
+import Free.Agent.Bus.File (Flow (..), tailLog)
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Syntax (FreeAgent (..))
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly)
@@ -1021,7 +1024,7 @@ main = do
     _ <- postLocal root (mkPost "human" ["echo"] "hello")
     _ <- postLocal root (mkPost "human" ["echo"] "🟢 landed")
     bus <- openBus root
-    runSeatBus bus ["echo"] (hostSeat (mkHost "echo" (pure . map ("echo:" <>))))
+    runSeatBus bus "echo" ["echo"] (hostSeat (mkHost "echo" (pure . map ("echo:" <>))))
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe parseLine (T.lines content)
@@ -1034,5 +1037,136 @@ main = do
       map stampId parsed == [0, 1, 2]
     assert "the halt mark got silence, not a reply" $
       length fromEcho == 1
+
+  -------------------------------------------------------------------------
+  -- Bus seat supervision: a handler exception becomes a 🔴 escalation,
+  -- the cursor advances, and the seat keeps listening.
+  -------------------------------------------------------------------------
+  putStrLn "bus seat supervision"
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-supervision-axioma"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    _ <- postLocal root (mkPost "human" ["fragile"] "hello")
+    _ <- postLocal root (mkPost "human" ["fragile"] "boom")
+    _ <- postLocal root (mkPost "human" ["fragile"] "world")
+    _ <- postLocal root (mkPost "human" ["fragile"] "🟢 landed")
+    bus <- openBus root
+    let fragileHost = mkHost "fragile" $ \ws ->
+          if ws == ["boom"]
+            then error "boom"
+            else pure (map ("fragile:" <>) ws)
+    runSeatBus bus "fragile" ["fragile"] (hostSeat fragileHost)
+    closeBus bus
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe parseLine (T.lines content)
+        fromFragile = [stamped s | s <- parsed, from (stamped s) == "fragile"]
+        escalations = filter (maybe False isEscalate . markOf) fromFragile
+    assert "seat replies to the first post" $
+      any (\p -> body p == "fragile:hello" && to p == ["human"] && thread p == [0]) fromFragile
+    assert "seat posts exactly one escalation on handler failure" $
+      case escalations of
+        [p] -> to p == ["human"] && "boom" `T.isInfixOf` body p
+        _ -> False
+    assert "seat replies to the third post after a failure" $
+      any (\p -> body p == "fragile:world" && to p == ["human"] && thread p == [2]) fromFragile
+    assert "ids are coherent across postLocal, replies, and escalation" $
+      map stampId parsed == [0, 1, 2, 3, 4, 5, 6]
+
+  -------------------------------------------------------------------------
+  -- Multi-seat card meeting: two FreeSeats share a subscription on the bus
+  --
+  -- A seed addressed to a shared card wakes every seat; each replies to the
+  -- original sender.  A pre-planted halt mark stops all seats once they have
+  -- processed the seed.
+  -------------------------------------------------------------------------
+  putStrLn "multi-seat card meeting"
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-meeting-axioma"
+        card = "panel"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    _ <- postLocal root (mkPost "human" [card] "discuss")
+    _ <- postLocal root (mkPost "human" [card] "🟢 landed")
+    bus <- openBus root
+    let alphaSeat = hostSeat (mkHost "alpha" (pure . map ("alpha:" <>)))
+        betaSeat = hostSeat (mkHost "beta" (pure . map ("beta:" <>)))
+    doneAlpha <- newEmptyMVar
+    doneBeta <- newEmptyMVar
+    _ <- forkIO $ runSeatBus bus "alpha" [card] alphaSeat >> putMVar doneAlpha ()
+    _ <- forkIO $ runSeatBus bus "beta" [card] betaSeat >> putMVar doneBeta ()
+    takeMVar doneAlpha
+    takeMVar doneBeta
+    closeBus bus
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe parseLine (T.lines content)
+        fromAlpha = [stamped s | s <- parsed, from (stamped s) == "alpha"]
+        fromBeta = [stamped s | s <- parsed, from (stamped s) == "beta"]
+    assert "alpha replied to the seed" $
+      case fromAlpha of
+        [p] -> body p == "alpha:discuss" && to p == ["human"] && thread p == [0]
+        _ -> False
+    assert "beta replied to the seed" $
+      case fromBeta of
+        [p] -> body p == "beta:discuss" && to p == ["human"] && thread p == [0]
+        _ -> False
+    assert "ids are coherent across postLocal and seat scribes" $
+      map stampId parsed == [0, 1, 2, 3]
+    assert "the halt mark got silence from every seat" $
+      length (fromAlpha ++ fromBeta) == 2
+
+  -------------------------------------------------------------------------
+  -- tailLog: offset draining, partial trailing line, halt mid-batch.
+  --
+  -- tailLog reads complete lines only; a writer mid-append is left for the
+  -- next drain. A callback that returns 'Halt' stops further delivery.
+  -------------------------------------------------------------------------
+  putStrLn "tailLog"
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-tail-axioma"
+        path = root </> "log.jsonl"
+        mkStored i ts f t b = Stamped i ts (Post f t [] b)
+        frame i ts f t b = frameStored (mkStored i ts f t b)
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    -- Write one complete line and one partial line (no trailing newline).
+    TIO.writeFile
+      path
+      ( frame 0 "2026-08-05T00:00:00" "human" ["test"] "one"
+          <> "\n"
+          <> frame 1 "2026-08-05T00:00:01" "human" ["test"] "two"
+      )
+    collected <- newMVar []
+    tid <-
+      forkIO $
+        tailLog path ["test"] 0 Nothing $ \stored -> do
+          modifyMVar_ collected (pure . (stored :))
+          pure (if body (stamped stored) == "halt" then Halt else Continue)
+    -- Wait for the initial drain to finish before appending.
+    threadDelay 200000
+    initial <- readMVar collected
+    assert "offset drain: the complete line is delivered, the partial line is not" $
+      map (body . stamped) (reverse initial) == ["one"]
+    -- Complete the partial line and append a halt plus one more post.
+    TIO.appendFile
+      path
+      ( "\n"
+          <> frame 2 "2026-08-05T00:00:02" "human" ["test"] "halt"
+          <> "\n"
+          <> frame 3 "2026-08-05T00:00:03" "human" ["test"] "four"
+          <> "\n"
+      )
+    -- Wait for fsnotify to wake the drain and for the halt to stop the loop.
+    threadDelay 1000000
+    killThread tid
+    final <- readMVar collected
+    let bodies = map (body . stamped) (reverse final)
+    assert "partial trailing line is delivered once it is completed" $
+      bodies == ["one", "two", "halt"]
+    assert "halt mid-batch stops delivery" $
+      not ("four" `elem` bodies)
 
   putStrLn "All tests passed"

@@ -12,23 +12,24 @@
 --   free-agent llm --root ROOT --name NAME --prompt PROMPT.md
 --   free-agent cmd --root ROOT --name NAME --cmd CMD [ARG...]
 --   free-agent bus [SUBCOMMAND]
---   free-agent status LOG.jsonl
+--   free-agent status [ROOT] [--threshold SECS]
 module Main (main) where
 
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), mkPost, sortNub)
-import Circuit.Agent.Framing (StoredPost, parseLine, stampId, stamped)
+import Circuit.Agent.Framing (StoredPost, stampId, stamped)
 import Control.Applicative ((<|>))
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (unless)
 import Control.Monad.State (runStateT)
 import Data.Foldable (traverse_)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.Time (NominalDiffTime)
 import Free.Agent.Agent.Runner (runAgentLoop)
-import Free.Agent.Bus.Cli (BusCommand, busParser, runBusCommand)
+import Free.Agent.Bus.Cli (BusCommand, busParser, runBusCommand, runStatus)
 import Free.Agent.Bus.File (QuiesceConfig (..), cursorPath)
 import Free.Agent.Cli.Config
   ( Backend (..),
@@ -56,7 +57,7 @@ import System.IO (BufferMode (LineBuffering), hSetBuffering, stderr, stdout)
 data Command
   = AgentCmd Backend
   | BusCmd BusCommand
-  | StatusCmd FilePath
+  | StatusCmd FilePath (Maybe NominalDiffTime)
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -108,11 +109,33 @@ commandParser =
     ( command "bus" (info (BusCmd <$> busParser <**> helper) (progDesc "Bus subcommands"))
         <> command "llm" (info (AgentCmd . BackendLlm <$> parseLlmConfig <**> helper) (progDesc "Direct API seat (old bus-bare)"))
         <> command "cmd" (info (AgentCmd . BackendCommand <$> parseCommandConfig <**> helper) (progDesc "External-command seat"))
-        <> command "status" (info (StatusCmd <$> statusArg <**> helper) (progDesc "Bus log statistics"))
+        <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <**> helper) (progDesc "Bus log statistics"))
     )
     <|> defaultAgentParser
   where
-    statusArg = argument str (metavar "LOG.jsonl" <> help "Bus log file")
+    rootOpt =
+      option
+        str
+        ( long "root"
+            <> short 'r'
+            <> metavar "ROOT"
+            <> value "."
+            <> showDefault
+            <> help "Bus root directory"
+        )
+    thresholdOpt =
+      option
+        (eitherReader readSeconds)
+        ( long "threshold"
+            <> short 't'
+            <> metavar "SECS"
+            <> help "Seconds since last post for the bus to be considered live"
+        )
+      where
+        readSeconds s =
+          case reads s of
+            [(n, "")] -> Right (fromInteger n :: NominalDiffTime)
+            _ -> Left ("expected a whole number of seconds, got: " ++ s)
 
 opts :: ParserInfo Command
 opts =
@@ -134,7 +157,7 @@ main = do
   case cmd of
     AgentCmd backend -> runBackend backend
     BusCmd busCmd -> runBusCommand busCmd
-    StatusCmd path -> runStatus path
+    StatusCmd root mthreshold -> runStatus root (fromMaybe 900 mthreshold)
 
 -- ---------------------------------------------------------------------------
 -- Backend dispatch
@@ -310,18 +333,3 @@ runCommand cfg = do
   TIO.putStrLn $ "   command: " <> T.pack (ccCmd cfg) <> " " <> T.intercalate " " (map T.pack (ccArgs cfg))
   runAgentLoop agentName names (ccRoot cfg) mQuiesce handle
 
--- ---------------------------------------------------------------------------
--- Status (ported from bus-stats)
--- ---------------------------------------------------------------------------
-
-runStatus :: FilePath -> IO ()
-runStatus path = do
-  exists <- doesFileExist path
-  unless exists $ do
-    TIO.putStrLn ("🔴 " <> T.pack path <> " — not found")
-    exitFailure
-  content <- TIO.readFile path
-  let ls = filter (not . T.null) (T.lines content)
-      posts = mapMaybe Circuit.Agent.Framing.parseLine ls
-      maxId = maximum (0 : map stampId posts)
-  TIO.putStrLn $ T.pack (show (length posts)) <> " posts; max id=" <> T.pack (show maxId)

@@ -14,6 +14,7 @@ where
 import Circuit.Agent (Name, Post (..), mkPost)
 import Circuit.Agent.Framing (StoredPost, stampId, stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
+import Control.Exception (SomeException, displayException, try)
 import Data.Foldable (forM_, traverse_)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -28,7 +29,7 @@ import Free.Agent.Bus.File
     writeCursor,
   )
 import System.FilePath ((</>))
-import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
+import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
 
 -- | Start a seat loop.
 --
@@ -83,7 +84,21 @@ runAgentLoop agentName names root mQuiesce handlePost = do
         writeCursor root agentName (stampId stored + 1)
         pure flow
       Nothing -> do
-        replies <- handlePost stored
-        traverse_ (postLocal root) replies
+        ereplies <- try @SomeException (handlePost stored)
+        case ereplies of
+          Left e -> do
+            let p = stamped stored
+                exc = T.pack (displayException e)
+                recipients = from p : maybe [] (pure . qcPitboss) mQuiesce
+            hPutStrLn stderr $
+              "🔴 " ++ T.unpack agentName ++ " handler failed on post "
+                ++ show (stampId stored)
+                ++ ": "
+                ++ T.unpack exc
+            _ <-
+              postLocal root $
+                mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc)
+            pure ()
+          Right replies -> traverse_ (postLocal root) replies
         writeCursor root agentName (stampId stored + 1)
         pure Continue

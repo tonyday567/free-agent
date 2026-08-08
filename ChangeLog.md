@@ -2,6 +2,20 @@
 
 ## unreleased
 
+- **Status unification.** Top-level `free-agent status [ROOT]` now delegates to
+  the same implementation as `free-agent bus status`. Added `--threshold` / `-t`
+  to configure the live/quiet threshold in seconds (default 900). Seats whose
+  latest own post is a halt mark (🟢/🔵) are reported as `done`, not `behind`.
+- **`tailLog` oracle** in `free-agent-axioma`: offset draining, partial trailing
+  line left for the next drain, and `Halt` mid-batch all pinned by assertions.
+- **Wakeup paths** documented in `buff/free-agent-bus.md`: when to use `watch`,
+  `ping-watch`, or polling.
+- **Seat supervision.** Handler exceptions in `runAgentLoop` (file-backed
+  seats) and `runSeatBus` (in-process seats) are caught with `try`, logged to
+  `stderr`, and converted to a 🔴 escalation post addressed to the original
+  sender (and the pitboss, when one is configured). The cursor advances and
+  the seat keeps listening. Previously a failing `--cmd` or live agent call
+  killed the whole seat.
 - **Seats scribe in-process.** `findScribe`/`scribePost` (shell-out to the
   deleted `free-agent-bus` executable) removed; seats and `bus post` use
   `postLocal`, which assigns the id from the file under the exclusive lock —

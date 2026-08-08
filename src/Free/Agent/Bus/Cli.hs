@@ -11,22 +11,25 @@
 --   cursor [ROOT] get NAME
 --   cursor [ROOT] set NAME ID
 --   ping-watch [ROOT] NAME
---   status [ROOT]
+--   status [ROOT] [--threshold SECS]
 module Free.Agent.Bus.Cli
   ( BusCommand (..),
     busParser,
     runBusCommand,
+    runStatus,
   )
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost)
 import Circuit.Agent.Framing (StoredPost, frameStored, parseLine, parsePost, stampId, stampTs, stamped)
+import Circuit.Agent.Mark (isHalt, markOf)
 import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Monad (forever, guard, unless, when)
 import Data.Foldable (traverse_)
-import Data.List (isPrefixOf, sort)
-import Data.Maybe (mapMaybe, maybe)
+import Data.List (isPrefixOf, sort, sortOn)
+import Data.Maybe (listToMaybe, mapMaybe, maybe)
+import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -64,7 +67,7 @@ data BusCommand
   | CursorGetCommand FilePath Text
   | CursorSetCommand FilePath Text PostId
   | PingWatchCommand FilePath Text
-  | StatusCommand FilePath
+  | StatusCommand FilePath NominalDiffTime
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -150,8 +153,25 @@ cursorCmd =
 pingWatchCmd :: Parser BusCommand
 pingWatchCmd = PingWatchCommand <$> rootOpt <*> nameArg
 
+thresholdOpt :: Parser NominalDiffTime
+thresholdOpt =
+  option
+    (eitherReader readSeconds)
+    ( long "threshold"
+        <> short 't'
+        <> metavar "SECS"
+        <> value 900
+        <> showDefault
+        <> help "Seconds since last post for the bus to be considered live"
+    )
+  where
+    readSeconds s =
+      case reads s of
+        [(n, "")] -> Right (fromInteger n :: NominalDiffTime)
+        _ -> Left ("expected a whole number of seconds, got: " ++ s)
+
 statusCmd :: Parser BusCommand
-statusCmd = StatusCommand <$> rootOpt
+statusCmd = StatusCommand <$> rootOpt <*> thresholdOpt
 
 busParser :: Parser BusCommand
 busParser =
@@ -175,7 +195,7 @@ runBusCommand (ReadCommand root names since) = runRead root names since
 runBusCommand (CursorGetCommand root name) = runCursorGet root name
 runBusCommand (CursorSetCommand root name pid) = runCursorSet root name pid
 runBusCommand (PingWatchCommand root name) = runPingWatch root name
-runBusCommand (StatusCommand root) = runStatus root
+runBusCommand (StatusCommand root threshold) = runStatus root threshold
 
 -- ---------------------------------------------------------------------------
 -- post
@@ -298,8 +318,15 @@ runPingWatch root name = do
 -- status
 -- ---------------------------------------------------------------------------
 
-runStatus :: FilePath -> IO ()
-runStatus root = do
+-- | Seat status classification for the cursor report.
+data SeatStatus = CaughtUp | Done | Behind Integer
+
+-- | Print a bus status report.
+--
+-- A seat whose latest own post is a halt mark (🟢/🔵) is reported as @done@
+-- rather than @behind@: decided quiet is a read, not an inference.
+runStatus :: FilePath -> NominalDiffTime -> IO ()
+runStatus root threshold = do
   let path = root </> "log.jsonl"
   exists <- doesFileExist path
   unless exists $ do
@@ -317,7 +344,7 @@ runStatus root = do
     _ -> do
       let lastPost = last posts
           age = diffUTCTime now <$> parseTs (stampTs lastPost)
-          live = maybe False (< 900) age
+          live = maybe False (< threshold) age
       TIO.putStrLn
         ( (if live then "🟢 " else "🟡 ")
             <> T.pack root
@@ -336,12 +363,43 @@ runStatus root = do
   entries <- listDirectory root
   let names = sort [n | e <- entries, Just n <- [T.stripPrefix ".cursor-" (T.pack e)]]
   cursors <- traverse (\n -> (n,) <$> readCursor root n) names
-  let behind = [(n, c) | (n, c) <- cursors, c <= maxId]
+  let statuses = map (seatStatus posts maxId) cursors
+      behinds = [(n, c, u) | (n, c, Behind u) <- statuses]
+      dones = [(n, c) | (n, c, Done) <- statuses]
+      caughtUps = [(n, c) | (n, c, CaughtUp) <- statuses]
   if null names
     then TIO.putStrLn "seats: no cursors — nothing has ever read this bus"
     else do
-      TIO.putStrLn ("seats: " <> T.pack (show (length names)) <> " cursors, " <> T.pack (show (length behind)) <> " behind")
-      traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " (" <> T.pack (show (maxId - c + 1)) <> " unread)")) behind
+      TIO.putStrLn
+        ( "seats: "
+            <> T.pack (show (length names))
+            <> " cursors, "
+            <> T.pack (show (length behinds))
+            <> " behind, "
+            <> T.pack (show (length dones))
+            <> " done, "
+            <> T.pack (show (length caughtUps))
+            <> " caught up"
+        )
+      traverse_
+        (\(n, c, u) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " (" <> T.pack (show u) <> " unread)"))
+        behinds
+      traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " done")) dones
+      traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " caught up")) caughtUps
+  where
+    seatStatus :: [StoredPost] -> PostId -> (Name, PostId) -> (Name, PostId, SeatStatus)
+    seatStatus posts maxId (n, c)
+      | isDone = (n, c, Done)
+      | c > maxId = (n, c, CaughtUp)
+      | otherwise = (n, c, Behind (fromIntegral maxId - fromIntegral c + 1 :: Integer))
+      where
+        isDone =
+          case latestBy n posts of
+            Nothing -> False
+            Just stored -> maybe False isHalt (markOf (stamped stored))
+
+    latestBy :: Name -> [StoredPost] -> Maybe StoredPost
+    latestBy n = listToMaybe . sortOn (Down . stampId) . filter ((== n) . from . stamped)
 
 -- | Scribe stamps naive UTC; raw appends may carry an offset. Take both.
 parseTs :: Text -> Maybe UTCTime
