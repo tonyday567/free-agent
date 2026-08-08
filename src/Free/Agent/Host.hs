@@ -15,6 +15,8 @@ module Free.Agent.Host
     processHost,
     cliHost,
     hermesHost,
+    hermesHostBatch,
+    hermesCli,
     kimiHost,
     bareHost,
     defaultBareConfig,
@@ -201,28 +203,52 @@ hermesHost name systemPrompt model provider yolo sessionFile =
       hostRun = traverse runOne
     }
   where
-    cli =
-      Cli
-        { cliCommand = "hermes",
-          cliArgv = \prompt mSid ->
-            ["chat", "-q", T.unpack prompt]
-              <> maybe [] (\m -> ["-m", T.unpack m]) model
-              <> maybe [] (\p -> ["--provider", T.unpack p]) provider
-              <> if yolo then ["--yolo", "-Q"] else []
-              <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
-          cliStdin = const "",
-          cliSessionFile = sessionFile,
-          cliSessionId = parseSessionId,
-          cliStale = \code out ->
-            code /= ExitSuccess
-              || "No session found matching" `T.isInfixOf` out
-              || "Session not found" `T.isInfixOf` out,
-          cliScrub = cleanCliOut,
-          cliStderr = StderrMerge,
-          cliStderrTee = Nothing
-        }
     runOne body =
       liftIO (cliQuery cli (systemPrompt <> "\n\nUser message:\n" <> body))
+    cli = hermesCli model provider yolo sessionFile
+
+-- | Shared CLI recipe for hermes backends.
+hermesCli :: Maybe Text -> Maybe Text -> Bool -> FilePath -> Cli
+hermesCli model provider yolo sessionFile =
+  Cli
+    { cliCommand = "hermes",
+      cliArgv = \prompt mSid ->
+        ["chat", "-q", T.unpack prompt]
+          <> maybe [] (\m -> ["-m", T.unpack m]) model
+          <> maybe [] (\p -> ["--provider", T.unpack p]) provider
+          <> if yolo then ["--yolo", "-Q"] else []
+          <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
+      cliStdin = const "",
+      cliSessionFile = sessionFile,
+      cliSessionId = parseSessionId,
+      cliStale = \code out ->
+        code /= ExitSuccess
+          || "No session found matching" `T.isInfixOf` out
+          || "Session not found" `T.isInfixOf` out,
+      cliScrub = cleanCliOut,
+      cliStderr = StderrMerge,
+      cliStderrTee = Nothing
+    }
+
+-- | Batch variant of 'hermesHost'. Joins all post bodies into a single user
+-- message and makes one @hermes chat -q@ call, returning one reply. Use when
+-- multiple posts may arrive in a single wake cycle and the agent should see
+-- them as a combined conversation turn.
+hermesHostBatch ::
+  (MonadIO m) =>
+  Text -> Text -> Maybe Text -> Maybe Text -> Bool -> FilePath -> Host m
+hermesHostBatch name systemPrompt model provider yolo sessionFile =
+  Host
+    { hostName = name,
+      hostBodyMode = BodyWhole,
+      hostRun = \bodies -> do
+        let userMessage = T.unlines bodies
+            prompt = systemPrompt <> "\n\nUser messages:\n" <> userMessage
+        rsp <- liftIO (cliQuery cli prompt)
+        pure [cleanCliOut rsp]
+    }
+  where
+    cli = hermesCli model provider yolo sessionFile
 
 -- | Connection configuration for a direct API host.
 data BareConfig = BareConfig

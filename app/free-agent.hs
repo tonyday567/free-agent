@@ -41,7 +41,7 @@ import Free.Agent.Cli.Config
     parseHermesConfig,
     parseLlmConfig,
   )
-import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesHost, kimiHost, processHost)
+import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesHostBatch, kimiHost, processHost)
 import Free.Agent.Seat (FreeSeat, hostSeat, interpretSeat)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesFileExist)
@@ -250,7 +250,7 @@ runHermes cfg = do
       agentName = agentNameOf names
       sessionFile = fromMaybe (defaultSessionFile (hcRoot cfg) names) (hcSessionFile cfg)
   createDirectoryIfMissing True (takeDirectory sessionFile)
-  let host = hermesHost agentName systemPrompt (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile
+  let host = hermesHostBatch agentName systemPrompt (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile
       seat = hostSeat host
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
       handle stored = filter keepReplyHermes <$> runOneSeat seat stored

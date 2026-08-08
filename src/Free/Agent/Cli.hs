@@ -348,11 +348,23 @@ cleanCliOut =
       | "Messages:" `T.isPrefixOf` l = False
       | "⚕" `T.isPrefixOf` l = False
       | "❯" `T.isPrefixOf` l = False
+      | "Query:" `T.isPrefixOf` l = False
+      | "Initializing agent" `T.isInfixOf` l = False
+      | "┊" `T.isPrefixOf` l = False
+      | "hermes --resume" `T.isInfixOf` l = False
+      | "hermes chat" `T.isInfixOf` l = False
       | T.any (== '\x1b') l = False
       | isDecorative l = False
       | otherwise = True
     isDecorative t =
-      T.all (\c -> c == ' ' || c == '\r' || c `elem` ("─│┌┐└┘" :: String)) t
+      T.all
+        ( \c ->
+            c == ' '
+              || c == '\r'
+              || c
+                `elem` ("─│┌┐└┘╭╮╰╯" :: String)
+        )
+        t
 
 -- | A live CLI agent as a list 'Shard'.  Session file and process stay
 -- inside @IO@ — apply-only at this boundary.  @who@ is the agent nick

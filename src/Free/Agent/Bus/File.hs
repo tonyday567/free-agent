@@ -78,16 +78,36 @@ data Flow = Continue | Halt
 cursorPath :: FilePath -> Name -> FilePath
 cursorPath root name = root </> (".cursor-" <> T.unpack name)
 
--- | Read the cursor for an agent. Returns 0 if no cursor exists yet.
+-- | Read the cursor for an agent. If no cursor file exists, defaults to the
+-- latest post id + 1 in the bus log so the agent skips history on cold boot.
+-- Returns 0 only when the log itself is absent or empty.
 readCursor :: FilePath -> Name -> IO PostId
 readCursor root name = do
   let path = cursorPath root name
   exists <- doesFileExist path
   if not exists
-    then pure 0
+    then latestPostId root
     else do
       txt <- TIO.readFile path
       pure $ maybe 0 fromIntegral (readMaybe @Integer (T.unpack (T.strip txt)))
+
+-- | Return the id that would follow the last post in the log (i.e. the
+-- post count), or 0 if the log doesn't exist or is empty. Used as the
+-- default cursor on cold boot so the agent only processes new posts.
+latestPostId :: FilePath -> IO PostId
+latestPostId root = do
+  let logPath = root </> "log.jsonl"
+  logExists <- doesFileExist logPath
+  if not logExists
+    then pure 0
+    else do
+      txt <- TIO.readFile logPath
+      let ls = filter (not . T.null) (T.lines txt)
+      case ls of
+        [] -> pure 0
+        _ -> case parseLine (last ls) of
+               Just stored -> pure (stampId stored + 1)
+               Nothing -> pure (fromIntegral (length ls))
 
 -- | Persist the cursor for an agent. Writes @stampId + 1@ so the next wake
 -- starts after the post just processed.
