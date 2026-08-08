@@ -4,26 +4,26 @@
 --
 -- Watches ROOT/log.jsonl for posts addressed to NAME(s), calls the supplied
 -- handler for each post, and writes the returned replies back through the
--- scribe with the cursor advanced. This is the common runtime shared by the
--- Hermes, Kimi, direct-API, and external-command seats.
+-- in-process bus with the cursor advanced. This is the common runtime shared
+-- by the Hermes, Kimi, direct-API, and external-command seats.
 module Free.Agent.Agent.Runner
   ( runAgentLoop,
   )
 where
 
-import Circuit.Agent (Name, Post (..), PostId, mkPost)
-import Circuit.Agent.Framing (StoredPost, stampId)
-import Control.Monad (when)
-import Data.Foldable (traverse_)
+import Circuit.Agent (Name, Post (..), mkPost)
+import Circuit.Agent.Framing (StoredPost, stampId, stamped)
+import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
+import Data.Foldable (forM_, traverse_)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.File
-  ( QuiesceConfig (..),
+  ( Flow (..),
+    QuiesceConfig (..),
     cursorPath,
-    findScribe,
     readCursor,
-    scribePost,
     tailLog,
     writeCursor,
   )
@@ -36,6 +36,12 @@ import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 -- quiescence config, and a handler that turns one incoming 'StoredPost' into
 -- zero or more reply posts. The handler is responsible for decoration,
 -- scrubbing, routing, and filtering; this function handles the bus plumbing.
+--
+-- Decided quiet: a delivered post carrying a halt mark (🟢 or 🔵) stops the
+-- loop; an escalation mark (🔴) is relayed to the pitboss (when a quiescence
+-- config names one) and also stops the loop. The quiescence counter is the
+-- observed-quiet bridge: after N empty cycles the seat posts 🔵 to the
+-- pitboss and exits.
 runAgentLoop ::
   -- | Agent name used for cursor and logging.
   Text ->
@@ -50,18 +56,34 @@ runAgentLoop ::
   IO ()
 runAgentLoop agentName names root mQuiesce handlePost = do
   hSetBuffering stdout LineBuffering
-  scribe <- findScribe
   TIO.putStrLn $ "🟢 free-agent seat starting: " <> T.intercalate "," names
   TIO.putStrLn $ "   root: " <> T.pack root
-  TIO.putStrLn $ "   scribe: " <> T.pack scribe
   let path = root </> "log.jsonl"
       onQuiesce = do
         let qc = maybe (error "quiesce action without config") id mQuiesce
-            p = mkPost agentName [qcPitboss qc] ("🟡 quiescent after " <> T.pack (show (qcCycles qc)) <> " empty cycles")
-        scribePost scribe root p
+            p = mkPost agentName [qcPitboss qc] (markGlyph StandDown <> " standing down after " <> T.pack (show (qcCycles qc)) <> " empty cycles")
+        _ <- postLocal root p
+        pure ()
+      -- A mark is control, not content: halt and escalation marks are not
+      -- handed to the seat handler. Silence follows the mark.
+      controlFlow stored =
+        case markOf (stamped stored) of
+          Just m
+            | isHalt m -> pure (Just Halt)
+            | isEscalate m -> do
+                forM_ mQuiesce $ \qc ->
+                  postLocal root (mkPost agentName [qcPitboss qc] (markGlyph Escalate <> " escalation received; standing down"))
+                pure (Just Halt)
+          _ -> pure Nothing
   cursor <- readCursor root agentName
   TIO.putStrLn $ "   cursor: " <> T.pack (cursorPath root agentName) <> " @ " <> T.pack (show cursor)
-  tailLog path names cursor (fmap (\qc -> (qc, onQuiesce)) mQuiesce) $ \stored -> do
-    replies <- handlePost stored
-    traverse_ (scribePost scribe root) replies
-    writeCursor root agentName (stampId stored + 1)
+  tailLog path names cursor (fmap (\qc -> (qc, onQuiesce)) mQuiesce) $ \stored ->
+    controlFlow stored >>= \case
+      Just flow -> do
+        writeCursor root agentName (stampId stored + 1)
+        pure flow
+      Nothing -> do
+        replies <- handlePost stored
+        traverse_ (postLocal root) replies
+        writeCursor root agentName (stampId stored + 1)
+        pure Continue

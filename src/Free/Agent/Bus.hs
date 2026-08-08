@@ -16,17 +16,18 @@ module Free.Agent.Bus
     busLogPath,
     openBus,
     closeBus,
+    withBus,
 
     -- * Scribe
     scribe,
     scribeIO,
+    postLocal,
 
     -- * Durable append
     appendStoredPosts,
     appendStoredPostsUnlocked,
 
     -- * Subscription
-    busDeliversTo,
     readSince,
     awaitSince,
 
@@ -36,10 +37,12 @@ module Free.Agent.Bus
 where
 
 import Circuit (close, companion, conjoint)
-import Circuit.Agent (Name, Post (..), PostId, sortNub)
+import Circuit.Agent (Name, Post (..), PostId, deliversTo, sortNub)
+import Circuit.Agent.Mark (isEscalate, isHalt, markOf)
 import Circuit.Agent.Framing (Jsonl (..), Snoc (..), StoredPost, Stamped (..), These (..), Uncons (..), frameStored, formatNow)
 import Control.Arrow (runKleisli)
 import Control.Concurrent (ThreadId, forkIO, killThread)
+import Control.Exception (bracket)
 import Control.Concurrent.STM
   ( STM,
     TMVar,
@@ -60,6 +63,7 @@ import Control.Concurrent.STM
   )
 import Control.Monad (forever, unless)
 import Control.Monad.State (runStateT)
+import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
 import Data.List (maximum)
 
@@ -116,6 +120,12 @@ openBus root = do
 closeBus :: Bus -> IO ()
 closeBus = killThread . busThread
 
+-- | Bracketed 'openBus'/'closeBus': open a bus, run the action, kill the
+-- persistence thread on exit. The seat loop holds one bus for its whole
+-- lifetime and scribes replies in-process — no external scribe executable.
+withBus :: FilePath -> (Bus -> IO a) -> IO a
+withBus root = bracket (openBus root) closeBus
+
 -- | Append a bare post to the live log inside one STM transaction.
 --
 -- The returned 'StoredPost' carries the absolute line id assigned by the
@@ -140,6 +150,30 @@ scribeIO bus p = do
   atomically (takeTMVar ack)
   pure stored
 
+-- | File-truth scribe: assign the id from the file itself, under the lock.
+--
+-- The id is the current line count, read and appended under the exclusive
+-- file lock, so concurrent processes can never assign the same id twice.
+-- This is the posting path for anything that shares the log with other
+-- processes (CLI posts, seat replies). The 'TVar' bus ('scribeIO') is for
+-- a single runtime that owns all writes; a long-lived seat's in-memory
+-- image goes stale the moment another process posts, and stale images
+-- assign colliding ids.
+postLocal :: FilePath -> Post Text -> IO StoredPost
+postLocal root p = do
+  createDirectoryIfMissing True root
+  let path = root </> "log.jsonl"
+  exists <- doesFileExist path
+  unless exists $ withFile path AppendMode (\_ -> pure ())
+  ts <- formatNow
+  stored <- withFileLock (path <.> "lock") Exclusive $ \_lock -> do
+    n <- BS.count 0x0A <$> BS.readFile path
+    let stored = Stamped (fromIntegral n) ts p
+    appendStoredPostsUnlocked path [stored]
+    pure stored
+  writePings path [stored]
+  pure stored
+
 -- | Append stamped posts under the exclusive file lock.
 --
 -- Shared durable image primitive for the live bus persistence loop. Does not
@@ -156,26 +190,15 @@ appendStoredPostsUnlocked path posts =
   withFile path AppendMode $ \h ->
     traverse_ (TIO.hPutStrLn h . frameStored) posts
 
--- | Free-agent-bus delivery predicate.
+-- | Read all posts matching any of the names with id at or after the cursor.
 --
--- * @to = ["all"]@ broadcasts to every subscriber.
--- * @to = []@ and @to = [""]@ are discard (deliver to no one).
--- * Named recipients deliver to subscribers whose name appears in @to@.
-busDeliversTo :: Post a -> [Name] -> Bool
-busDeliversTo p subs =
-  case to p of
-    [] -> False
-    [t] | t == T.empty -> False
-    ts -> ("all" :: Text) `elem` ts || any (`elem` ts) subs
-
--- | Read all posts matching any of the names with id greater than the cursor.
---
--- Does not retry; returns an empty list if nothing matches.
+-- The cursor is the next unprocessed id, matching the file-cursor
+-- convention. Does not retry; returns an empty list if nothing matches.
 readSince :: Bus -> [Name] -> PostId -> STM [StoredPost]
 readSince bus names since = do
   log0 <- readTVar (busLog bus)
   let posts = jsonlToList log0
-  pure [s | s <- posts, stampId s > since, busDeliversTo (stamped s) names]
+  pure [s | s <- posts, stampId s >= since, deliversTo (stamped s) names]
 
 -- | Wait until at least one matching post exists after the cursor.
 awaitSince :: Bus -> [Name] -> PostId -> STM [StoredPost]
@@ -193,15 +216,23 @@ awaitSince bus names since = do
 -- input-to-output mapping we process one 'StoredPost' at a time; the seat
 -- still sees a singleton batch, and the parent id is prepended to each
 -- emitted post's 'thread'.
+--
+-- Decided quiet: a delivered post carrying a halt (🟢 / 🔵) or escalation
+-- (🔴) mark stops the loop. Marks are control, not content: they are not
+-- handed to the seat.
 runSeatBus :: Bus -> [Name] -> FreeSeat -> IO ()
 runSeatBus bus names seat = loop 0
   where
     sh = interpretSeat seat
     loop lastId = do
       posts <- atomically (awaitSince bus names lastId)
-      outs <- concat <$> traverse processOne posts
+      let marked = any (halts . stamped) posts
+          work = filter (not . halts . stamped) posts
+      outs <- concat <$> traverse processOne work
       traverse_ (scribeIO bus) outs
-      loop (maximum (map stampId posts))
+      unless marked $
+        loop (maximum (map stampId posts) + 1)
+    halts p = maybe False (\m -> isHalt m || isEscalate m) (markOf p)
     processOne stored = do
       let p = stamped stored
           parentId = stampId stored

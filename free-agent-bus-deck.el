@@ -36,8 +36,9 @@
   "Emacs surface for the free-agent-bus log."
   :group 'applications)
 
-(defcustom free-agent-bus-executable "free-agent-bus"
-  "Executable used to scribe posts."
+(defcustom free-agent-bus-executable "free-agent"
+  "Executable used to scribe posts.
+Invoked as: free-agent bus post --root ROOT, with the post JSON on stdin."
   :type 'string
   :group 'free-agent-bus-deck)
 
@@ -48,17 +49,17 @@
 
 (defcustom free-agent-bus-channel "bus"
   "Legacy channel name. Kept for compatibility with older logs.
-New posts default to broadcast (`[]'); this name is added to the
+New posts default to broadcast (`[\"all\"]'); this name is added to the
 log filter when `free-agent-bus-log-filter' is nil."
   :type 'string
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-post-to nil
   "Recipient list for the current or next post.
-If nil, the post is a broadcast (`to: []').
+If nil, the post is a broadcast (`to: [\"all\"]').
 If a list of strings, each string is a recipient name.
 The special list `[\"\"]' posts to the discard channel."
-  :type '(choice (const :tag "Broadcast (to: [])" nil)
+  :type '(choice (const :tag "Broadcast (to: [\"all\"])" nil)
                  (repeat string))
   :group 'free-agent-bus-deck)
 
@@ -108,7 +109,7 @@ This is a regular file; `free-agent-bus-board' simply opens it."
 If no region is active, send the whole buffer, but only when in
 `free-agent-bus-post-mode' to avoid accidentally posting source files.
 The post is addressed to `free-agent-bus-post-to' if set, otherwise
-`free-agent-bus-channel'."
+broadcast (`to: [\"all\"]')."
   (interactive "r")
   (let* ((use-region (use-region-p))
          (begin (if use-region begin (point-min)))
@@ -125,7 +126,7 @@ The post is addressed to `free-agent-bus-post-to' if set, otherwise
              (recipients (and (boundp 'free-agent-bus-post-to)
                               free-agent-bus-post-to))
              (post `((from . ,free-agent-bus-name)
-                     (to . ,(vconcat recipients))
+                     (to . ,(vconcat (or recipients ["all"])))
                      (thread . [])
                      (body . ,text)))
              (json (json-encode post))
@@ -138,7 +139,8 @@ The post is addressed to `free-agent-bus-post-to' if set, otherwise
                     (call-process-region
                      (point-min) (point-max)
                      (free-agent-bus--executable)
-                     nil stdout-buffer nil root))
+                     nil stdout-buffer nil
+                     "bus" "post" "--root" root))
               (when (/= status 0)
                 (error "free-agent-bus exited with code %d: %s"
                        status (with-current-buffer stdout-buffer (buffer-string))))
@@ -166,7 +168,7 @@ The post is addressed to `free-agent-bus-post-to' if set, otherwise
 (defun free-agent-bus-set-recipients (recipients)
   "Set the recipient list for the current post.
 RECIPIENTS is a comma or space separated string of names, e.g.
-\"kimi, hermes\".  With empty input, resets to broadcast (to: [])."
+\"kimi, hermes\".  With empty input, resets to broadcast (`to: [\"all\"]')."
   (interactive
    (list (read-string
           "Recipients (empty = broadcast): "
@@ -222,15 +224,15 @@ RECIPIENTS is a comma or space separated string of names, e.g.
 
 (defcustom free-agent-bus-log-filter-choices '("tony" "hermes" "kimi")
   "Common directed-recipient filter choices for the log buffer.
-Broadcasts (`to: []') are always shown."
+Broadcasts (`to: [\"all\"]') are always shown."
   :type '(repeat string)
   :group 'free-agent-bus-deck)
 
 (defvar-local free-agent-bus-log-filter nil
   "Current recipient filter for the log buffer.
-A list of names; a post is shown if it is a broadcast (`to: []') or if its
-`to' field contains any of them.  If nil, defaults to the user's name plus
-the legacy channel name.")
+A list of names; a post is shown if it is a broadcast (`to: [\"all\"]') or
+if its `to' field contains any of them.  If nil, defaults to the user's
+name plus the legacy channel name.")
 
 (defvar free-agent-bus-log--timer nil
   "Fallback timer for periodic log refresh.")
@@ -270,8 +272,8 @@ Unparseable lines are returned as-is."
                             (to (cdr (assoc 'to obj)))
                             (body (cdr (assoc 'body obj))))
                        (when (and id ts from body
-                                  (not (equal to [""]))
-                                  (or (seq-empty-p to)
+                                  (not (or (equal to [""]) (seq-empty-p to)))
+                                  (or (seq-find (lambda (c) (equal c "all")) to)
                                       (let ((filter (or free-agent-bus-log-filter
                                                         (list free-agent-bus-name
                                                               free-agent-bus-channel))))

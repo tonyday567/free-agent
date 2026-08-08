@@ -25,6 +25,7 @@ import Control.Monad (when)
 import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Text (Text)
 import Data.List (inits)
+import Data.Maybe (mapMaybe)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Derivation (chaseLog, dParents, derivation, valid)
@@ -64,11 +65,12 @@ import Free.Agent.Seat
     runAgentSBox,
     silentSeat,
   )
+import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
-import Circuit.Agent.Framing (Stamped (..))
+import Circuit.Agent.Framing (Stamped (..), parseLine, stampId, stamped)
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Syntax (FreeAgent (..))
-import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath ((</>))
 import Prelude hiding (id, (.))
@@ -1002,5 +1004,35 @@ main = do
           let stats = computeStats defaultRules 1 "b" ps
            in statSignal stats == 1 && statNoise stats == 1
         _ -> False
+
+  -------------------------------------------------------------------------
+  -- Bus seat: the in-process runner, decided quiet included
+  --
+  -- openBus + postLocal + runSeatBus on a tmpdir bus.  The halt mark is
+  -- already on the log when the seat starts, so runSeatBus must process
+  -- the work, skip the mark (control, not content), and return.
+  -------------------------------------------------------------------------
+  putStrLn "bus seat"
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-seat-axioma"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    _ <- postLocal root (mkPost "human" ["echo"] "hello")
+    _ <- postLocal root (mkPost "human" ["echo"] "🟢 landed")
+    bus <- openBus root
+    runSeatBus bus ["echo"] (hostSeat (mkHost "echo" (pure . map ("echo:" <>))))
+    closeBus bus
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe parseLine (T.lines content)
+        fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
+    assert "seat replied to the work post with a thread edge" $
+      case fromEcho of
+        [p] -> body p == "echo:hello" && to p == ["human"] && thread p == [0]
+        _ -> False
+    assert "ids are coherent across postLocal and the seat scribe" $
+      map stampId parsed == [0, 1, 2]
+    assert "the halt mark got silence, not a reply" $
+      length fromEcho == 1
 
   putStrLn "All tests passed"

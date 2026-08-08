@@ -1,52 +1,54 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Out-of-process bus helpers: file cursors, scribe invocation, and an
--- fsnotify-based tail loop. Used by the long-running agent executables that
--- watch the JSONL log directly instead of sharing STM state with the scribe.
+-- | Out-of-process bus helpers: file cursors and an fsnotify-based tail
+-- loop. Used by the long-running agent executables that watch the JSONL log
+-- directly instead of sharing STM state with the scribe.
 module Free.Agent.Bus.File
   ( -- * Cursor files
     cursorPath,
     readCursor,
     writeCursor,
 
-    -- * Scribe executable
-    findScribe,
-    scribePost,
-
     -- * Event-tail loop
     QuiesceConfig (..),
+    Flow (..),
     tailLog,
   )
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo)
-import Circuit.Agent.Framing (StoredPost, framePost, parseLine, stampId, stamped)
-import Control.Concurrent (MVar, newEmptyMVar, takeMVar, threadDelay, tryPutMVar)
-import Control.Monad (filterM, forever, guard, unless)
-import Control.Monad.IO.Class (MonadIO (..))
-import Data.Foldable (traverse_)
-import Data.List (isPrefixOf)
+import Circuit.Agent.Framing (StoredPost, parseLine, stampId, stamped)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.STM
+  ( TMVar,
+    atomically,
+    check,
+    newTMVarIO,
+    newTVarIO,
+    orElse,
+    readTVar,
+    readTVarIO,
+    takeTMVar,
+    tryPutTMVar,
+    writeTVar,
+  )
+import Control.Monad (guard, unless, when)
+import Data.ByteString qualified as BS
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
-import System.Directory (doesFileExist, findExecutable)
-import System.Environment (getExecutablePath)
+import System.Directory (doesFileExist)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.FSNotify (Event (..), watchDir, withManager)
 import System.IO
-  ( BufferMode (LineBuffering),
-    Handle,
-    IOMode (AppendMode, ReadMode),
+  ( IOMode (AppendMode, ReadMode),
     SeekMode (AbsoluteSeek),
-    hFileSize,
-    hIsEOF,
     hSeek,
-    hSetBuffering,
-    openFile,
     withFile,
   )
-import System.Process (readProcess)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
@@ -60,6 +62,13 @@ data QuiesceConfig = QuiesceConfig
     qcCycleMicros :: Int
   }
   deriving (Show)
+
+-- | Flow control returned by a 'tailLog' callback: keep listening, or halt
+-- the loop after this post. This is decided quiet at the seat level: a
+-- callback that returns 'Halt' ends the exchange by content, not by
+-- timeout.
+data Flow = Continue | Halt
+  deriving (Eq, Show)
 
 -- | Path to the cursor file for an agent.
 --
@@ -86,49 +95,27 @@ writeCursor :: FilePath -> Name -> PostId -> IO ()
 writeCursor root name pid =
   TIO.writeFile (cursorPath root name) (T.pack (show pid))
 
--- | Locate the scribe executable. Prefer the sibling in the cabal build tree,
--- then PATH.
-findScribe :: IO FilePath
-findScribe = do
-  self <- getExecutablePath
-  let buildTree =
-        takeDirectory self
-          </> ".."
-          </> ".."
-          </> ".."
-          </> "free-agent-bus"
-          </> "build"
-          </> "free-agent-bus"
-          </> "free-agent-bus"
-  candidates <- filterM doesFileExist [buildTree, takeDirectory self </> "free-agent-bus"]
-  case candidates of
-    (p : _) -> pure p
-    [] -> do
-      mPath <- findExecutable "free-agent-bus"
-      case mPath of
-        Just p -> pure p
-        Nothing -> do
-          TIO.putStrLn "🔴 free-agent-bus scribe executable not found"
-          error "free-agent-bus not found"
-
--- | Scribe one post by invoking the external scribe executable.
-scribePost :: (MonadIO m) => FilePath -> FilePath -> Post Text -> m ()
-scribePost scribe root p = liftIO $ do
-  _ <- readProcess scribe ["post", "--root", root] (T.unpack (framePost p))
-  pure ()
-
 -- | Event-tail a log file and invoke the callback for every new stored post
 -- addressed to any of the subscribed names.
 --
 -- On startup the file is scanned from the beginning; posts with 'stampId'
 -- greater than or equal to the supplied cursor and addressed to any subscribed
--- name are delivered. After catch-up the handle is parked at EOF and fsnotify
--- wakes it for new lines.
+-- name are delivered. After catch-up, fsnotify wakes a drain for new lines.
+--
+-- Reading is offset-based: each drain opens the file, reads the complete
+-- lines appended since the last offset, and closes the handle /before/
+-- invoking callbacks. A partial trailing line (writer mid-append) is left
+-- for the next drain. The handle must be closed before callbacks run
+-- because callbacks may append to the log in-process, and GHC locks files
+-- per process — a held read handle makes the append fail with
+-- "resource busy (file is locked)".
 --
 -- When a quiescence config is supplied, the main loop waits on a signal with a
 -- timeout instead of blocking forever. Each timeout without a signal increments
 -- an empty-cycle counter; a signal resets it. After the configured number of
 -- empty cycles, the provided action is run and the loop exits.
+--
+-- The loop also exits when a callback returns 'Halt'.
 tailLog ::
   -- | Path to @log.jsonl@.
   FilePath ->
@@ -138,64 +125,86 @@ tailLog ::
   PostId ->
   -- | Optional quiescence config and action.
   Maybe (QuiesceConfig, IO ()) ->
-  -- | Callback for each delivered stored post.
-  (StoredPost -> IO ()) ->
+  -- | Callback for each delivered stored post; return 'Halt' to stop.
+  (StoredPost -> IO Flow) ->
   IO ()
 tailLog path names startCursor mQuiesce cb = do
   exists <- doesFileExist path
   unless exists $ do
     -- Touch an empty log so the scribe has a file to append to.
     withFile path AppendMode (\_ -> pure ())
-  h <- openFile path ReadMode
-  hSetBuffering h LineBuffering
-  -- Catch up on any posts missed while this agent was offline.
-  catchUp h startCursor
-  -- Park at EOF and wait for new posts via fsnotify.
-  size <- hFileSize h
-  hSeek h AbsoluteSeek size
+  (off0, halted0) <- drainFrom 0 (filterStoredSince startCursor)
+  offRef <- newIORef off0
+  halted <- newTVarIO halted0
   let logName = takeFileName path
       dir = takeDirectory path
   withManager $ \mgr -> do
-    signal <- newEmptyMVar
+    signal <- newTMVarIO ()
     _ <- watchDir mgr dir (\ev -> takeFileName (eventPath ev) == logName) $ \_ev -> do
-      drain h names cb
-      _ <- tryPutMVar signal ()
-      pure ()
+      already <- readTVarIO halted
+      unless already $ do
+        off <- readIORef offRef
+        (off', h) <- drainFrom off filterStored
+        writeIORef offRef off'
+        atomically $ do
+          when h (writeTVar halted True)
+          _ <- tryPutTMVar signal ()
+          pure ()
     case mQuiesce of
-      Nothing -> forever (threadDelay 1000000)
-      Just (qc, onQuiesce) -> quiesceLoop qc signal 0 onQuiesce
+      Nothing -> atomically (readTVar halted >>= check)
+      Just (qc, onQuiesce) -> quiesceLoop qc signal halted 0 onQuiesce
   where
-    catchUp h cursor = do
-      eof <- hIsEOF h
-      unless eof $ do
-        line <- TIO.hGetLine h
-        traverse_ cb (filterStoredSince names cursor line)
-        catchUp h cursor
+    drainFrom off filt = do
+      (ls, off') <- readCompleteLines off
+      halted <- deliver (mapMaybe filt ls)
+      pure (off', halted)
 
-    drain h names' cb' = do
-      eof <- hIsEOF h
-      unless eof $ do
-        line <- TIO.hGetLine h
-        traverse_ cb' (filterStored names' line)
-        drain h names' cb'
+    -- Deliver posts oldest first; stop early on 'Halt'.
+    deliver [] = pure False
+    deliver (p : ps) = do
+      flow <- cb p
+      case flow of
+        Halt -> pure True
+        Continue -> deliver ps
 
-    filterStoredSince names' cursor line = do
+    readCompleteLines off = withFile path ReadMode $ \h -> do
+      hSeek h AbsoluteSeek off
+      bs <- BS.hGetContents h
+      pure (completeLines off bs)
+
+    -- Lines up to the last newline are complete; the byte offset advances
+    -- past it. Anything after the last newline is a writer mid-append and
+    -- waits for the next drain.
+    completeLines off bs =
+      case BS.elemIndexEnd 0x0A bs of
+        Nothing -> ([], off)
+        Just i ->
+          ( T.lines (TE.decodeUtf8 (BS.take (i + 1) bs)),
+            off + fromIntegral i + 1
+          )
+
+    filterStoredSince cursor line = do
       stored <- parseLine line
       guard (stampId stored >= cursor)
-      guard (deliversTo (stamped stored) names')
+      guard (deliversTo (stamped stored) names)
       pure stored
 
-    filterStored :: [Name] -> Text -> Maybe StoredPost
-    filterStored names' line = do
+    filterStored line = do
       stored <- parseLine line
-      if deliversTo (stamped stored) names' then Just stored else Nothing
+      if deliversTo (stamped stored) names then Just stored else Nothing
 
-    quiesceLoop qc signal count onQuiesce = do
-      m <- timeout (qcCycleMicros qc) (takeMVar signal)
+    -- Wait for a halt or a new-posts signal, whichever lands first.
+    awaitEvent signal halted =
+      (readTVar halted >>= check >> pure True)
+        `orElse` (takeTMVar signal >> pure False)
+
+    quiesceLoop qc signal halted count onQuiesce = do
+      m <- timeout (qcCycleMicros qc) (atomically (awaitEvent signal halted))
       case m of
-        Just () -> quiesceLoop qc signal 0 onQuiesce
+        Just True -> pure ()
+        Just False -> quiesceLoop qc signal halted 0 onQuiesce
         Nothing -> do
           let count' = count + 1
           if count' >= qcCycles qc
             then onQuiesce
-            else quiesceLoop qc signal count' onQuiesce
+            else quiesceLoop qc signal halted count' onQuiesce

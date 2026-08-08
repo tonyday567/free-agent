@@ -19,7 +19,7 @@ module Free.Agent.Bus.Cli
   )
 where
 
-import Circuit.Agent (Name, Post (..), PostId, mkPost)
+import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost)
 import Circuit.Agent.Framing (StoredPost, frameStored, parseLine, parsePost, stampId, stampTs, stamped)
 import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -32,7 +32,8 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (LocalTime, NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, localTimeToUTC, utc)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
-import Free.Agent.Bus (busDeliversTo, closeBus, openBus, scribeIO)
+import Free.Agent.Bus (postLocal)
+import Free.Agent.Bus.File (readCursor, writeCursor)
 import Options.Applicative
 import System.Directory (doesFileExist, listDirectory)
 import System.Exit (exitFailure)
@@ -194,10 +195,8 @@ runPost root mfrom mto mbody = do
     _ -> do
       TIO.putStrLn "🔴 post requires either --from and --body flags or JSON on stdin"
       exitFailure
-  bus <- openBus root
-  stored <- scribeIO bus p
+  stored <- postLocal root p
   TIO.putStrLn (frameStored stored)
-  closeBus bus
 
 -- ---------------------------------------------------------------------------
 -- watch
@@ -237,7 +236,7 @@ filterStored :: [Name] -> Text -> Maybe Text
 filterStored names line = do
   stored <- parseLine line
   let p = stamped stored
-  if busDeliversTo p names then Just line else Nothing
+  if deliversTo p names then Just line else Nothing
 
 -- ---------------------------------------------------------------------------
 -- read
@@ -262,25 +261,12 @@ filterStoredSince names sinceId line = do
   stored <- parseLine line
   let p = stamped stored
   guard (stampId stored >= sinceId)
-  guard (busDeliversTo p names)
+  guard (deliversTo p names)
   pure line
 
 -- ---------------------------------------------------------------------------
 -- cursor
 -- ---------------------------------------------------------------------------
-
-cursorFilePath :: FilePath -> Text -> FilePath
-cursorFilePath root name = root </> (".cursor-" <> T.unpack name)
-
-readCursor :: FilePath -> Text -> IO PostId
-readCursor root name = do
-  let path = cursorFilePath root name
-  exists <- doesFileExist path
-  if not exists
-    then pure 0
-    else do
-      txt <- TIO.readFile path
-      pure $ maybe 0 fromIntegral (readMaybe @Integer (T.unpack (T.strip txt)))
 
 runCursorGet :: FilePath -> Text -> IO ()
 runCursorGet root name = do
@@ -288,8 +274,7 @@ runCursorGet root name = do
   TIO.putStrLn (T.pack (show pid))
 
 runCursorSet :: FilePath -> Text -> PostId -> IO ()
-runCursorSet root name pid =
-  TIO.writeFile (cursorFilePath root name) (T.pack (show pid))
+runCursorSet root name pid = writeCursor root name pid
 
 -- ---------------------------------------------------------------------------
 -- ping-watch
