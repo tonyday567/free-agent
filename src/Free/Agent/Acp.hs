@@ -20,7 +20,8 @@
 --     spec's @path@ — both are accepted here.
 --
 -- Requests travel through the shared stdin 'commit' port of
--- 'openReplPortsLines'; replies are polled from the stdout log cursor.
+-- 'Circuit.Agent.StdPorts'; replies are line-framed blocking reads from the
+-- stdout queue.
 module Free.Agent.Acp
   ( -- * Configuration
     AcpConfig (..),
@@ -54,33 +55,33 @@ module Free.Agent.Acp
   )
 where
 
-import Circuit.Agent.Repl
-  ( ReplConfig (..),
-    ReplPorts (..),
-    defaultReplConfig,
-    openReplPorts,
+import Circuit.Agent.StdPorts
+  ( ProcConfig (..),
+    StdPorts (..),
+    defaultProcConfig,
+    lineMarks,
+    openStdPorts,
   )
 import Circuit.Ends (Ends, commit, companion, conjoint, emit, open)
 import Circuit.Layer (run)
 import Control.Arrow (Kleisli (..), runKleisli)
-import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
-import Control.Monad (forM_, unless, void)
+import Control.Monad (forM_)
 import Data.Aeson (Result (..), Value (..), eitherDecodeStrict, encode, fromJSON, object, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (foldr)
-import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text.IO qualified as TIO
-import Data.Time (getCurrentTime)
+import Data.Time (diffUTCTime, getCurrentTime)
 import System.Directory (createDirectoryIfMissing)
-import System.FilePath (takeDirectory, (</>))
-import System.IO (Handle, IOMode (WriteMode), hClose, openFile)
+import System.FilePath (takeDirectory)
+import System.Timeout (timeout)
 import Prelude
 
 -- ---------------------------------------------------------------------------
@@ -93,9 +94,8 @@ data AcpConfig = AcpConfig
     acpCommand :: FilePath,
     -- | argv (default @["acp"]@).
     acpArgs :: [String],
-    -- | Scratch directory: stdin FIFO, stdout/stderr logs, and the child's
-    -- working directory.  The ACP session cwd is pinned separately via
-    -- @session/new@.
+    -- | The child's working directory.  The ACP session cwd is pinned
+    -- separately via @session/new@.
     acpWorkDir :: FilePath,
     -- | Optional raw-frame transcript (NDJSON, one @{ts,dir,raw}@ per line,
     -- @dir@ ∈ send\/recv), mirroring the python probe's transcript.
@@ -103,10 +103,9 @@ data AcpConfig = AcpConfig
   }
   deriving (Show, Eq)
 
--- | @kimi acp@ with plumbing under @\/tmp\/free-agent-acp@.
+-- | @kimi acp@ with the child working directory at @\/tmp\/free-agent-acp@.
 defaultAcpConfig :: AcpConfig
-defaultAcpConfig =
-  AcpConfig
+defaultAcpConfig = AcpConfig
     { acpCommand = "kimi",
       acpArgs = ["acp"],
       acpWorkDir = "/tmp/free-agent-acp",
@@ -119,54 +118,38 @@ defaultAcpConfig =
 
 -- | A live ACP child process plus client-side protocol state.
 data AcpClient = AcpClient
-  { acpPorts :: ReplPorts Text Text Text,
+  { acpPorts :: StdPorts Text Text Text,
     acpConfig :: AcpConfig,
     -- | Next JSON-RPC request id (monotonic from 1).
-    acpNextId :: IORef Int,
-    -- | Received raw lines not yet consumed by a read.
-    acpQueue :: IORef [Text],
-    -- | Persistent writer on the stdin FIFO so the child never sees EOF
-    -- between per-line commits.
-    acpKeepAlive :: Handle
+    acpNextId :: IORef Int
   }
 
--- | Spawn the ACP child and open the protocol state.
---
--- Stale stdout/stderr logs from a previous run at the same paths are
--- truncated first (the ports' cursors rewind to 0 on open).
+-- | Spawn the ACP child and open the protocol state.  Pipes all the way
+-- down: no FIFO, no log files — stdout frames arrive line by line on the
+-- blocking emit end.
 openAcp :: AcpConfig -> IO AcpClient
 openAcp cfg = do
   let wd = acpWorkDir cfg
   createDirectoryIfMissing True wd
-  writeFile (wd </> "acp-stdout.log") ""
-  writeFile (wd </> "acp-stderr.log") ""
   let replCfg =
-        defaultReplConfig
-          { replCommand = acpCommand cfg,
-            replArgs = acpArgs cfg,
-            replStdinPath = wd </> "acp-stdin",
-            replStdoutPath = wd </> "acp-stdout.log",
-            replStderrPath = wd </> "acp-stderr.log",
-            replWorkingDir = wd
+        defaultProcConfig
+          { procCommand = acpCommand cfg,
+            procArgs = acpArgs cfg,
+            procWorkingDir = wd,
+            procMarks = lineMarks
           }
-  pp <- runKleisli (run (openReplPorts encodeUtf8 decodeUtf8 replCfg)) ()
-  keepAlive <- openFile (wd </> "acp-stdin") WriteMode
+  pp <- runKleisli (run (openStdPorts encodeUtf8 decodeUtf8 replCfg)) ()
   nref <- newIORef 1
-  qref <- newIORef []
   pure
     AcpClient
       { acpPorts = pp,
         acpConfig = cfg,
-        acpNextId = nref,
-        acpQueue = qref,
-        acpKeepAlive = keepAlive
+        acpNextId = nref
       }
 
--- | Close the keep-alive writer and terminate the child.
+-- | Terminate the child (kills the pumps, closes the pipes).
 closeAcp :: AcpClient -> IO ()
-closeAcp c = do
-  void $ try @SomeException (hClose (acpKeepAlive c))
-  replPortsClose (acpPorts c)
+closeAcp c = stdClose (acpPorts c)
 
 -- ---------------------------------------------------------------------------
 -- Transcript
@@ -267,50 +250,33 @@ acpSendValue c v = do
   let line = encodeText v
   logFrame c "send" line
   runKleisli
-    (commit (replIn (acpPorts c)) (companion (open :: Ends (Kleisli IO) () ())))
+    (commit (stdIn (acpPorts c)) (companion (open :: Ends (Kleisli IO) () ())))
     line
 
--- | Poll the stdout log cursor for new text, logging raw frames.
--- Blank lines are dropped from the returned text.
-acpPoll :: AcpClient -> IO Text
-acpPoll c = do
+-- | Read the next stdout line, blocking until a complete line frame
+-- arrives, logging raw frames.
+acpReadLine :: AcpClient -> IO Text
+acpReadLine c = do
   t <-
     runKleisli
-      (emit (replOutO (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
+      (emit (stdOut (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
       ()
   logFrame c "recv" t
   pure t
 
--- | Read the next decodable JSON message, polling the stdout log until one
--- arrives or the timeout (microseconds) expires.  Lines that fail to parse
--- are skipped (they stay in the transcript).
+-- | Read the next decodable JSON message, blocking on the stdout queue
+-- until one arrives or the timeout (microseconds) expires.  Lines that fail
+-- to parse are skipped (they stay in the transcript).
 acpReadFrame :: AcpClient -> Int -> IO (Maybe Value)
-acpReadFrame c micros = loop its
+acpReadFrame c micros = timeout micros go
   where
-    step = 20000
-    its = max 1 (micros `div` step)
-    loop 0 = pure Nothing
-    loop n = do
-      mv <- popQueue
-      case mv of
-        Just v -> pure (Just v)
-        Nothing -> do
-          t <- acpPoll c
-          let ls = filter (not . T.null) (T.lines t)
-          unless (null ls) $ modifyIORef' (acpQueue c) (<> ls)
-          if null ls
-            then threadDelay step
-            else pure ()
-          loop (n - 1)
-    popQueue = do
-      q <- readIORef (acpQueue c)
-      case q of
-        [] -> pure Nothing
-        (l : rest) -> do
-          writeIORef (acpQueue c) rest
-          case eitherDecodeStrict (encodeUtf8 l) of
-            Right v -> pure (Just v)
-            Left _ -> popQueue
+    go = do
+      t <- acpReadLine c
+      if T.null t
+        then go
+        else case eitherDecodeStrict (encodeUtf8 t) of
+          Right v -> pure v
+          Left _ -> go
 
 -- ---------------------------------------------------------------------------
 -- Reverse-RPC
@@ -388,7 +354,7 @@ acpAnswer c rid method params = case method of
 -- Requests
 -- ---------------------------------------------------------------------------
 
--- | Send a request and poll until its response arrives or the timeout
+-- | Send a request and block until its response arrives or the timeout
 -- (microseconds) expires.  Interleaved reverse-RPCs are answered (see
 -- 'acpAnswer'); every frame seen (including the response) is returned in
 -- arrival order alongside the response.
@@ -404,22 +370,27 @@ acpRequest c micros method params = do
           "params" .= params
         ]
     )
-  loop rid [] its
+  start <- getCurrentTime
+  loop rid [] start
   where
     t2 = "2.0" :: Text
-    step = 20000
-    its = max 1 (micros `div` step)
-    loop _ acc 0 = pure (Nothing, reverse acc)
-    loop rid acc n = do
-      mv <- acpReadFrame c step
-      case mv of
-        Nothing -> loop rid acc (n - 1)
-        Just v -> case classifyFrame v of
-          Just (Response i _) | i == rid -> pure (Just v, reverse (v : acc))
-          Just (AgentRequest i m p) -> do
-            acpAnswer c i m p
-            loop rid (v : acc) n
-          _ -> loop rid (v : acc) n
+    budgetLeft start = do
+      now <- getCurrentTime
+      pure (micros - round (realToFrac (diffUTCTime now start) * 1e6 :: Double))
+    loop rid acc start = do
+      left <- budgetLeft start
+      if left <= 0
+        then pure (Nothing, reverse acc)
+        else do
+          mv <- acpReadFrame c left
+          case mv of
+            Nothing -> pure (Nothing, reverse acc)
+            Just v -> case classifyFrame v of
+              Just (Response i _) | i == rid -> pure (Just v, reverse (v : acc))
+              Just (AgentRequest i m p) -> do
+                acpAnswer c i m p
+                loop rid (v : acc) start
+              _ -> loop rid (v : acc) start
 
 -- | @initialize@ handshake: protocolVersion 1, fs client capabilities on,
 -- terminal off.
@@ -557,9 +528,18 @@ acpCancel c sid =
 -- Misc
 -- ---------------------------------------------------------------------------
 
--- | Read any pending stderr diagnostics (non-blocking poll).
+-- | Drain pending stderr diagnostics (bounded: returns after ~100ms of
+-- quiet).  Stderr is diagnostics, not dialogue — a bounded drain, not a
+-- blocking read, so a silent stderr cannot stall the caller.
 acpReadStderr :: AcpClient -> IO Text
-acpReadStderr c =
-  runKleisli
-    (emit (replErrO (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
-    ()
+acpReadStderr c = go []
+  where
+    go acc = do
+      m <-
+        timeout 100_000 $
+          runKleisli
+            (emit (stdErr (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
+            ()
+      case m of
+        Nothing -> pure (T.unlines (reverse acc))
+        Just l -> go (l : acc)
