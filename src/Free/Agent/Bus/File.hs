@@ -17,7 +17,7 @@ module Free.Agent.Bus.File
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo)
-import Circuit.Agent.Framing (StoredPost, parseLine, stampId, stamped)
+import Circuit.Agent.Framing (Stamped (..), parseLine, stamp, stamped)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
   ( TMVar,
@@ -106,10 +106,10 @@ latestPostId root = do
       case ls of
         [] -> pure 0
         _ -> case parseLine (last ls) of
-               Just stored -> pure (stampId stored + 1)
+               Just stored -> pure (stamp stored + 1)
                Nothing -> pure (fromIntegral (length ls))
 
--- | Persist the cursor for an agent. Writes @stampId + 1@ so the next wake
+-- | Persist the cursor for an agent. Writes @stamp + 1@ so the next wake
 -- starts after the post just processed.
 writeCursor :: FilePath -> Name -> PostId -> IO ()
 writeCursor root name pid =
@@ -118,7 +118,7 @@ writeCursor root name pid =
 -- | Event-tail a log file and invoke the callback for every new stored post
 -- addressed to any of the subscribed names.
 --
--- On startup the file is scanned from the beginning; posts with 'stampId'
+-- On startup the file is scanned from the beginning; posts with 'stamp'
 -- greater than or equal to the supplied cursor and addressed to any subscribed
 -- name are delivered. After catch-up, fsnotify wakes a drain for new lines.
 --
@@ -146,7 +146,7 @@ tailLog ::
   -- | Optional quiescence config and action.
   Maybe (QuiesceConfig, IO ()) ->
   -- | Callback for each delivered stored post; return 'Halt' to stop.
-  (StoredPost -> IO Flow) ->
+  (Stamped Text -> IO Flow) ->
   IO ()
 tailLog path names startCursor mQuiesce cb = do
   exists <- doesFileExist path
@@ -227,7 +227,7 @@ tailLog path names startCursor mQuiesce cb = do
 
     filterStoredSince cursor line = do
       stored <- parseLine line
-      guard (stampId stored >= cursor)
+      guard (stamp stored >= cursor)
       guard (deliversTo (stamped stored) names)
       pure stored
 

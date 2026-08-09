@@ -21,7 +21,7 @@ module Free.Agent.Bus.Cli
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost)
-import Circuit.Agent.Framing (StoredPost, frameStored, parseLine, parsePost, stampId, stampTs, stamped)
+import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, parsePost, stamp, timeStamp, stamped)
 import Circuit.Agent.Mark (isHalt, markOf)
 import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -280,7 +280,7 @@ filterStoredSince :: [Name] -> PostId -> Text -> Maybe Text
 filterStoredSince names sinceId line = do
   stored <- parseLine line
   let p = stamped stored
-  guard (stampId stored >= sinceId)
+  guard (stamp stored >= sinceId)
   guard (deliversTo p names)
   pure line
 
@@ -336,15 +336,15 @@ runStatus root threshold = do
   let ls = filter (not . T.null) (T.lines content)
       posts = mapMaybe parseLine ls
       idless = length ls - length posts
-      maxId = maximum (0 : map stampId posts)
+      maxId = maximum (0 : map stamp posts)
   now <- getCurrentTime
   case posts of
     [] ->
       TIO.putStrLn ("🟡 " <> T.pack root <> " — empty bus (0 posts)")
     _ -> do
       let lastPost = last posts
-          age = diffUTCTime now <$> parseTs (stampTs lastPost)
-          live = maybe False (< threshold) age
+          age = diffUTCTime now (timeStamp lastPost)
+          live = age < threshold
       TIO.putStrLn
         ( (if live then "🟢 " else "🟡 ")
             <> T.pack root
@@ -353,12 +353,12 @@ runStatus root threshold = do
             <> " posts"
             <> (if idless > 0 then " (" <> T.pack (show idless) <> " id-less)" else "")
             <> "; last id="
-            <> T.pack (show (stampId lastPost))
+            <> T.pack (show (stamp lastPost))
             <> " from="
             <> from (stamped lastPost)
             <> " at "
-            <> stampTs lastPost
-            <> maybe "" (\a -> " (" <> fmtAge a <> " ago)") age
+            <> T.pack (show (timeStamp lastPost))
+            <> " (" <> fmtAge age <> " ago)"
         )
   entries <- listDirectory root
   let names = sort [n | e <- entries, Just n <- [T.stripPrefix ".cursor-" (T.pack e)]]
@@ -387,7 +387,7 @@ runStatus root threshold = do
       traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " done")) dones
       traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " caught up")) caughtUps
   where
-    seatStatus :: [StoredPost] -> PostId -> (Name, PostId) -> (Name, PostId, SeatStatus)
+    seatStatus :: [Stamped Text] -> PostId -> (Name, PostId) -> (Name, PostId, SeatStatus)
     seatStatus posts maxId (n, c)
       | isDone = (n, c, Done)
       | c > maxId = (n, c, CaughtUp)
@@ -398,8 +398,8 @@ runStatus root threshold = do
             Nothing -> False
             Just stored -> maybe False isHalt (markOf (stamped stored))
 
-    latestBy :: Name -> [StoredPost] -> Maybe StoredPost
-    latestBy n = listToMaybe . sortOn (Down . stampId) . filter ((== n) . from . stamped)
+    latestBy :: Name -> [Stamped Text] -> Maybe (Stamped Text)
+    latestBy n = listToMaybe . sortOn (Down . stamp) . filter ((== n) . from . stamped)
 
 -- | Scribe stamps naive UTC; raw appends may carry an offset. Take both.
 parseTs :: Text -> Maybe UTCTime

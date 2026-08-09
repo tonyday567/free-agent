@@ -29,7 +29,7 @@ module Free.Agent.BusStats
 where
 
 import Circuit.Agent (Post (..), PostId)
-import Circuit.Agent.Framing (Stamped (..), StoredPost)
+import Circuit.Agent.Framing (Stamped (..))
 import Data.Aeson (ToJSON (..), encode, object, (.=))
 import Data.ByteString.Lazy qualified as BL
 import Data.Text.Encoding (decodeUtf8)
@@ -105,9 +105,6 @@ matches pat txt = T.unpack txt =~ T.unpack pat
 -- ---------------------------------------------------------------------------
 
 -- | Parse the timestamp format written by the bus scribe.
-parseTs :: Text -> Maybe UTCTime
-parseTs = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" . T.unpack
-
 -- | Format a timestamp for display.
 formatTs :: UTCTime -> Text
 formatTs = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S"
@@ -135,14 +132,14 @@ data SliceMode
 -- | Partition stamped posts into slices.  Posts without a parseable timestamp
 -- are dropped from time-based slicing, but kept for thread slicing (where the
 -- id is enough).
-slicePosts :: SliceMode -> [StoredPost] -> [(Text, [StoredPost])]
+slicePosts :: SliceMode -> [Stamped Text] -> [(Text, [Stamped Text])]
 slicePosts WholeLog posts = [("whole", posts)]
 slicePosts (WindowMinutes m) posts =
   case timed of
     [] -> []
     _ -> map (\(k, vs) -> (bucketLabel k, vs)) (Map.toList buckets)
   where
-    timed = [(t, p) | p <- posts, Just t <- [parseTs (stampTs p)]]
+    timed = [(timeStamp p, p) | p <- posts]
     base = minimum (map fst timed)
     bucket t = floor (minutes base t) `div` m
     buckets = Map.fromListWith (flip (++)) (map (\(t, p) -> (bucket t, [p])) timed)
@@ -153,12 +150,12 @@ slicePosts (WindowMinutes m) posts =
 slicePosts ByThread posts =
   sortOn fst [(showt k, v) | (k, v) <- Map.toList roots]
   where
-    idx = Map.fromList [(stampId p, p) | p <- posts]
+    idx = Map.fromList [(stamp p, p) | p <- posts]
     rootOf p = case thread (stamped p) of
-      [] -> stampId p
+      [] -> stamp p
       ts -> case mapMaybe (`Map.lookup` idx) ts of
         [] -> minimum ts
-        ps -> rootOf (minimumBy (comparing stampId) ps)
+        ps -> rootOf (minimumBy (comparing stamp) ps)
     roots = Map.fromListWith (++) [(rootOf p, [p]) | p <- posts]
 slicePosts ByAgent posts =
   sortOn fst [(k, v) | (k, v) <- Map.toList byAuthor]
@@ -194,7 +191,7 @@ data Stats = Stats
   deriving (Eq, Show)
 
 -- | Compute stats for one slice given classification rules and a damping count.
-computeStats :: Rules -> Int -> Text -> [StoredPost] -> Stats
+computeStats :: Rules -> Int -> Text -> [Stamped Text] -> Stats
 computeStats rules damping label posts =
   Stats
     { statSlice = label,
@@ -217,7 +214,7 @@ computeStats rules damping label posts =
   where
     n = length posts
     agents = sort $ Map.keys $ Map.fromList [(from (stamped p), ()) | p <- posts]
-    timestamps = mapMaybe (parseTs . stampTs) posts
+    timestamps = map timeStamp posts
     (startTime, endTime) = case timestamps of
       [] -> (Nothing, Nothing)
       ts -> (Just (minimum ts), Just (maximum ts))
@@ -247,7 +244,7 @@ computeStats rules damping label posts =
       Nothing -> 0
       Just start ->
         let signalPosts = [p | p <- posts, classify rules (stamped p) == Signal]
-            signalTimes = mapMaybe (parseTs . stampTs) signalPosts
+            signalTimes = map timeStamp signalPosts
          in case signalTimes of
               [] -> 0
               ts -> minutes start (maximum ts)

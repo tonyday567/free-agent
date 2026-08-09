@@ -17,7 +17,7 @@ module Free.Agent.Connector
 where
 
 import Circuit.Agent (Name, Post (..), deliversTo, mkPost)
-import Circuit.Agent.Framing (Stamped (..), StoredPost)
+import Circuit.Agent.Framing (Stamped (..))
 import Circuit.Agent.Repl
   ( Repl (..),
     ReplConfig (..),
@@ -114,14 +114,14 @@ runConnector cfg = do
           loop bus repl name lastId
         else do
           done <- processPosts cfg bus repl ps
-          let newId = maximum (map stampId ps) + 1
+          let newId = maximum (map stamp ps) + 1
           if done
             then pure ()
             else loop bus repl name newId
 
 processPosts ::
   ConnectorConfig -> Bus -> Repl [Text] [Text] [Text] ->
-  [StoredPost] -> IO Bool
+  [Stamped Text] -> IO Bool
 processPosts cfg bus repl = go
   where
     name = connName cfg

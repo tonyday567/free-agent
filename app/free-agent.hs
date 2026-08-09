@@ -17,7 +17,7 @@ module Main (main) where
 
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), mkPost, sortNub)
-import Circuit.Agent.Framing (StoredPost, stampId, stamped)
+import Circuit.Agent.Framing ( stamp, stamped)
 import Control.Applicative ((<|>))
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (unless)
@@ -222,17 +222,17 @@ routeReply p =
             else p {to = [name'], body = T.strip (T.drop 1 afterName)}
 
 -- | Decorate an incoming post body with its sender.
-decorateSender :: StoredPost -> StoredPost
+decorateSender :: Stamped Text -> Stamped Text
 decorateSender stored =
   let p = stamped stored
    in stored {stamped = p {body = from p <> ": " <> body p}}
 
 -- | Run one stored post through a seat and produce reply posts with thread edges.
-runOneSeat :: FreeSeat -> StoredPost -> IO [Post Text]
+runOneSeat :: FreeSeat -> Stamped Text -> IO [Post Text]
 runOneSeat seat stored = do
   let stored' = decorateSender stored
       p = stamped stored'
-      parentId = stampId stored
+      parentId = stamp stored
       sh = interpretSeat seat
   (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
   pure [routeReply (scrubReply out) {thread = sortNub (parentId : thread out)} | out <- outs]
@@ -307,7 +307,7 @@ runLlm cfg = do
           mQuiesce = buildQuiesce (lcQuiesce cfg) (lcPitboss cfg)
           handle stored = do
             let p = stamped stored
-                parentId = stampId stored
+                parentId = stamp stored
                 sh = interpretSeat seat
             (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
             pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
@@ -328,7 +328,7 @@ runCommand cfg = do
       mQuiesce = buildQuiesce (ccQuiesce cfg) (ccPitboss cfg)
       handle stored = do
         let p = stamped stored
-            parentId = stampId stored
+            parentId = stamp stored
             sh = interpretSeat seat
         (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
         pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]

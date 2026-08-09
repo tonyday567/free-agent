@@ -67,7 +67,7 @@ import Free.Agent.Seat
   )
 import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
-import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, stampId, stamped)
+import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, stamp, stamped)
 import Circuit.Agent.Mark (isEscalate, markOf)
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Free.Agent.Bus.File (Flow (..), tailLog)
@@ -1034,7 +1034,7 @@ main = do
         [p] -> body p == "echo:hello" && to p == ["human"] && thread p == [0]
         _ -> False
     assert "ids are coherent across postLocal and the seat scribe" $
-      map stampId parsed == [0, 1, 2]
+      map stamp parsed == [0, 1, 2]
     assert "the halt mark got silence, not a reply" $
       length fromEcho == 1
 
@@ -1072,7 +1072,7 @@ main = do
     assert "seat replies to the third post after a failure" $
       any (\p -> body p == "fragile:world" && to p == ["human"] && thread p == [2]) fromFragile
     assert "ids are coherent across postLocal, replies, and escalation" $
-      map stampId parsed == [0, 1, 2, 3, 4, 5, 6]
+      map stamp parsed == [0, 1, 2, 3, 4, 5, 6]
 
   -------------------------------------------------------------------------
   -- Multi-seat card meeting: two FreeSeats share a subscription on the bus
@@ -1113,7 +1113,7 @@ main = do
         [p] -> body p == "beta:discuss" && to p == ["human"] && thread p == [0]
         _ -> False
     assert "ids are coherent across postLocal and seat scribes" $
-      map stampId parsed == [0, 1, 2, 3]
+      map stamp parsed == [0, 1, 2, 3]
     assert "the halt mark got silence from every seat" $
       length (fromAlpha ++ fromBeta) == 2
 

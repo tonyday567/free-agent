@@ -12,7 +12,7 @@ module Free.Agent.Agent.Runner
 where
 
 import Circuit.Agent (Name, Post (..), mkPost)
-import Circuit.Agent.Framing (StoredPost, stampId, stamped)
+import Circuit.Agent.Framing (Stamped (..), stamp, stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Control.Exception (SomeException, displayException, try)
 import Data.Foldable (forM_, traverse_)
@@ -35,7 +35,7 @@ import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, 
 -- | Start a seat loop.
 --
 -- The caller supplies the subscription names, the bus root, an optional
--- quiescence config, and a handler that turns one incoming 'StoredPost' into
+-- quiescence config, and a handler that turns one incoming 'Stamped Text' into
 -- zero or more reply posts. The handler is responsible for decoration,
 -- scrubbing, routing, and filtering; this function handles the bus plumbing.
 --
@@ -54,7 +54,7 @@ runAgentLoop ::
   -- | Optional quiescence config.
   Maybe QuiesceConfig ->
   -- | Handler: incoming post -> reply posts.
-  (StoredPost -> IO [Post Text]) ->
+  (Stamped Text -> IO [Post Text]) ->
   IO ()
 runAgentLoop agentName names root mQuiesce handlePost = do
   hSetBuffering stdout LineBuffering
@@ -83,13 +83,13 @@ runAgentLoop agentName names root mQuiesce handlePost = do
   tailLog path names cursor (fmap (\qc -> (qc, onQuiesce)) mQuiesce) $ \stored ->
     controlFlow stored >>= \case
       Just flow -> do
-        writeCursor root agentName (stampId stored + 1)
+        writeCursor root agentName (stamp stored + 1)
         pure flow
       Nothing -> do
         -- F2: skip self-posts — an agent should never receive its own posts
         if from (stamped stored) == agentName
           then do
-            writeCursor root agentName (stampId stored + 1)
+            writeCursor root agentName (stamp stored + 1)
             pure Continue
           else do
             ereplies <- try @SomeException (handlePost stored)
@@ -100,7 +100,7 @@ runAgentLoop agentName names root mQuiesce handlePost = do
                     recipients = from p : maybe [] (pure . qcPitboss) mQuiesce
                 hPutStrLn stderr $
                   "🔴 " ++ T.unpack agentName ++ " handler failed on post "
-                    ++ show (stampId stored)
+                    ++ show (stamp stored)
                     ++ ": "
                     ++ T.unpack exc
                 _ <-
@@ -108,5 +108,5 @@ runAgentLoop agentName names root mQuiesce handlePost = do
                     mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc)
                 pure ()
               Right replies -> traverse_ (postLocal root) replies
-            writeCursor root agentName (stampId stored + 1)
+            writeCursor root agentName (stamp stored + 1)
             pure Continue
