@@ -17,7 +17,7 @@ module Main (main) where
 
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), mkPost, sortNub)
-import Circuit.Agent.Framing ( stamp, stamped)
+import Circuit.Agent.Framing (Stamped (..), stamp, stamped)
 import Control.Applicative ((<|>))
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (unless)

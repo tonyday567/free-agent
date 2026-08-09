@@ -9,7 +9,10 @@
 --
 -- This is the in-process / single-runtime form of the bus. An out-of-process
 -- form can replace the 'TVar' with file-change events without changing the
--- 'Post'/'Stamped'/'Jsonl' image.
+-- 'Post'/'Stamped'/'Log' image.
+--
+-- Polymorphic in the body type @a@. File persistence uses 'PostBody' for
+-- JSON encoding/decoding at the storage boundary.
 module Free.Agent.Bus
   ( -- * Bus handle
     Bus,
@@ -39,7 +42,16 @@ where
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
 import Circuit.Agent.Mark (Mark (Escalate), isEscalate, isHalt, markGlyph, markOf)
-import Circuit.Agent.Framing (Jsonl (..), Snoc (..), Stamped (..), These (..), Uncons (..), frameStored)
+import Circuit.Agent.Framing
+  ( Log (..),
+    PostBody,
+    Snoc (..),
+    Stamped (..),
+    Uncons (..),
+    encodeLog,
+    frameStored,
+    readLogFile,
+  )
 import Control.Arrow (runKleisli)
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Exception (SomeException, bracket, displayException, try)
@@ -78,13 +90,13 @@ import System.FileLock (SharedExclusive (Exclusive), withFileLock)
 import System.IO (IOMode (AppendMode), withFile)
 import Text.Printf (printf)
 
--- | Live bus handle.
-data Bus = Bus
+-- | Live bus handle, polymorphic in the post body type.
+data Bus a = Bus
   { -- | In-memory log image, oldest first.
-    busLog :: TVar Jsonl,
+    busLog :: TVar (Log a),
     -- | Posts waiting to be persisted, each paired with an acknowledgement
     -- 'TMVar' that is filled once the post is on disk.
-    busPending :: TQueue (Stamped Text, TMVar ()),
+    busPending :: TQueue (Stamped a, TMVar ()),
     -- | Path to @log.jsonl@.
     busPath :: FilePath,
     -- | Background persistence thread.
@@ -92,14 +104,14 @@ data Bus = Bus
   }
 
 -- | Path to the underlying @log.jsonl@.
-busLogPath :: Bus -> FilePath
+busLogPath :: Bus a -> FilePath
 busLogPath = busPath
 
 -- | Open or create a bus at the given root directory.
 --
 -- Loads any existing @log.jsonl@ into memory and starts the persistence
 -- thread. The lock file lives at @root/log.jsonl.lock@.
-openBus :: FilePath -> IO Bus
+openBus :: PostBody a => FilePath -> IO (Bus a)
 openBus root = do
   createDirectoryIfMissing True root
   let path = root </> "log.jsonl"
@@ -108,7 +120,7 @@ openBus root = do
     -- Create an empty log file so out-of-process tailers have something to
     -- watch before the first post arrives.
     withFile path AppendMode (\_ -> pure ())
-  initial <- Jsonl . T.lines <$> TIO.readFile path
+  initial <- if exists then readLogFile path else pure (Log [])
   tv <- newTVarIO initial
   q <- newTQueueIO
   tid <- forkIO (persistLoop path q)
@@ -118,24 +130,24 @@ openBus root = do
 --
 -- Does not flush pending posts; call this only when durability is not
 -- required or after ensuring the log is quiescent.
-closeBus :: Bus -> IO ()
+closeBus :: Bus a -> IO ()
 closeBus = killThread . busThread
 
 -- | Bracketed 'openBus'/'closeBus': open a bus, run the action, kill the
 -- persistence thread on exit. The seat loop holds one bus for its whole
 -- lifetime and scribes replies in-process — no external scribe executable.
-withBus :: FilePath -> (Bus -> IO a) -> IO a
+withBus :: PostBody a => FilePath -> (Bus a -> IO b) -> IO b
 withBus root = bracket (openBus root) closeBus
 
 -- | Append a bare post to the live log inside one STM transaction.
 --
--- The returned 'Stamped Text' carries the absolute line id assigned by the
+-- The returned 'Stamped a' carries the absolute line id assigned by the
 -- scribe. The caller must supply the timestamp. The returned 'TMVar' is
 -- filled once the post has been persisted to disk.
-scribe :: Bus -> UTCTime -> Post Text -> STM (Stamped Text, TMVar ())
+scribe :: Bus a -> UTCTime -> Post a -> STM (Stamped a, TMVar ())
 scribe bus ts p = do
   log0 <- readTVar (busLog bus)
-  let pid = fromIntegral (length (unJsonl log0))
+  let pid = fromIntegral (length (unLog log0))
       stored = Stamped ts pid p
   ack <- newEmptyTMVar
   writeTVar (busLog bus) (snoc log0 stored)
@@ -144,7 +156,7 @@ scribe bus ts p = do
 
 -- | Synchronous scribe: assign the current timestamp, append, and wait for
 -- the post to be persisted.
-scribeIO :: Bus -> Post Text -> IO (Stamped Text)
+scribeIO :: Bus a -> Post a -> IO (Stamped a)
 scribeIO bus p = do
   ts <- getCurrentTime
   (stored, ack) <- atomically (scribe bus ts p)
@@ -160,7 +172,7 @@ scribeIO bus p = do
 -- a single runtime that owns all writes; a long-lived seat's in-memory
 -- image goes stale the moment another process posts, and stale images
 -- assign colliding ids.
-postLocal :: FilePath -> Post Text -> IO (Stamped Text)
+postLocal :: PostBody a => FilePath -> Post a -> IO (Stamped a)
 postLocal root p = do
   createDirectoryIfMissing True root
   let path = root </> "log.jsonl"
@@ -179,14 +191,14 @@ postLocal root p = do
 --
 -- Shared durable image primitive for the live bus persistence loop. Does not
 -- assign ids or timestamps.
-appendStoredPosts :: FilePath -> [Stamped Text] -> IO ()
+appendStoredPosts :: PostBody a => FilePath -> [Stamped a] -> IO ()
 appendStoredPosts path posts =
   withFileLock (path <.> "lock") Exclusive $ \_lock ->
     appendStoredPostsUnlocked path posts
 
 -- | Append stamped posts without taking the lock. Caller must already hold
 -- @path.lock@ (or otherwise guarantee exclusive writers).
-appendStoredPostsUnlocked :: FilePath -> [Stamped Text] -> IO ()
+appendStoredPostsUnlocked :: PostBody a => FilePath -> [Stamped a] -> IO ()
 appendStoredPostsUnlocked path posts =
   withFile path AppendMode $ \h ->
     traverse_ (TIO.hPutStrLn h . frameStored) posts
@@ -195,14 +207,14 @@ appendStoredPostsUnlocked path posts =
 --
 -- The cursor is the next unprocessed id, matching the file-cursor
 -- convention. Does not retry; returns an empty list if nothing matches.
-readSince :: Bus -> [Name] -> PostId -> STM [Stamped Text]
+readSince :: Bus a -> [Name] -> PostId -> STM [Stamped a]
 readSince bus names since = do
   log0 <- readTVar (busLog bus)
-  let posts = jsonlToList log0
+  let posts = unLog log0
   pure [s | s <- posts, stamp s >= since, deliversTo (stamped s) names]
 
 -- | Wait until at least one matching post exists after the cursor.
-awaitSince :: Bus -> [Name] -> PostId -> STM [Stamped Text]
+awaitSince :: Bus a -> [Name] -> PostId -> STM [Stamped a]
 awaitSince bus names since = do
   found <- readSince bus names since
   if null found then retry else pure found
@@ -221,7 +233,7 @@ awaitSince bus names since = do
 -- Decided quiet: a delivered post carrying a halt (🟢 / 🔵) or escalation
 -- (🔴) mark stops the loop. Marks are control, not content: they are not
 -- handed to the seat.
-runSeatBus :: Bus -> Name -> [Name] -> FreeSeat -> IO ()
+runSeatBus :: Bus Text -> Name -> [Name] -> FreeSeat -> IO ()
 runSeatBus bus agentName names seat = loop 0
   where
     sh = interpretSeat seat
@@ -254,21 +266,12 @@ runSeatBus bus agentName names seat = loop 0
 -- Internal helpers
 -- ---------------------------------------------------------------------------
 
--- | Drain a 'Jsonl' into a list of parsed posts.
-jsonlToList :: Jsonl -> [Stamped Text]
-jsonlToList = go
-  where
-    go jl = case uncons jl of
-      That _ -> []
-      This p -> [p]
-      These p rest -> p : go rest
-
 -- | Background persistence loop.
 --
 -- Batches all posts currently in the queue, appends them under a file lock,
 -- writes per-agent ping files, then repeats. Empty queue blocks via
 -- 'readTQueue'.
-persistLoop :: FilePath -> TQueue (Stamped Text, TMVar ()) -> IO ()
+persistLoop :: PostBody a => FilePath -> TQueue (Stamped a, TMVar ()) -> IO ()
 persistLoop path q = forever $ do
   pairs <- atomically $ do
     first <- readTQueue q
@@ -292,7 +295,7 @@ persistLoop path q = forever $ do
 --
 -- The file contains the latest post id addressed to that recipient. Agents can
 -- watch this file cheaply instead of re-parsing the log on every wake.
-writePings :: FilePath -> [Stamped Text] -> IO ()
+writePings :: FilePath -> [Stamped a] -> IO ()
 writePings path posts = traverse_ writeOne recipients
   where
     root = takeDirectory path

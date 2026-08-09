@@ -1,5 +1,6 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | free-agent bus CLI.
 --
@@ -254,7 +255,7 @@ runWatch root names = do
 
 filterStored :: [Name] -> Text -> Maybe Text
 filterStored names line = do
-  stored <- parseLine line
+  stored <- parseLine @Text line
   let p = stamped stored
   if deliversTo p names then Just line else Nothing
 
@@ -278,7 +279,7 @@ runRead root names since = do
 
 filterStoredSince :: [Name] -> PostId -> Text -> Maybe Text
 filterStoredSince names sinceId line = do
-  stored <- parseLine line
+  stored <- parseLine @Text line
   let p = stamped stored
   guard (stamp stored >= sinceId)
   guard (deliversTo p names)
@@ -334,7 +335,7 @@ runStatus root threshold = do
     exitFailure
   content <- TIO.readFile path
   let ls = filter (not . T.null) (T.lines content)
-      posts = mapMaybe parseLine ls
+      posts = mapMaybe (parseLine @Text) ls
       idless = length ls - length posts
       maxId = maximum (0 : map stamp posts)
   now <- getCurrentTime

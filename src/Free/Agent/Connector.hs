@@ -6,9 +6,6 @@
 -- 'runConnector' spawns a process (via 'openRepl'), attaches to the
 -- free-agent bus, and loops: await addressed posts → commit body to repl
 -- stdin → poll stdout until boundary → scribe reply.
---
--- The address model is structural: posts carry 'to :: [Name]' fields and
--- 'deliversTo' performs routing.  No text-prefix parsing needed.
 module Free.Agent.Connector
   ( ConnectorConfig (..),
     defaultConnectorConfig,
@@ -25,33 +22,30 @@ import Circuit.Agent.Repl
     openRepl,
   )
 import Circuit.Ends (Ends (..), HasUnit (..), commit, emit, open)
+import Circuit.Layer (run)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically)
-import Control.Monad (forM_, unless, void)
+import Control.Monad (unless, void)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Free.Agent.Bus (Bus, awaitSince, closeBus, openBus, scribeIO)
 import System.Directory (createDirectoryIfMissing, removePathForcibly)
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (takeDirectory)
 import System.IO (hPutStrLn, stderr)
 import Prelude
 
--- | Configuration for a repl connector.
 data ConnectorConfig = ConnectorConfig
   { connName :: Name,
     connBusRoot :: FilePath,
     connRepl :: ReplConfig,
-    -- | Does this line mark a repl prompt boundary?
     connBoundary :: Text -> Bool,
-    -- | Microseconds to wait for the initial prompt.
     connStartupTimeout :: Int,
-    -- | Microseconds per command wait before giving up.
     connCommandTimeout :: Int
   }
 
--- | Defaults: @cabal repl@ on the circuits project, with a GHCi prompt
--- boundary.  Override 'connRepl', 'connBoundary', and 'connBusRoot'.
 defaultConnectorConfig :: Name -> ConnectorConfig
 defaultConnectorConfig name =
   ConnectorConfig
@@ -70,37 +64,32 @@ defaultConnectorConfig name =
       connCommandTimeout = 60_000_000
     }
 
--- | Standard GHCi prompt boundaries.
 isGhciPrompt :: Text -> Bool
 isGhciPrompt t =
   "ghci> " `T.isSuffixOf` t
-    || "λ> " `T.isSuffixOf` t
+    || "\955> " `T.isSuffixOf` t
     || "> " `T.isSuffixOf` t
 
--- | Run the connector.  Blocks until the bus is shut down externally,
--- or a @quit@ command arrives (body is exactly @"quit"@ or @":quit"@).
 runConnector :: ConnectorConfig -> IO ()
 runConnector cfg = do
-  -- Wipe and recreate the session directory so logs and FIFOs start fresh.
   let dir = takeDirectory (replStdinPath (connRepl cfg))
   removePathForcibly dir
   createDirectoryIfMissing True dir
   let name = connName cfg
   bus <- openBus (connBusRoot cfg)
-  repl <- openRepl (connRepl cfg)
+  repl <- runKleisli (run (openRepl encodeUtf8 decodeUtf8 (connRepl cfg))) ()
   void $ scribeIO bus (mkPost name [] ("starting repl: " <> T.pack (replCommand (connRepl cfg)) <> " " <> T.unwords (map T.pack (replArgs (connRepl cfg)))))
 
   -- Drain initial prompt.
-  _ <- emitUntil (connBoundary cfg) (connStartupTimeout cfg) (replStdOut repl) >>= \case
-    Nothing ->
-      hPutStrLn stderr "connector: timed out waiting for initial prompt"
-    Just _ -> pure ()
-  err0 <- emitPoll (replStdErr repl)
-  unless (null err0) $
-    forM_ err0 $ \l ->
-      hPutStrLn stderr ("connector stderr: " <> T.unpack l)
+  poll <- emitText (replStdOut repl)
+  unless (connBoundary cfg poll) $
+    void $ emitUntil (connBoundary cfg) (connStartupTimeout cfg) (replStdOut repl)
 
-  -- Main loop: poll for posts, feed each body to the repl, post replies.
+  err0 <- emitText (replStdErr repl)
+  unless (T.null err0) $
+    hPutStrLn stderr ("connector stderr: " <> T.unpack (T.take 200 err0))
+
+  -- Main loop.
   void $ scribeIO bus (mkPost name [] "repl ready")
   loop bus repl name 0
   closeBus bus
@@ -109,18 +98,14 @@ runConnector cfg = do
     loop bus repl name lastId = do
       ps <- atomically (awaitSince bus [name] lastId)
       if null ps
-        then do
-          threadDelay 500_000
-          loop bus repl name lastId
+        then threadDelay 500_000 >> loop bus repl name lastId
         else do
           done <- processPosts cfg bus repl ps
           let newId = maximum (map stamp ps) + 1
-          if done
-            then pure ()
-            else loop bus repl name newId
+          unless done $ loop bus repl name newId
 
 processPosts ::
-  ConnectorConfig -> Bus -> Repl [Text] [Text] [Text] ->
+  ConnectorConfig -> Bus Text -> Repl Text Text Text ->
   [Stamped Text] -> IO Bool
 processPosts cfg bus repl = go
   where
@@ -131,52 +116,47 @@ processPosts cfg bus repl = go
         then do
           let cmd = body post
           if cmd == "quit" || cmd == ":quit"
-            then do
-              void $ scribeIO bus (mkPost name [] "closing")
-              pure True
+            then scribeIO bus (mkPost name [] "closing") >> pure True
             else do
               hPutStrLn stderr $ "connector: " <> T.unpack (T.take 100 cmd)
-              commitLines (replStdOut repl) [cmd]
-              outLines <-
-                emitUntil (connBoundary cfg) (connCommandTimeout cfg) (replStdOut repl) >>= \case
-                  Nothing -> do
-                    hPutStrLn stderr "connector: no new prompt; continuing"
-                    pure []
-                  Just ls -> pure ls
-              errLines <- emitPoll (replStdErr repl)
+              commitText (replStdOut repl) cmd
+              mOut <- emitUntil (connBoundary cfg) (connCommandTimeout cfg) (replStdOut repl)
+              let outText = fromMaybe "" mOut
+              errText <- emitText (replStdErr repl)
               let reply =
-                    T.unlines $
-                      ["-- stdout --"]
-                        <> outLines
-                        <> [""]
-                        <> ["-- stderr --"]
-                        <> errLines
+                    T.unlines
+                      [ "-- stdout --",
+                        outText,
+                        "",
+                        "-- stderr --",
+                        errText
+                      ]
               void $ scribeIO bus (mkPost name [from post] reply)
               go rest
         else go rest
 
--- | Commit lines through a repl stdout conjoint (shared stdin).
-commitLines :: Ends (Kleisli IO) [Text] [Text] -> [Text] -> IO ()
-commitLines e ts = runKleisli (commit (conjoint e) outU) ts
+-- | Commit one 'Text' token through an 'Ends' conjoint.
+commitText :: Ends (Kleisli IO) Text b -> Text -> IO ()
+commitText e t = runKleisli (commit (conjoint e) outU) t
   where
     Ends _ outU = open
 
--- | One poll emit through a repl companion.
-emitPoll :: Ends (Kleisli IO) [Text] [Text] -> IO [Text]
-emitPoll e = runKleisli (emit (companion e) inU) ()
+-- | Emit one 'Text' token from an 'Ends' companion.
+emitText :: Ends (Kleisli IO) a Text -> IO Text
+emitText e = runKleisli (emit (companion e) unitIn) ()
   where
-    Ends inU _ = open
+    Ends unitIn _ = open
 
 -- | Poll emit until boundary predicate or timeout (microseconds).
 emitUntil ::
-  (Text -> Bool) -> Int -> Ends (Kleisli IO) [Text] [Text] -> IO (Maybe [Text])
-emitUntil p t e = go 0 [] 10000
+  (Text -> Bool) -> Int -> Ends (Kleisli IO) Text Text -> IO (Maybe Text)
+emitUntil p t e = go 0 "" 10000
   where
     go elapsed acc delay = do
-      news <- emitPoll e
-      let acc' = acc <> news
-      if any p news
-        then pure (Just (filter (not . p) acc'))
+      new <- emitText e
+      let acc' = acc <> new
+      if p new
+        then pure (Just acc')
         else do
           let elapsed' = elapsed + delay
           if elapsed' >= t

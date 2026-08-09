@@ -20,7 +20,7 @@
 --     spec's @path@ — both are accepted here.
 --
 -- Requests travel through the shared stdin 'commit' port of
--- 'openReplPorts'; replies are polled from the stdout log cursor.
+-- 'openReplPortsLines'; replies are polled from the stdout log cursor.
 module Free.Agent.Acp
   ( -- * Configuration
     AcpConfig (..),
@@ -61,6 +61,7 @@ import Circuit.Agent.Repl
     openReplPorts,
   )
 import Circuit.Ends (Ends, commit, companion, conjoint, emit, open)
+import Circuit.Layer (run)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
@@ -118,7 +119,7 @@ defaultAcpConfig =
 
 -- | A live ACP child process plus client-side protocol state.
 data AcpClient = AcpClient
-  { acpPorts :: ReplPorts [Text] [Text] [Text],
+  { acpPorts :: ReplPorts Text Text Text,
     acpConfig :: AcpConfig,
     -- | Next JSON-RPC request id (monotonic from 1).
     acpNextId :: IORef Int,
@@ -139,17 +140,16 @@ openAcp cfg = do
   createDirectoryIfMissing True wd
   writeFile (wd </> "acp-stdout.log") ""
   writeFile (wd </> "acp-stderr.log") ""
-  pp <-
-    openReplPorts
-      defaultReplConfig
-        { replCommand = acpCommand cfg,
-          replArgs = acpArgs cfg,
-          replStdinPath = wd </> "acp-stdin",
-          replStdoutPath = wd </> "acp-stdout.log",
-          replStderrPath = wd </> "acp-stderr.log",
-          replWorkingDir = wd,
-          replCursorPath = Nothing
-        }
+  let replCfg =
+        defaultReplConfig
+          { replCommand = acpCommand cfg,
+            replArgs = acpArgs cfg,
+            replStdinPath = wd </> "acp-stdin",
+            replStdoutPath = wd </> "acp-stdout.log",
+            replStderrPath = wd </> "acp-stderr.log",
+            replWorkingDir = wd
+          }
+  pp <- runKleisli (run (openReplPorts encodeUtf8 decodeUtf8 replCfg)) ()
   keepAlive <- openFile (wd </> "acp-stdin") WriteMode
   nref <- newIORef 1
   qref <- newIORef []
@@ -268,19 +268,18 @@ acpSendValue c v = do
   logFrame c "send" line
   runKleisli
     (commit (replIn (acpPorts c)) (companion (open :: Ends (Kleisli IO) () ())))
-    [line]
+    line
 
--- | Poll the stdout log cursor for new lines, logging raw frames.
--- Blank lines are dropped.
-acpPoll :: AcpClient -> IO [Text]
+-- | Poll the stdout log cursor for new text, logging raw frames.
+-- Blank lines are dropped from the returned text.
+acpPoll :: AcpClient -> IO Text
 acpPoll c = do
-  ls <-
+  t <-
     runKleisli
       (emit (replOutO (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
       ()
-  let ls' = filter (not . T.null) ls
-  mapM_ (logFrame c "recv") ls'
-  pure ls'
+  logFrame c "recv" t
+  pure t
 
 -- | Read the next decodable JSON message, polling the stdout log until one
 -- arrives or the timeout (microseconds) expires.  Lines that fail to parse
@@ -296,7 +295,8 @@ acpReadFrame c micros = loop its
       case mv of
         Just v -> pure (Just v)
         Nothing -> do
-          ls <- acpPoll c
+          t <- acpPoll c
+          let ls = filter (not . T.null) (T.lines t)
           unless (null ls) $ modifyIORef' (acpQueue c) (<> ls)
           if null ls
             then threadDelay step
@@ -558,7 +558,7 @@ acpCancel c sid =
 -- ---------------------------------------------------------------------------
 
 -- | Read any pending stderr diagnostics (non-blocking poll).
-acpReadStderr :: AcpClient -> IO [Text]
+acpReadStderr :: AcpClient -> IO Text
 acpReadStderr c =
   runKleisli
     (emit (replErrO (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))

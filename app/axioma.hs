@@ -67,7 +67,7 @@ import Free.Agent.Seat
   )
 import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
-import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, stamp, stamped)
+import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, parseTimeText, stamp, stamped)
 import Circuit.Agent.Mark (isEscalate, markOf)
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Free.Agent.Bus.File (Flow (..), tailLog)
@@ -957,7 +957,9 @@ main = do
     assert "DONE without path is not a done claim" $ not (isDoneClaim p)
 
   do
-    let mkStored i ts f t body = Stamped i ts (Post f t [] body)
+    let mkStored i ts f t body = case parseTimeText ts of
+          Just ts' -> Stamped { stamp = i, timeStamp = ts', stamped = Post f t [] body }
+          Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
             mkStored 1 "2026-08-05T00:10:00" "b" ["a"] "ack",
@@ -977,7 +979,9 @@ main = do
     assert "deliverables = conductor marks" $ statDeliverables stats == 1
 
   do
-    let mkStored i ts f t body = Stamped i ts (Post f t [] body)
+    let mkStored i ts f t body = case parseTimeText ts of
+          Just ts' -> Stamped { stamp = i, timeStamp = ts', stamped = Post f t [] body }
+          Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
             mkStored 1 "2026-08-05T00:10:00" "b" ["a"] "ack",
@@ -988,7 +992,9 @@ main = do
     assert "60m window splits four posts into two slices" $ length slices == 2
 
   do
-    let mkStored i ts f t body = Stamped i ts (Post f t [] body)
+    let mkStored i ts f t body = case parseTimeText ts of
+          Just ts' -> Stamped { stamp = i, timeStamp = ts', stamped = Post f t [] body }
+          Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
             mkStored 1 "2026-08-05T00:10:00" "b" ["a"] "ack",
@@ -1027,7 +1033,7 @@ main = do
     runSeatBus bus "echo" ["echo"] (hostSeat (mkHost "echo" (pure . map ("echo:" <>))))
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe parseLine (T.lines content)
+    let parsed = mapMaybe (parseLine @Text) (T.lines content)
         fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
     assert "seat replied to the work post with a thread edge" $
       case fromEcho of
@@ -1060,7 +1066,7 @@ main = do
     runSeatBus bus "fragile" ["fragile"] (hostSeat fragileHost)
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe parseLine (T.lines content)
+    let parsed = mapMaybe (parseLine @Text) (T.lines content)
         fromFragile = [stamped s | s <- parsed, from (stamped s) == "fragile"]
         escalations = filter (maybe False isEscalate . markOf) fromFragile
     assert "seat replies to the first post" $
@@ -1101,7 +1107,7 @@ main = do
     takeMVar doneBeta
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe parseLine (T.lines content)
+    let parsed = mapMaybe (parseLine @Text) (T.lines content)
         fromAlpha = [stamped s | s <- parsed, from (stamped s) == "alpha"]
         fromBeta = [stamped s | s <- parsed, from (stamped s) == "beta"]
     assert "alpha replied to the seed" $
@@ -1128,8 +1134,10 @@ main = do
     tmp <- getTemporaryDirectory
     let root = tmp </> "free-agent-tail-axioma"
         path = root </> "log.jsonl"
-        mkStored i ts f t b = Stamped i ts (Post f t [] b)
-        frame i ts f t b = frameStored (mkStored i ts f t b)
+        mkStored i ts f t b = case parseTimeText ts of
+              Just ts' -> Stamped { stamp = i, timeStamp = ts', stamped = Post f t [] b }
+              Nothing -> error $ "bad timestamp: " <> show ts
+        frame i ts f t b = frameStored @Text (mkStored i ts f t b)
     removePathForcibly root
     createDirectoryIfMissing True root
     -- Write one complete line and one partial line (no trailing newline).

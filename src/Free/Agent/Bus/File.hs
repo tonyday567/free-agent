@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | Out-of-process bus helpers: file cursors and an fsnotify-based tail
 -- loop. Used by the long-running agent executables that watch the JSONL log
@@ -105,7 +106,7 @@ latestPostId root = do
       let ls = filter (not . T.null) (T.lines txt)
       case ls of
         [] -> pure 0
-        _ -> case parseLine (last ls) of
+        _ -> case parseLine @Text (last ls) of
                Just stored -> pure (stamp stored + 1)
                Nothing -> pure (fromIntegral (length ls))
 
@@ -226,13 +227,13 @@ tailLog path names startCursor mQuiesce cb = do
           )
 
     filterStoredSince cursor line = do
-      stored <- parseLine line
+      stored <- parseLine @Text line
       guard (stamp stored >= cursor)
       guard (deliversTo (stamped stored) names)
       pure stored
 
     filterStored line = do
-      stored <- parseLine line
+      stored <- parseLine @Text line
       if deliversTo (stamped stored) names then Just stored else Nothing
 
     -- Wait for a halt or a new-posts signal, whichever lands first.
