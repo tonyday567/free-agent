@@ -161,19 +161,22 @@ tailLog path names startCursor mQuiesce cb = do
       dir = takeDirectory path
   withManager $ \mgr -> do
     signal <- newTMVarIO ()
+    busy <- newTVarIO True  -- quiescence gated: don't count empty cycles until first drain completes
     _ <- watchDir mgr dir (\ev -> takeFileName (eventPath ev) == logName) $ \_ev -> do
       already <- readTVarIO halted
       unless already $ do
+        atomically $ writeTVar busy True
         off <- readIORef offRef
         (off', h) <- drainFrom off filterStored
         writeIORef offRef off'
         atomically $ do
           when h (writeTVar halted True)
+          writeTVar busy False
           _ <- tryPutTMVar signal ()
           pure ()
     case mQuiesce of
       Nothing -> pollLoop offRef signal halted
-      Just (qc, onQuiesce) -> quiesceLoop qc signal halted 0 onQuiesce
+      Just (qc, onQuiesce) -> quiesceLoop qc signal busy halted 0 onQuiesce
   where
     -- | No-quiesce poll loop: wait on fsnotify with a 1 s timeout, then
     -- manually re-drain.  FSEvents on macOS does not reliably fire on
@@ -241,13 +244,17 @@ tailLog path names startCursor mQuiesce cb = do
       (readTVar halted >>= check >> pure True)
         `orElse` (takeTMVar signal >> pure False)
 
-    quiesceLoop qc signal halted count onQuiesce = do
+    quiesceLoop qc signal busy halted count onQuiesce = do
       m <- timeout (qcCycleMicros qc) (atomically (awaitEvent signal halted))
       case m of
         Just True -> pure ()
-        Just False -> quiesceLoop qc signal halted 0 onQuiesce
+        Just False -> quiesceLoop qc signal busy halted 0 onQuiesce
         Nothing -> do
-          let count' = count + 1
-          if count' >= qcCycles qc
-            then onQuiesce
-            else quiesceLoop qc signal halted count' onQuiesce
+          inProgress <- atomically (readTVar busy)
+          if inProgress
+            then quiesceLoop qc signal busy halted 0 onQuiesce
+            else do
+              let count' = count + 1
+              if count' >= qcCycles qc
+                then onQuiesce
+                else quiesceLoop qc signal busy halted count' onQuiesce
