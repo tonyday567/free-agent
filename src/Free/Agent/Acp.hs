@@ -20,7 +20,7 @@
 --     spec's @path@ — both are accepted here.
 --
 -- Requests travel through the shared stdin 'commit' port of
--- 'openProcessPorts'; replies are polled from the stdout log cursor.
+-- 'openReplPorts'; replies are polled from the stdout log cursor.
 module Free.Agent.Acp
   ( -- * Configuration
     AcpConfig (..),
@@ -54,11 +54,11 @@ module Free.Agent.Acp
   )
 where
 
-import Circuit.Agent.Process
-  ( ProcessPorts (..),
-    ReplConfig (..),
+import Circuit.Agent.Repl
+  ( ReplConfig (..),
+    ReplPorts (..),
     defaultReplConfig,
-    openProcessPorts,
+    openReplPorts,
   )
 import Circuit.Ends (Ends, commit, companion, conjoint, emit, open)
 import Control.Arrow (Kleisli (..), runKleisli)
@@ -118,7 +118,7 @@ defaultAcpConfig =
 
 -- | A live ACP child process plus client-side protocol state.
 data AcpClient = AcpClient
-  { acpPorts :: ProcessPorts [Text] [Text] [Text],
+  { acpPorts :: ReplPorts [Text] [Text] [Text],
     acpConfig :: AcpConfig,
     -- | Next JSON-RPC request id (monotonic from 1).
     acpNextId :: IORef Int,
@@ -140,7 +140,7 @@ openAcp cfg = do
   writeFile (wd </> "acp-stdout.log") ""
   writeFile (wd </> "acp-stderr.log") ""
   pp <-
-    openProcessPorts
+    openReplPorts
       defaultReplConfig
         { replCommand = acpCommand cfg,
           replArgs = acpArgs cfg,
@@ -166,7 +166,7 @@ openAcp cfg = do
 closeAcp :: AcpClient -> IO ()
 closeAcp c = do
   void $ try @SomeException (hClose (acpKeepAlive c))
-  peClose (acpPorts c)
+  replPortsClose (acpPorts c)
 
 -- ---------------------------------------------------------------------------
 -- Transcript
@@ -267,7 +267,7 @@ acpSendValue c v = do
   let line = encodeText v
   logFrame c "send" line
   runKleisli
-    (commit (peIn (acpPorts c)) (companion (open :: Ends (Kleisli IO) () ())))
+    (commit (replIn (acpPorts c)) (companion (open :: Ends (Kleisli IO) () ())))
     [line]
 
 -- | Poll the stdout log cursor for new lines, logging raw frames.
@@ -276,7 +276,7 @@ acpPoll :: AcpClient -> IO [Text]
 acpPoll c = do
   ls <-
     runKleisli
-      (emit (peOut (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
+      (emit (replOutO (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
       ()
   let ls' = filter (not . T.null) ls
   mapM_ (logFrame c "recv") ls'
@@ -561,5 +561,5 @@ acpCancel c sid =
 acpReadStderr :: AcpClient -> IO [Text]
 acpReadStderr c =
   runKleisli
-    (emit (peErr (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
+    (emit (replErrO (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
     ()
