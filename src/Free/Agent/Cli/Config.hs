@@ -7,6 +7,7 @@ module Free.Agent.Cli.Config
     KimiConfig (..),
     LlmConfig (..),
     CommandConfig (..),
+    GatewayCliConfig (..),
     defaultHermesConfig,
     defaultKimiConfig,
     defaultLlmConfig,
@@ -15,6 +16,7 @@ module Free.Agent.Cli.Config
     parseKimiConfig,
     parseLlmConfig,
     parseCommandConfig,
+    parseGatewayConfig,
     commonAgentOptions,
     rootOpt,
     namesOpt,
@@ -41,6 +43,7 @@ data Backend
   | BackendKimi KimiConfig
   | BackendLlm LlmConfig
   | BackendCommand CommandConfig
+  | BackendGateway GatewayCliConfig
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -91,6 +94,17 @@ data CommandConfig = CommandConfig
     ccArgs :: [String],
     ccQuiesce :: Maybe Int,
     ccPitboss :: Maybe Name
+  }
+  deriving (Show)
+
+data GatewayCliConfig = GatewayCliConfig
+  { gcwRoot :: FilePath,
+    gcwNames :: [Name],
+    gcwPromptFile :: FilePath,
+    gcwBaseUrl :: Text,
+    gcwKeyEnv :: String,
+    gcwQuiesce :: Maybe Int,
+    gcwPitboss :: Maybe Name
   }
   deriving (Show)
 
@@ -336,4 +350,33 @@ parseCommandConfig =
         ( argument
             str
             (metavar "ARG..." <> help "Arguments passed to CMD")
+        )
+
+parseGatewayConfig :: Parser GatewayCliConfig
+parseGatewayConfig =
+  GatewayCliConfig
+    <$> rootOpt
+    <*> namesOpt
+    <*> promptOpt
+    <*> baseUrlOpt
+    <*> keyEnvOpt
+    <*> quiesceOpt
+    <*> pitbossOpt
+  where
+    baseUrlOpt =
+      option
+        (T.pack <$> str)
+        ( long "base-url"
+            <> metavar "URL"
+            <> value "http://127.0.0.1:8642"
+            <> showDefault
+            <> help "Hermes gateway api_server base URL"
+        )
+    keyEnvOpt =
+      strOption
+        ( long "key-env"
+            <> metavar "NAME"
+            <> value "API_SERVER_KEY"
+            <> showDefault
+            <> help "Environment variable holding the api_server Bearer key"
         )

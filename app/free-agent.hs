@@ -34,12 +34,20 @@ import Free.Agent.Bus.File (QuiesceConfig (..), cursorPath)
 import Free.Agent.Cli.Config
   ( Backend (..),
     CommandConfig (..),
+    GatewayCliConfig (..),
     HermesConfig (..),
     KimiConfig (..),
     LlmConfig (..),
     parseCommandConfig,
     parseHermesConfig,
     parseLlmConfig,
+  )
+import Free.Agent.Gateway
+  ( GatewayClient (..),
+    GatewayConfig (..),
+    defaultGatewayConfig,
+    gatewayHost,
+    openGateway,
   )
 import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesHostBatch, kimiHost, processHost)
 import Free.Agent.Seat (FreeSeat, hostSeat, interpretSeat)
@@ -64,18 +72,25 @@ data Command
 -- Backend tag for default agent command
 -- ---------------------------------------------------------------------------
 
-data BackendTag = HermesTag | KimiTag
+data BackendTag = HermesTag | KimiTag | GatewayTag
   deriving (Show, Eq)
 
 backendFlag :: Parser BackendTag
 backendFlag =
-  flag
-    HermesTag
-    KimiTag
+  option
+    (eitherReader parseTag)
     ( long "backend"
         <> short 'b'
-        <> help "Agent backend for the default seat (default: hermes)"
+        <> metavar "BACKEND"
+        <> value HermesTag
+        <> showDefault
+        <> help "Agent backend for the default seat: hermes | kimi | gateway"
     )
+  where
+    parseTag "hermes" = Right HermesTag
+    parseTag "kimi" = Right KimiTag
+    parseTag "gateway" = Right GatewayTag
+    parseTag other = Left ("unknown backend: " ++ other)
 
 -- | Convert a parsed Hermes-style config into a Kimi config by dropping yolo.
 toKimiConfig :: HermesConfig -> KimiConfig
@@ -91,13 +106,28 @@ toKimiConfig h =
       kcPitboss = hcPitboss h
     }
 
--- | Parse the default agent command. Defaults to Hermes; --backend switches to Kimi.
+-- | Convert a parsed Hermes-style config into a gateway config (api_server
+-- defaults for base URL and key env var).
+toGatewayConfig :: HermesConfig -> GatewayCliConfig
+toGatewayConfig h =
+  GatewayCliConfig
+    { gcwRoot = hcRoot h,
+      gcwNames = hcNames h,
+      gcwPromptFile = hcPromptFile h,
+      gcwBaseUrl = gwBaseUrl defaultGatewayConfig,
+      gcwKeyEnv = gwKeyEnv defaultGatewayConfig,
+      gcwQuiesce = hcQuiesce h,
+      gcwPitboss = hcPitboss h
+    }
+
+-- | Parse the default agent command. Defaults to Hermes; --backend switches.
 defaultAgentParser :: Parser Command
 defaultAgentParser =
   (\tag cfg -> AgentCmd (mkBackend tag cfg)) <$> backendFlag <*> parseHermesConfig
   where
     mkBackend HermesTag cfg = BackendHermes cfg
     mkBackend KimiTag cfg = BackendKimi (toKimiConfig cfg)
+    mkBackend GatewayTag cfg = BackendGateway (toGatewayConfig cfg)
 
 -- ---------------------------------------------------------------------------
 -- Top-level parser
@@ -168,6 +198,7 @@ runBackend (BackendHermes cfg) = runHermes cfg
 runBackend (BackendKimi cfg) = runKimi cfg
 runBackend (BackendLlm cfg) = runLlm cfg
 runBackend (BackendCommand cfg) = runCommand cfg
+runBackend (BackendGateway cfg) = runGateway cfg
 
 -- ---------------------------------------------------------------------------
 -- Hermes / Kimi helpers
@@ -314,6 +345,32 @@ runLlm cfg = do
       TIO.putStrLn $ "   base: " <> baseUrl bareCfg
       TIO.putStrLn $ "   model: " <> model bareCfg
       runAgentLoop agentName names (lcRoot cfg) mQuiesce handle
+
+-- ---------------------------------------------------------------------------
+-- Gateway seat (hermes api_server)
+-- ---------------------------------------------------------------------------
+
+runGateway :: GatewayCliConfig -> IO ()
+runGateway cfg = do
+  validatePrompt (gcwPromptFile cfg)
+  systemPrompt <- TIO.readFile (gcwPromptFile cfg)
+  let names = gcwNames cfg
+      agentName = agentNameOf names
+      -- F3: inject agent name so the LLM knows its posting identity
+      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ". Use this name for all --from fields and cursor checks.\n\n" <> systemPrompt
+      gwCfg = defaultGatewayConfig {gwBaseUrl = gcwBaseUrl cfg, gwKeyEnv = gcwKeyEnv cfg}
+  client <- openGateway gwCfg
+  let seat = hostSeat (gatewayHost agentName framedPrompt client)
+      mQuiesce = buildQuiesce (gcwQuiesce cfg) (gcwPitboss cfg)
+      handle stored = do
+        let p = stamped stored
+            parentId = stamp stored
+            sh = interpretSeat seat
+        (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
+        pure [routeReply out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
+  TIO.putStrLn $ "   gateway: " <> gwBaseUrl gwCfg
+  TIO.putStrLn $ "   session: " <> gcSessionId client
+  runAgentLoop agentName names (gcwRoot cfg) mQuiesce handle
 
 -- ---------------------------------------------------------------------------
 -- External command seat

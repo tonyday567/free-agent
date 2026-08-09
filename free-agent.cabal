@@ -61,6 +61,7 @@ library
     Free.Agent.Derivation
     Free.Agent.BusStats
     Free.Agent.Acp
+    Free.Agent.Gateway
     Free.Agent.Bus.Cli
     Free.Agent.Agent.Runner
     Free.Agent.Cli
