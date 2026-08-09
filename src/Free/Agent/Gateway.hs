@@ -74,9 +74,9 @@ data GatewayConfig = GatewayConfig
 defaultGatewayConfig :: GatewayConfig
 defaultGatewayConfig =
   GatewayConfig
-    { gwBaseUrl = "http://127.0.0.1:8642",
+    { gwBaseUrl = "http://127.0.0.1:8642/p/pit",
       gwKeyEnv = "API_SERVER_KEY",
-      gwCwd = "."
+      gwCwd = "/Users/tonyday567/pit"
     }
 
 -- ---------------------------------------------------------------------------
