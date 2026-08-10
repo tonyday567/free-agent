@@ -116,7 +116,9 @@ runAgentLoop agentName names root mQuiesce handlePost = do
                 -- handler failure: cursor advanced, seat keeps listening
                 pure Continue
               Right replies -> do
-                traverse_ (postLocal root) replies
+                let keep p = not (T.null (T.strip (body p)))
+                    nonEmpty = filter keep replies
+                traverse_ (postLocal root) nonEmpty
                 -- Self-halt: the seat's own 🔵, judged at commit time.
                 pure $
                   if any ((== Just StandDown) . markOf) replies

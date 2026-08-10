@@ -1446,6 +1446,81 @@ main = do
     removePathForcibly busDir
 
   -------------------------------------------------------------------------
+  -- Empty-reply drop (B2-as-code): whitespace-only replies are dropped
+  -- before posting.  The seat still processes the input — cursor advances,
+  -- quiescence counter is unaffected.  Only content-carrying posts land.
+  --
+  -- Mutation guard: if someone removes the filter in runSeatBus or
+  -- runAgentLoop, test (a) fails because the empty body appears in the log.
+  -------------------------------------------------------------------------
+  putStrLn "Empty-reply drop (B2-as-code)"
+
+  -- Test (a): empty/whitespace replies are not posted; the cursor advances.
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-b2-empty"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    _ <- postLocal root (mkPost "human" ["echo"] "hello")
+    _ <- postLocal root (mkPost "human" ["echo"] "  ")
+    _ <- postLocal root (mkPost "human" ["echo"] "world")
+    _ <- postLocal root (mkPost "human" ["echo"] "\t\n  ")
+    _ <- postLocal root (mkPost "human" ["echo"] (markGlyph Landed <> " done"))
+    bus <- openBus root
+    let host = mkHost "echo" $ \ws ->
+          pure [T.unwords ws]
+    runSeatBus bus "echo" ["echo"] (hostSeat host)
+    closeBus bus
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+        fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
+        echoBodies = map body fromEcho
+    -- Content replies land: "hello", "world".
+    -- Whitespace inputs produce whitespace-only replies and are dropped.
+    -- The landed mark halts the seat on input; it never reaches the handler.
+    assert "B2a: content replies posted" $
+      "hello" `elem` echoBodies
+        && "world" `elem` echoBodies
+    assert "B2a: whitespace-only reply dropped (spaces)" $
+      not (any (\b -> "  " `T.isPrefixOf` b) echoBodies)
+    assert "B2a: whitespace-only reply dropped (tabs+newline)" $
+      not (any (\b -> "\t" `T.isPrefixOf` b) echoBodies)
+    -- Cursor advances past all 5 inputs: the seat processed every post
+    -- up to the halt mark.
+    assert "B2a: ids coherent" $
+      length parsed >= 5 + length echoBodies
+    removePathForcibly root
+
+  -- Test (b): explicitly empty body from handler → no post.
+  -- Exercise the other fix site (runAgentLoop via runSeatBus — the same
+  -- filter applies in both common paths).
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-b2-emptybody"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    _ <- postLocal root (mkPost "human" ["silent"] "ping")
+    _ <- postLocal root (mkPost "human" ["silent"] (markGlyph Landed <> " done"))
+    bus <- openBus root
+    -- Handler returns a post with an empty body.  Should be dropped.
+    let host = mkHost "silent" $ \ws ->
+          if "ping" `elem` ws
+            then pure [""]
+            else pure []
+    runSeatBus bus "silent" ["silent"] (hostSeat host)
+    closeBus bus
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+        fromSilent = [stamped s | s <- parsed, from (stamped s) == "silent"]
+    -- Empty-body post is dropped.
+    assert "B2b: empty-body post dropped" $
+      null fromSilent
+    -- But cursor still advanced: the seat processed both inputs.
+    assert "B2b: ids coherent — planted only, no reply posts" $
+      length parsed == 2
+    removePathForcibly root
+
+  -------------------------------------------------------------------------
   -- Resume fix oracle (B6): transient failure retries with same session id;
   -- stale session falls back to fresh.  Regression guard: if someone
   -- restores `cliStale = \code _ -> code /= ExitSuccess`, test (a) fails

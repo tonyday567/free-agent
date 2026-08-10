@@ -250,7 +250,9 @@ runSeatBus bus agentName names seat = loop 0
     go [] = pure False
     go (stored : rest) = do
       outs <- processOne stored
-      traverse_ (scribeIO bus) outs
+      let keep p = not (T.null (T.strip (body p)))
+          nonEmpty = filter keep outs
+      traverse_ (scribeIO bus) nonEmpty
       if any ((== Just StandDown) . markOf) outs
         then pure True
         else go rest
