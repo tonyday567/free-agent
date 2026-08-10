@@ -40,6 +40,7 @@ import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.File (readCursor, writeCursor)
 import Options.Applicative
 import System.Directory (doesFileExist, listDirectory)
+import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
 import System.FSNotify (Event (..), watchDir, withManager)
 import System.FilePath (takeDirectory, takeFileName, (</>))
@@ -204,6 +205,21 @@ runBusCommand (StatusCommand root threshold) = runStatus root threshold
 
 runPost :: FilePath -> Maybe Text -> [Text] -> Maybe Text -> IO ()
 runPost root mfrom mto mbody = do
+  -- Honour FREE_AGENT_BUS_ROOT env var when --root is the default "."
+  envRoot <- lookupEnv "FREE_AGENT_BUS_ROOT"
+  let root' = case envRoot of
+        Just r | root == "." -> r
+        _ -> root
+  -- Refuse to post when the bus doesn't exist
+  let logPath = root' </> "log.jsonl"
+  exists <- doesFileExist logPath
+  unless exists $ do
+    TIO.putStrLn
+      ( "🔴 "
+          <> T.pack root'
+          <> " — no log.jsonl; not a bus. Set FREE_AGENT_BUS_ROOT or use --root."
+      )
+    exitFailure
   p <- case (mfrom, mbody) of
     (Just fromName, Just bodyText) -> pure (mkPost fromName mto bodyText)
     (Nothing, Nothing) -> do
@@ -216,7 +232,7 @@ runPost root mfrom mto mbody = do
     _ -> do
       TIO.putStrLn "🔴 post requires either --from and --body flags or JSON on stdin"
       exitFailure
-  stored <- postLocal root p
+  stored <- postLocal root' p
   TIO.putStrLn (frameStored stored)
 
 -- ---------------------------------------------------------------------------

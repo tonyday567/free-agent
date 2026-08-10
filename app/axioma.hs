@@ -75,8 +75,10 @@ import Free.Agent.Seat
   )
 import Free.Agent.Syntax (FreeAgent (..))
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly)
+import System.Environment (getExecutablePath, setEnv, unsetEnv)
 import System.Exit (ExitCode (..), exitFailure)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
+import System.Process (readProcessWithExitCode)
 import Prelude hiding (id, (.))
 
 assert :: String -> Bool -> IO ()
@@ -1371,5 +1373,76 @@ main = do
       bodies == ["one", "two", "halt"]
     assert "halt mid-batch stops delivery" $
       not ("four" `elem` bodies)
+
+  -------------------------------------------------------------------------
+  -- bus post anti-pollution (B4)
+  --
+  -- FREE_AGENT_BUS_ROOT env var + refuse when no log.jsonl exists.
+  -------------------------------------------------------------------------
+  putStrLn "bus post anti-pollution"
+
+  do
+    tmp <- getTemporaryDirectory
+    let busRoot = tmp </> "free-agent-b4-bus"
+        badRoot = tmp </> "free-agent-b4-nobus"
+    removePathForcibly busRoot
+    removePathForcibly badRoot
+    createDirectoryIfMissing True busRoot
+    createDirectoryIfMissing True badRoot
+    -- Create a real bus with a log.jsonl
+    _ <- postLocal busRoot (mkPost "test" [] "seed")
+    -- Test 1: postLocal on a real bus works
+    stored <- postLocal busRoot (mkPost "verify" [] "works")
+    assert "post to an existing bus succeeds" $
+      stamp stored == 1
+    -- Test 2: postLocal on a non-bus directory creates one (existing behavior)
+    stored2 <- postLocal badRoot (mkPost "verify" [] "also-works")
+    assert "postLocal creates bus when absent (library, not CLI)" $
+      stamp stored2 == 0
+    removePathForcibly busRoot
+    removePathForcibly badRoot
+
+  -- CLI-level test: the binary refuses when no log.jsonl and no env var
+  do
+    tmp <- getTemporaryDirectory
+    let nobusDir = tmp </> "free-agent-b4-cli-nobus"
+        busDir = tmp </> "free-agent-b4-cli-bus"
+    removePathForcibly nobusDir
+    removePathForcibly busDir
+    createDirectoryIfMissing True nobusDir
+    createDirectoryIfMissing True busDir
+    -- Create a bus with log.jsonl for the env var test
+    _ <- postLocal busDir (mkPost "seed" [] "init")
+    -- Find the free-agent binary relative to the axioma binary
+    myPath <- takeDirectory <$> getExecutablePath
+    let freeAgentBin =
+          myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent"
+    -- Test: no env var, no log.jsonl → exit 1
+    (code1, out1, _) <-
+      readProcessWithExitCode
+        freeAgentBin
+        ["bus", "post", "--from", "test", "--to", "test", "--body", "should-fail"]
+        ""
+    assert "CLI post from non-bus dir exits 1" $
+      code1 == ExitFailure 1
+    assert "CLI post error message names the dir" $
+      T.isInfixOf "no log.jsonl" (T.pack out1)
+    -- Test: FREE_AGENT_BUS_ROOT → succeeds
+    setEnv "FREE_AGENT_BUS_ROOT" busDir
+    (code2, out2, _) <-
+      readProcessWithExitCode
+        freeAgentBin
+        ["bus", "post", "--from", "test", "--to", "test", "--body", "env-var-works"]
+        ""
+    unsetEnv "FREE_AGENT_BUS_ROOT"
+    assert "CLI post with FREE_AGENT_BUS_ROOT exits 0" $
+      code2 == ExitSuccess
+    let parsed = parseLine @Text (T.strip (T.pack out2))
+    assert "CLI post lands on the correct bus" $
+      case parsed of
+        Just s -> stamp s >= 0 && body (stamped s) == "env-var-works"
+        Nothing -> False
+    removePathForcibly nobusDir
+    removePathForcibly busDir
 
   putStrLn "All tests passed"
