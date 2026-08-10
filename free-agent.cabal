@@ -63,6 +63,7 @@ library
     Free.Agent.Acp
     Free.Agent.Gateway
     Free.Agent.Bus.Cli
+    Free.Agent.Bus.Claim
     Free.Agent.Agent.Runner
     Free.Agent.Cli
     Free.Agent.Cli.Config
@@ -130,4 +131,14 @@ executable free-agent
     process >=1.6 && <1.7,
     text >=2.0 && <3,
     time >=1.12 && <1.15,
+
+executable bus-claim
+  import: ghc-options-stanza
+  import: ghc2024-stanza
+  hs-source-dirs: app
+  main-is: bus-claim.hs
+  build-depends:
+    base >=4.18 && <5,
+    free-agent,
+    text >=2.0 && <3,
 
