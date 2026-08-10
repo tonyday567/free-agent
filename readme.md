@@ -29,6 +29,8 @@ The library ships one operational CLI:
   - `free-agent llm` — direct API seat
   - `free-agent cmd` — external-command seat
   - `free-agent bus [SUBCOMMAND]` — JSONL scribe/CLI
+    - `free-agent bus daemon` — single-writer stamping office (named pipe at `bus.fifo`)
+    - `free-agent bus post --via-daemon` — submit a post through the office
   - `free-agent status LOG.jsonl` — log metrics
 
 The axioma/oracle executable is `free-agent-axioma`.

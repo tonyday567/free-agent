@@ -54,6 +54,7 @@ library
     Free.Agent.Host
     Free.Agent.Seat
     Free.Agent.Bus
+    Free.Agent.Bus.Daemon
     Free.Agent.Bus.File
     Free.Agent.Diagram
     Free.Agent.Hyper

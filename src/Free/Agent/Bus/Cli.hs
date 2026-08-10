@@ -37,6 +37,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time (LocalTime, NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, localTimeToUTC, utc)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Free.Agent.Bus (postLocal)
+import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (readCursor, writeCursor)
 import Options.Applicative
 import System.Directory (doesFileExist, listDirectory)
@@ -63,13 +64,14 @@ data Since = SinceId PostId | SinceCursor Text
   deriving (Show)
 
 data BusCommand
-  = PostCommand FilePath (Maybe Text) [Text] (Maybe Text)
+  = PostCommand FilePath (Maybe Text) [Text] (Maybe Text) Bool
   | WatchCommand FilePath [Text]
   | ReadCommand FilePath [Text] (Maybe Since)
   | CursorGetCommand FilePath Text
   | CursorSetCommand FilePath Text PostId
   | PingWatchCommand FilePath Text
   | StatusCommand FilePath NominalDiffTime
+  | DaemonCommand FilePath
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -120,7 +122,12 @@ postCmd = do
           (T.pack <$> str)
           (long "body" <> metavar "TEXT" <> help "Post body")
       )
-  pure (PostCommand root fromName toNames bodyText)
+  viaDaemon <-
+    switch
+      ( long "via-daemon"
+          <> help "Submit to the stamping daemon instead of self-stamping"
+      )
+  pure (PostCommand root fromName toNames bodyText viaDaemon)
 
 watchCmd :: Parser BusCommand
 watchCmd = WatchCommand <$> rootOpt <*> namesArg
@@ -175,6 +182,9 @@ thresholdOpt =
 statusCmd :: Parser BusCommand
 statusCmd = StatusCommand <$> rootOpt <*> thresholdOpt
 
+daemonCmd :: Parser BusCommand
+daemonCmd = DaemonCommand <$> rootOpt
+
 busParser :: Parser BusCommand
 busParser =
   subparser
@@ -184,6 +194,7 @@ busParser =
         <> command "cursor" (info (cursorCmd <**> helper) (progDesc "Read or write agent cursor"))
         <> command "ping-watch" (info (pingWatchCmd <**> helper) (progDesc "Watch the ping file for NAME and exit on change"))
         <> command "status" (info (statusCmd <**> helper) (progDesc "Bus health: post count, last post, seats"))
+        <> command "daemon" (info (daemonCmd <**> helper) (progDesc "Run the single-writer stamping daemon"))
     )
 
 -- ---------------------------------------------------------------------------
@@ -191,35 +202,26 @@ busParser =
 -- ---------------------------------------------------------------------------
 
 runBusCommand :: BusCommand -> IO ()
-runBusCommand (PostCommand root mfrom mto mbody) = runPost root mfrom mto mbody
+runBusCommand (PostCommand root mfrom mto mbody viaDaemon) = runPost root mfrom mto mbody viaDaemon
 runBusCommand (WatchCommand root names) = runWatch root names
 runBusCommand (ReadCommand root names since) = runRead root names since
 runBusCommand (CursorGetCommand root name) = runCursorGet root name
 runBusCommand (CursorSetCommand root name pid) = runCursorSet root name pid
 runBusCommand (PingWatchCommand root name) = runPingWatch root name
 runBusCommand (StatusCommand root threshold) = runStatus root threshold
+runBusCommand (DaemonCommand root) = runDaemon @Text root
 
 -- ---------------------------------------------------------------------------
 -- post
 -- ---------------------------------------------------------------------------
 
-runPost :: FilePath -> Maybe Text -> [Text] -> Maybe Text -> IO ()
-runPost root mfrom mto mbody = do
+runPost :: FilePath -> Maybe Text -> [Text] -> Maybe Text -> Bool -> IO ()
+runPost root mfrom mto mbody viaDaemon = do
   -- Honour FREE_AGENT_BUS_ROOT env var when --root is the default "."
   envRoot <- lookupEnv "FREE_AGENT_BUS_ROOT"
   let root' = case envRoot of
         Just r | root == "." -> r
         _ -> root
-  -- Refuse to post when the bus doesn't exist
-  let logPath = root' </> "log.jsonl"
-  exists <- doesFileExist logPath
-  unless exists $ do
-    TIO.putStrLn
-      ( "🔴 "
-          <> T.pack root'
-          <> " — no log.jsonl; not a bus. Set FREE_AGENT_BUS_ROOT or use --root."
-      )
-    exitFailure
   p <- case (mfrom, mbody) of
     (Just fromName, Just bodyText) -> pure (mkPost fromName mto bodyText)
     (Nothing, Nothing) -> do
@@ -232,7 +234,26 @@ runPost root mfrom mto mbody = do
     _ -> do
       TIO.putStrLn "🔴 post requires either --from and --body flags or JSON on stdin"
       exitFailure
-  stored <- postLocal root' p
+  stored <-
+    if viaDaemon
+      then do
+        let fifo = fifoPath root'
+        fifoExists <- doesFileExist fifo
+        unless fifoExists $ do
+          TIO.putStrLn ("🔴 " <> T.pack fifo <> " — no bus.fifo; is the daemon running?")
+          exitFailure
+        postViaDaemon root' p
+      else do
+        let logPath = root' </> "log.jsonl"
+        exists <- doesFileExist logPath
+        unless exists $ do
+          TIO.putStrLn
+            ( "🔴 "
+                <> T.pack root'
+                <> " — no log.jsonl; not a bus. Set FREE_AGENT_BUS_ROOT or use --root."
+            )
+          exitFailure
+        postLocal root' p
   TIO.putStrLn (frameStored stored)
 
 -- ---------------------------------------------------------------------------

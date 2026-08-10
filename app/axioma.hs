@@ -27,12 +27,13 @@ import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, 
 import Control.Monad (when)
 import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.IORef (newIORef, writeIORef)
-import Data.List (inits)
+import Data.List (inits, sort)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
+import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (Flow (..), tailLog)
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
@@ -78,6 +79,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDi
 import System.Environment (getExecutablePath, setEnv, unsetEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath (takeDirectory, (</>))
+import System.IO (Handle, IOMode (AppendMode), hFlush, withFile)
 import System.Process (readProcessWithExitCode)
 import Prelude hiding (id, (.))
 
@@ -1728,5 +1730,85 @@ main = do
     assert "B6c: .sid updated to fresh session id" $
       T.strip stored == "fresh-b6c"
     removePathForcibly dir
+
+  -------------------------------------------------------------------------
+  -- Stamping daemon (post-horn): single-writer office over bus.fifo
+  --
+  -- Mutation guard: if the daemon races with postLocal or assigns colliding
+  -- ids, the total-order assertion fails. If it drops a post, the body-set
+  -- equality fails. If malformed input kills it, the garbage-survivor test
+  -- times out.
+  -------------------------------------------------------------------------
+  putStrLn "Stamping daemon"
+
+  -- Test (a): concurrent posters produce a contiguous total order.
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-daemon-order"
+        posters = ["a", "b", "c", "d"]
+        postsPerPoster = 5
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    tid <- forkIO (runDaemon @Text root)
+    threadDelay 100_000
+    mvars <-
+      mapM
+        ( \name -> do
+            mv <- newEmptyMVar
+            _ <- forkIO $ do
+              rs <-
+                mapM
+                  ( \i ->
+                      let body = name <> "-" <> T.pack (show (i :: Int))
+                       in postViaDaemon root (mkPost name [name] body)
+                  )
+                  [1 .. postsPerPoster]
+              putMVar mv rs
+            pure mv
+        )
+        posters
+    collected <- mapM takeMVar mvars
+    killThread tid
+    let receipts = concat collected
+        expectedBodies =
+          [name <> "-" <> T.pack (show i) | name <- posters, i <- [1 .. postsPerPoster]]
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+        ids = map stamp parsed
+        bodies = map (body . stamped) parsed
+    assert "daemon total order: contiguous ids from 0" $
+      sort ids == [0 .. fromIntegral (length posters * postsPerPoster - 1)]
+    assert "daemon total order: every body present exactly once" $
+      sort bodies == sort expectedBodies
+    assert "daemon total order: receipts equal log entries" $
+      sort (map stamp receipts) == sort ids
+    assert "daemon total order: timestamps monotone by id" $
+      and (zipWith (<=) (map timeStamp parsed) (drop 1 (map timeStamp parsed)))
+    removePathForcibly root
+
+  -- Test (b): malformed FIFO input is skipped; the daemon survives.
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-daemon-garbage"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    tid <- forkIO (runDaemon @Text root)
+    threadDelay 100_000
+    -- Send a line that is not a valid bare post.
+    withFile (fifoPath root) AppendMode $ \h -> do
+      TIO.hPutStrLn h "not a valid post"
+      hFlush h
+    -- A valid post afterwards must still be stamped.
+    stored <- postViaDaemon root (mkPost "good" [] "ok")
+    killThread tid
+    assert "daemon survives garbage input" $
+      body (stamped stored) == "ok"
+    assert "daemon garbage survivor gets id 0" $
+      stamp stored == 0
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+    assert "daemon log contains exactly the good post" $
+      length parsed == 1
+    removePathForcibly root
 
   putStrLn "All tests passed"
