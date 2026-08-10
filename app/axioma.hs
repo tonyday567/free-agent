@@ -68,7 +68,7 @@ import Free.Agent.Seat
 import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
 import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, parseTimeText, stamp, stamped)
-import Circuit.Agent.Mark (isEscalate, markOf)
+import Circuit.Agent.Mark (Mark (..), isEscalate, markGlyph, markOf)
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Free.Agent.Bus.File (Flow (..), tailLog)
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
@@ -422,7 +422,7 @@ main = do
       T.pack $
         unlines
           [ "#!/bin/sh",
-            "echo \"Session: free-fake\"",
+            "echo \"session_id: free-fake\"",
             "echo \"argv:$*\"",
             "printf 'stdin:'",
             "cat"
@@ -1079,6 +1079,50 @@ main = do
       any (\p -> body p == "fragile:world" && to p == ["human"] && thread p == [2]) fromFragile
     assert "ids are coherent across postLocal, replies, and escalation" $
       map stamp parsed == [0, 1, 2, 3, 4, 5, 6]
+
+  -------------------------------------------------------------------------
+  -- Bus seat self-halt (tail-chatter, R3c): a seat's own 🔵 stops the loop.
+  --
+  -- 🟢 stays exchange-level: a seat may land one exchange and host more.
+  -- 🔵 is seat-level: standing down is the seat deciding its own quiet.
+  -- The F2 self-post skip means the seat never reads its own mark back,
+  -- so the halt must be judged at commit time.  A post arriving after the
+  -- stand-down must go unanswered — the trailing 🟢 is only a safety
+  -- stopper for the buggy behaviour, where the seat lives on and answers.
+  -------------------------------------------------------------------------
+  putStrLn "bus seat self-halt"
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-selfhalt-axioma"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    _ <- postLocal root (mkPost "human" ["echo"] "task")
+    _ <- postLocal root (mkPost "human" ["echo"] "hello")
+    _ <- postLocal root (mkPost "human" ["echo"] "finish")
+    _ <- postLocal root (mkPost "human" ["echo"] "ping")
+    _ <- postLocal root (mkPost "human" ["echo"] "🟢 landed")
+    bus <- openBus root
+    let host = mkHost "echo" $ \ws -> pure $
+          if "task" `elem` ws
+            then [markGlyph Landed <> " task done"]
+            else
+              if "finish" `elem` ws
+                then [markGlyph StandDown <> " standing down"]
+                else map ("echo:" <>) ws
+    runSeatBus bus "echo" ["echo"] (hostSeat host)
+    closeBus bus
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+        fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
+    assert "a 🟢 reply lands the exchange but the seat hosts more" $
+      any (\p -> body p == markGlyph Landed <> " task done" && thread p == [0]) fromEcho
+        && any (\p -> body p == "echo:hello" && thread p == [1]) fromEcho
+    assert "the seat posts its own stand-down" $
+      any (\p -> markOf p == Just StandDown) fromEcho
+    assert "no reply after the stand-down (tail-chatter)" $
+      not (any (\p -> "ping" `T.isInfixOf` body p) fromEcho)
+    assert "ids are coherent: 5 planted + 3 replies, then quiet" $
+      map stamp parsed == [0, 1, 2, 3, 4, 5, 6, 7]
 
   -------------------------------------------------------------------------
   -- Multi-seat card meeting: two FreeSeats share a subscription on the bus

@@ -44,6 +44,11 @@ import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, 
 -- config names one) and also stops the loop. The quiescence counter is the
 -- observed-quiet bridge: after N empty cycles the seat posts 🔵 to the
 -- pitboss and exits.
+--
+-- Self-halt: a 🔵 reply is the seat deciding its own quiet — the loop stops
+-- after scribing it. The F2 self-post skip means the seat never reads its
+-- own mark back, so the halt is judged here, at commit time. 🟢 stays
+-- exchange-level: a seat may land one exchange and host more.
 runAgentLoop ::
   -- | Agent name used for cursor and logging.
   Text ->
@@ -93,7 +98,7 @@ runAgentLoop agentName names root mQuiesce handlePost = do
             pure Continue
           else do
             ereplies <- try @SomeException (handlePost stored)
-            case ereplies of
+            flow <- case ereplies of
               Left e -> do
                 let p = stamped stored
                     exc = T.pack (displayException e)
@@ -106,7 +111,14 @@ runAgentLoop agentName names root mQuiesce handlePost = do
                 _ <-
                   postLocal root $
                     mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc)
-                pure ()
-              Right replies -> traverse_ (postLocal root) replies
+                -- handler failure: cursor advanced, seat keeps listening
+                pure Continue
+              Right replies -> do
+                traverse_ (postLocal root) replies
+                -- Self-halt: the seat's own 🔵, judged at commit time.
+                pure $
+                  if any ((== Just StandDown) . markOf) replies
+                    then Halt
+                    else Continue
             writeCursor root agentName (stamp stored + 1)
-            pure Continue
+            pure flow

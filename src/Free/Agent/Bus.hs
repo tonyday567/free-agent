@@ -41,7 +41,7 @@ where
 
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
-import Circuit.Agent.Mark (Mark (Escalate), isEscalate, isHalt, markGlyph, markOf)
+import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Circuit.Agent.Framing
   ( Log (..),
     PostBody,
@@ -233,6 +233,10 @@ awaitSince bus names since = do
 -- Decided quiet: a delivered post carrying a halt (🟢 / 🔵) or escalation
 -- (🔴) mark stops the loop. Marks are control, not content: they are not
 -- handed to the seat.
+--
+-- Self-halt: a 🔵 reply is the seat deciding its own quiet — scribe it and
+-- stop, mid-batch if need be; later posts go unanswered (the seat is gone).
+-- 🟢 stays exchange-level: a seat may land one exchange and host more.
 runSeatBus :: Bus Text -> Name -> [Name] -> FreeSeat -> IO ()
 runSeatBus bus agentName names seat = loop 0
   where
@@ -241,10 +245,16 @@ runSeatBus bus agentName names seat = loop 0
       posts <- atomically (awaitSince bus names lastId)
       let marked = any (halts . stamped) posts
           work = filter (not . halts . stamped) posts
-      outs <- concat <$> traverse processOne work
-      traverse_ (scribeIO bus) outs
-      unless marked $
+      selfHalt <- go work
+      unless (marked || selfHalt) $
         loop (maximum (map stamp posts) + 1)
+    go [] = pure False
+    go (stored : rest) = do
+      outs <- processOne stored
+      traverse_ (scribeIO bus) outs
+      if any ((== Just StandDown) . markOf) outs
+        then pure True
+        else go rest
     halts p = maybe False (\m -> isHalt m || isEscalate m) (markOf p)
     processOne stored = do
       er <-

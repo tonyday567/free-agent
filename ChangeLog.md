@@ -2,6 +2,20 @@
 
 ## unreleased
 
+- **Seat self-halt (tail-chatter fix).** A seat whose own reply carries a
+  🔵 stand-down mark now stops its loop — judged at commit time, since the
+  F2 self-post skip means the seat never reads its own mark back. 🟢 stays
+  exchange-level: a seat may land one exchange and host more. Fixed in both
+  runners: `runSeatBus` stops mid-batch (later posts in the batch go
+  unanswered) and `runAgentLoop` returns `Halt` after scribing. Pinned by
+  the "bus seat self-halt" oracle in `free-agent-axioma` (red without the
+  fix); live-verified on the pit bus — a follow-up post to a stood-down
+  seat gets silence. R3c tail-chatter closed.
+- **Stale cliHost fake repaired.** The axioma's fake CLI emitted the
+  pre-0.18.2 `Session:` line; `parseSessionId` now matches `session_id:`,
+  so the fake never persisted a session and the whole axioma crashed on a
+  missing file. Fake updated to the current format.
+
 - **Status unification.** Top-level `free-agent status [ROOT]` now delegates to
   the same implementation as `free-agent bus status`. Added `--threshold` / `-t`
   to configure the live/quiet threshold in seconds (default 900). Seats whose
