@@ -26,7 +26,7 @@ import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Monad (when)
 import Control.Monad.State (State, StateT, runState, runStateT)
-import Data.IORef (newIORef)
+import Data.IORef (newIORef, writeIORef)
 import Data.List (inits)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -35,7 +35,7 @@ import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
 import Free.Agent.Bus.File (Flow (..), tailLog)
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliQuery, parseSessionId)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
 import Free.Agent.Derivation (chaseLog, dParents, derivation, valid)
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, meetingSkeleton, mooreProcess, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, hostShard, mkHost, processHost)
@@ -526,8 +526,82 @@ main = do
     result3 <- cliQuery cliBad "still works"
     assert "cliQuery works despite broken transcript path" $ "stdin:still works" `T.isInfixOf` result3
 
-  -- Part 4: mutation guard — if someone drops the tee, Part 1 catches it
-  -- (length==0).  If someone breaks the JSON format, Part 2 catches it.
+  -- Part 4: full-path test through cliHost + hostShard with transcript
+  -- enabled.  Two posts → two cliQuery invocations → two transcript records.
+  -- Verify cliScrub(raw) reproduces the reply body.
+  --
+  -- Mutation guard: if someone drops writeTranscript from cliQuery, the
+  -- transcript log stays empty and this test fails at the length check.
+
+  do
+    tmp <- getTemporaryDirectory
+    let dir = tmp </> "free-agent-transcript-host-axioma"
+        script = dir </> "fake-echo.sh"
+        sf = dir </> "session"
+        transcriptLog = dir </> "transcripts" </> "fake.jsonl"
+    removePathForcibly dir
+    createDirectoryIfMissing True dir
+    TIO.writeFile script $
+      T.pack $
+        unlines
+          [ "#!/bin/sh",
+            "echo 'session_id: fake-host'",
+            "echo 'diagnostic noise' >&2",
+            "printf 'echo:'",
+            "cat"
+          ]
+    let p1 = mkPost "human" ["fake"] "hello"
+        p2 = mkPost "human" ["fake"] "world"
+    postRef <- newIORef 0
+    let cli =
+          Cli
+            { cliCommand = "/bin/sh",
+              cliArgv = \_ mSid -> [script] <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
+              cliStdin = T.unpack,
+              cliSessionFile = sf,
+              cliSessionId = parseSessionId,
+              cliStale = \code _ -> code /= ExitSuccess,
+              cliScrub = cleanCliOut,
+              cliStderr = StderrDrop,
+              cliStderrTee = Nothing,
+              cliTranscript = Just (postRef, transcriptLog)
+            }
+        h = cliHost "fake" cli
+        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
+        sh = hostShard h
+    -- Post 1
+    writeIORef postRef 1
+    (outs1, st1) <- closeShardIO sh [p1] []
+    assert "hostShard single post emits 1 reply" $ length outs1 == 1
+    assert "hostShard buffer cleared after single" $ st1 == []
+    -- Post 2
+    writeIORef postRef 2
+    (outs2, st2) <- closeShardIO sh [p2] []
+    assert "hostShard second post emits 1 reply" $ length outs2 == 1
+    assert "hostShard buffer cleared after second" $ st2 == []
+    -- Transcript: 2 records, one per post
+    tlog <- TIO.readFile transcriptLog
+    let tlines = filter (not . T.null) (T.lines tlog)
+    assert "transcript has 2 records (one per post)" $ length tlines == 2
+    let line1 = tlines !! 0
+        line2 = tlines !! 1
+    assert "record 1 has post_id:1" $ "\"post_id\":1" `T.isInfixOf` line1
+    assert "record 2 has post_id:2" $ "\"post_id\":2" `T.isInfixOf` line2
+    assert "record 1 raw has reply content" $ "echo:hello" `T.isInfixOf` line1
+    assert "record 2 raw has reply content" $ "echo:world" `T.isInfixOf` line2
+    -- raw contains what cleanCliOut strips (session_id line, stderr noise)
+    assert "record 1 raw has session_id line" $ "session_id:" `T.isInfixOf` line1
+    assert "record 1 raw has stderr noise" $ "diagnostic noise" `T.isInfixOf` line1
+    -- replies are scrubbed: no session_id, no stderr noise
+    case (outs1, outs2) of
+      ([reply1], [reply2]) -> do
+        assert "reply 1 body is echo:hello" $ body reply1 == "echo:hello"
+        assert "reply 2 body is echo:world" $ body reply2 == "echo:world"
+        assert "reply 1 has no session_id line" $
+          not ("session_id:" `T.isInfixOf` body reply1)
+        assert "reply 1 has no stderr noise" $
+          not ("diagnostic noise" `T.isInfixOf` body reply1)
+      _ -> assert "expected one reply per post" False
 
   -------------------------------------------------------------------------
   -- Bundle primitives (FreeSeat fold / agreement)
