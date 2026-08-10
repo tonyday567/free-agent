@@ -283,7 +283,7 @@ runHermes cfg = do
       sessionFile = fromMaybe (defaultSessionFile (hcRoot cfg) names) (hcSessionFile cfg)
       -- F3: inject agent name so the LLM knows its posting identity
       framedPrompt = "Your name on the free-agent bus is " <> agentName <> ". Use this name for all --from fields and cursor checks.\n\n" <> systemPrompt
-      transcriptPath = (hcRoot cfg) </> ".transcripts" </> T.unpack agentName <> ".jsonl"
+      transcriptPath = hcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
   createDirectoryIfMissing True (takeDirectory sessionFile)
   transcriptRef <- newIORef 0
   let host = hermesHostBatch agentName framedPrompt (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile (Just (transcriptRef, transcriptPath))
@@ -302,7 +302,7 @@ runKimi cfg = do
   let names = kcNames cfg
       agentName = agentNameOf names
       sessionFile = fromMaybe (defaultSessionFile (kcRoot cfg) names) (kcSessionFile cfg)
-      transcriptPath = (kcRoot cfg) </> ".transcripts" </> T.unpack agentName <> ".jsonl"
+      transcriptPath = kcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
   createDirectoryIfMissing True (takeDirectory sessionFile)
   transcriptRef <- newIORef 0
   let host0 = kimiHost agentName (kcModel cfg) (kcProvider cfg) sessionFile (Just (transcriptRef, transcriptPath))
