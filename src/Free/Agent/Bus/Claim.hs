@@ -69,14 +69,18 @@ listClaims :: FilePath -> IO [(Int, Text)]
 listClaims root = do
   ents <- listDirectory root
   let claims = [ent | ent <- ents, ".claim-" `T.isPrefixOf` T.pack ent]
-  mapM (\ent -> do
-    let n = read (drop 7 ent)
-    holder <- readHolder (root </> ent)
-    pure (n, holder)) claims
+  mapM
+    ( \ent -> do
+        let n = read (drop 7 ent)
+        holder <- readHolder (root </> ent)
+        pure (n, holder)
+    )
+    claims
 
 -- | Remove all claim files in the bus root.
 wipeClaims :: FilePath -> IO ()
 wipeClaims root = do
   ents <- listDirectory root
-  mapM_ (\ent -> removeFile (root </> ent))
-    [ ent | ent <- ents, ".claim-" `T.isPrefixOf` T.pack ent ]
+  mapM_
+    (\ent -> removeFile (root </> ent))
+    [ent | ent <- ents, ".claim-" `T.isPrefixOf` T.pack ent]

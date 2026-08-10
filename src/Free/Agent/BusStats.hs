@@ -32,14 +32,14 @@ import Circuit.Agent (Post (..), PostId)
 import Circuit.Agent.Framing (Stamped (..))
 import Data.Aeson (ToJSON (..), encode, object, (.=))
 import Data.ByteString.Lazy qualified as BL
-import Data.Text.Encoding (decodeUtf8)
 import Data.List (minimumBy, sort, sortOn)
-import Data.Ord (comparing)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (decodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Numeric.Natural (Natural)

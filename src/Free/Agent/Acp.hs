@@ -105,7 +105,8 @@ data AcpConfig = AcpConfig
 
 -- | @kimi acp@ with the child working directory at @\/tmp\/free-agent-acp@.
 defaultAcpConfig :: AcpConfig
-defaultAcpConfig = AcpConfig
+defaultAcpConfig =
+  AcpConfig
     { acpCommand = "kimi",
       acpArgs = ["acp"],
       acpWorkDir = "/tmp/free-agent-acp",
@@ -482,8 +483,8 @@ acpPrompt c micros sid promptText = do
   let allMsgs = msgs <> trailing
       updates =
         [ u
-          | Just (Notification "session/update" ps) <- map classifyFrame allMsgs,
-            Just u <- [parseUpdate ps]
+        | Just (Notification "session/update" ps) <- map classifyFrame allMsgs,
+          Just u <- [parseUpdate ps]
         ]
       reply = T.concat [t | AgentMessageChunk t <- updates]
       thoughts = T.concat [t | AgentThoughtChunk t <- updates]

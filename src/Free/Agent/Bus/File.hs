@@ -42,8 +42,8 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import System.Directory (doesFileExist)
-import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.FSNotify (Event (..), watchDir, withManager)
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO
   ( IOMode (AppendMode, ReadMode),
     SeekMode (AbsoluteSeek),
@@ -107,8 +107,8 @@ latestPostId root = do
       case ls of
         [] -> pure 0
         _ -> case parseLine @Text (last ls) of
-               Just stored -> pure (stamp stored + 1)
-               Nothing -> pure (fromIntegral (length ls))
+          Just stored -> pure (stamp stored + 1)
+          Nothing -> pure (fromIntegral (length ls))
 
 -- | Persist the cursor for an agent. Writes @stamp + 1@ so the next wake
 -- starts after the post just processed.
@@ -161,7 +161,7 @@ tailLog path names startCursor mQuiesce cb = do
       dir = takeDirectory path
   withManager $ \mgr -> do
     signal <- newTMVarIO ()
-    busy <- newTVarIO True  -- quiescence gated: don't count empty cycles until first drain completes
+    busy <- newTVarIO True -- quiescence gated: don't count empty cycles until first drain completes
     _ <- watchDir mgr dir (\ev -> takeFileName (eventPath ev) == logName) $ \_ev -> do
       already <- readTVarIO halted
       unless already $ do
@@ -178,7 +178,7 @@ tailLog path names startCursor mQuiesce cb = do
       Nothing -> pollLoop offRef signal halted
       Just (qc, onQuiesce) -> quiesceLoop qc signal busy halted 0 onQuiesce
   where
-    -- | No-quiesce poll loop: wait on fsnotify with a 1 s timeout, then
+    -- \| No-quiesce poll loop: wait on fsnotify with a 1 s timeout, then
     -- manually re-drain.  FSEvents on macOS does not reliably fire on
     -- append, so the timeout fallback ensures delivery within ~1 s.
     pollLoop offRef signal halted = do

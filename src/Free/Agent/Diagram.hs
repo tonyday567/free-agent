@@ -43,7 +43,7 @@ import Circuit.Agent (Post (..))
 import Circuit.Poly (Mono, System)
 import Circuit.Poly.Process (runSystem, systemAsLens)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
-import Circuit.Process (Process, pattern P, register)
+import Circuit.Process (Process, register, pattern P)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 
@@ -117,7 +117,7 @@ meetingSkeleton ps = foldr1 SThenD (snd (mapAccumL step dangling [0 .. length ps
     -- stamped meeting).
     sources =
       [ [if i < fromIntegral j then Just i else Nothing | i <- thread p]
-        | (j, p) <- zip [0 ..] ps
+      | (j, p) <- zip [0 ..] ps
       ]
     -- the citation edges of post j, in consumer (log) order
     cited j = [(i, pos) | (i, ss) <- zip [0 ..] sources, (pos, Just j') <- zip [0 ..] ss, j' == fromIntegral j]

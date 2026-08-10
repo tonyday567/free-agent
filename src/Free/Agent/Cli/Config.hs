@@ -201,8 +201,8 @@ promptOpt =
 
 sessionOpt :: Parser (Maybe FilePath)
 sessionOpt =
-  optional
-    $ strOption
+  optional $
+    strOption
       ( long "session"
           <> short 's'
           <> metavar "FILE"
@@ -211,8 +211,8 @@ sessionOpt =
 
 modelOpt :: Parser (Maybe Text)
 modelOpt =
-  optional
-    $ option
+  optional $
+    option
       (T.pack <$> str)
       ( long "model"
           <> short 'm'
@@ -222,8 +222,8 @@ modelOpt =
 
 providerOpt :: Parser (Maybe Text)
 providerOpt =
-  optional
-    $ option
+  optional $
+    option
       (T.pack <$> str)
       ( long "provider"
           <> metavar "PROVIDER"
@@ -232,8 +232,8 @@ providerOpt =
 
 quiesceOpt :: Parser (Maybe Int)
 quiesceOpt =
-  optional
-    $ option
+  optional $
+    option
       auto
       ( long "quiesce"
           <> metavar "N"
@@ -242,8 +242,8 @@ quiesceOpt =
 
 pitbossOpt :: Parser (Maybe Name)
 pitbossOpt =
-  optional
-    $ option
+  optional $
+    option
       (T.pack <$> str)
       ( long "pitboss"
           <> metavar "NAME"

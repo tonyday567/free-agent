@@ -5,7 +5,8 @@ module Main (main) where
 
 import Circuit (Ends (..), close)
 import Circuit.Agent (Agent, AgentSeat (..), Bag, Post (..), Shard, awaitA, branchesByIndex, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
-import Circuit.Channel (Strength (..), Traced (..))
+import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, parseTimeText, stamp, stamped)
+import Circuit.Agent.Mark (Mark (..), isEscalate, markGlyph, markOf)
 import Circuit.Agent.Tensor
   ( awaitShard,
     fanInShard,
@@ -14,6 +15,7 @@ import Circuit.Agent.Tensor
     silentShard,
   )
 import Circuit.Category (Category (id, (.)), ObDict (..))
+import Circuit.Channel (Strength (..), Traced (..))
 import Circuit.Layer ((:~>))
 import Circuit.Poly (Mono, System (..), monoDir)
 import Circuit.Poly.Process (iterateSystem, runSystem)
@@ -21,20 +23,25 @@ import Circuit.Poly.StringDiagram (SDiagram (..))
 import Circuit.Poly.StringDiagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
 import Circuit.Process (delay, register, scan)
 import Control.Arrow (Kleisli (..), runKleisli)
+import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Monad (when)
 import Control.Monad.State (State, StateT, runState, runStateT)
-import Data.Text (Text)
+import Data.IORef (newIORef)
 import Data.List (inits)
 import Data.Maybe (mapMaybe)
+import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
+import Free.Agent.Bus.File (Flow (..), tailLog)
+import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliQuery, parseSessionId)
 import Free.Agent.Derivation (chaseLog, dParents, derivation, valid)
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, meetingSkeleton, mooreProcess, skeletonLabels)
-import Free.Agent.Host (BodyMode (..), Host (..), cliHost, mkHost, hostShard, processHost)
+import Free.Agent.Host (BodyMode (..), Host (..), cliHost, hostShard, mkHost, processHost)
 import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
-import Free.Agent.Meeting (AgentBox (..), meetLog, quoter, unchanged)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
-import Free.Agent.Pipeline qualified as P
+import Free.Agent.Meeting (AgentBox (..), meetLog, quoter, unchanged)
 import Free.Agent.Pipeline
   ( Pipeline,
     broadcast,
@@ -48,6 +55,7 @@ import Free.Agent.Pipeline
     routeTo,
     runPipeline,
   )
+import Free.Agent.Pipeline qualified as P
 import Free.Agent.Seat
   ( FreeSeat (..),
     SeatBehaviour,
@@ -65,13 +73,6 @@ import Free.Agent.Seat
     runAgentSBox,
     silentSeat,
   )
-import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
-import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, parseTimeText, stamp, stamped)
-import Circuit.Agent.Mark (Mark (..), isEscalate, markGlyph, markOf)
-import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
-import Free.Agent.Bus.File (Flow (..), tailLog)
-import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Syntax (FreeAgent (..))
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly)
 import System.Exit (ExitCode (..), exitFailure)
@@ -437,7 +438,8 @@ main = do
               cliStale = \code _ -> code /= ExitSuccess,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing
+              cliStderrTee = Nothing,
+              cliTranscript = Nothing
             }
         h = cliHost "fake" cli
         sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
@@ -456,6 +458,76 @@ main = do
       case outs2 of
         [o] -> "argv:--resume free-fake" `T.isInfixOf` body o
         _ -> False
+
+  -------------------------------------------------------------------------
+  -- Transcript oracle (B1): cliQuery appends a JSONL record when
+  -- cliTranscript is set, and scrubbing the recorded raw reproduces the
+  -- posted reply body.  Failure is silent — a missing directory does not
+  -- prevent the seat from working.
+  -------------------------------------------------------------------------
+  putStrLn "Transcript oracle"
+
+  do
+    tmp <- getTemporaryDirectory
+    let dir = tmp </> "free-agent-transcript-axioma"
+        script = dir </> "fake-cli.sh"
+        sf = dir </> "session"
+        transcriptLog = dir </> "transcripts" </> "fake.jsonl"
+        badTranscriptLog = script </> "transcripts" </> "fake.jsonl"
+    removePathForcibly dir
+    createDirectoryIfMissing True dir
+    TIO.writeFile script $
+      T.pack $
+        unlines
+          [ "#!/bin/sh",
+            "echo 'session_id: fake-tid'",
+            "echo 'hello from stderr' >&2",
+            "printf 'stdin:'",
+            "cat"
+          ]
+    let cli =
+          Cli
+            { cliCommand = "/bin/sh",
+              cliArgv = \_ mSid -> [script] <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
+              cliStdin = T.unpack,
+              cliSessionFile = sf,
+              cliSessionId = parseSessionId,
+              cliStale = \code _ -> code /= ExitSuccess,
+              cliScrub = id,
+              cliStderr = StderrMerge,
+              cliStderrTee = Nothing,
+              cliTranscript = Nothing
+            }
+    -- Part 1: transcript disabled → no file written, cliQuery still works
+    result1 <- cliQuery cli "hello"
+    exists1 <- doesFileExist transcriptLog
+    assert "transcript not written when cliTranscript is Nothing" (not exists1)
+    assert "cliQuery still works without transcript" $ "stdin:hello" `T.isInfixOf` result1
+
+    -- Part 2: transcript enabled → one record written per cliQuery call
+    postRef <- newIORef 42
+    let cliEnabled = cli {cliTranscript = Just (postRef, transcriptLog)}
+    result2 <- cliQuery cliEnabled "hi there"
+    assert "cliQuery with transcript still produces reply" $ "stdin:hi there" `T.isInfixOf` result2
+    -- Check transcript file exists and has one valid JSONL record
+    tlog <- TIO.readFile transcriptLog
+    let tlines = filter (not . T.null) (T.lines tlog)
+    assert "transcript has exactly one record" $ length tlines == 1
+    let line = head tlines
+    assert "transcript record has post_id:42" $ "\"post_id\":42" `T.isInfixOf` line
+    assert "transcript record has exit_code:0" $ "\"exit_code\":0" `T.isInfixOf` line
+    assert "transcript record has session_id" $ "\"session_id\":\"fake-tid\"" `T.isInfixOf` line
+    assert "transcript record contains raw" $ "\"raw\":\"" `T.isInfixOf` line
+    assert "transcript raw has stdout content" $ "stdin:hi there" `T.isInfixOf` line
+    assert "transcript raw has stderr content" $ "hello from stderr" `T.isInfixOf` line
+
+    -- Part 3: silent failure — write to an impossible path
+    let cliBad = cli {cliTranscript = Just (postRef, badTranscriptLog)}
+    result3 <- cliQuery cliBad "still works"
+    assert "cliQuery works despite broken transcript path" $ "stdin:still works" `T.isInfixOf` result3
+
+  -- Part 4: mutation guard — if someone drops the tee, Part 1 catches it
+  -- (length==0).  If someone breaks the JSON format, Part 2 catches it.
 
   -------------------------------------------------------------------------
   -- Bundle primitives (FreeSeat fold / agreement)
@@ -493,7 +565,8 @@ main = do
     (outsShard, _) <-
       closeShardIO
         (awaitShard (pipelineShard (routeP (const [p]))) (pipelineShard (routeP (const [q]))))
-        posts []
+        posts
+        []
     assert "awaitSeat folds to awaitShard" $ outsFree == outsShard
 
   putStrLn "raceSeat folds to raceShard and agrees with raceA"
@@ -512,7 +585,8 @@ main = do
     (outsShard, _) <-
       closeShardIO
         (raceShard (pipelineShard (routeP (const [p]))) (pipelineShard (routeP (const [q]))))
-        posts []
+        posts
+        []
     assert "raceSeat folds to raceShard" $ outsFree == outsShard
     assert "raceSeat agrees with raceA" $ outsFree == outsPure
 
@@ -527,7 +601,8 @@ main = do
     (outsShard, _) <-
       closeShardIO
         (fanOutShard [pipelineShard (routeP (const [p])), pipelineShard (routeP (const [q]))])
-        posts []
+        posts
+        []
     assert "fanOutSeat folds to fanOutShard" $ outsFree == outsShard
 
   putStrLn "fanInSeat folds to fanInShard"
@@ -545,7 +620,8 @@ main = do
               pipelineShard (routeP (\x -> [x {body = body x <> "-b"}]))
             ]
         )
-        posts []
+        posts
+        []
     assert "fanInSeat folds to fanInShard" $ outsFree == outsShard
 
   putStrLn "bundle is fan-in over forks"
@@ -958,7 +1034,7 @@ main = do
 
   do
     let mkStored i ts f t body = case parseTimeText ts of
-          Just ts' -> Stamped { stamp = i, timeStamp = ts', stamped = Post f t [] body }
+          Just ts' -> Stamped {stamp = i, timeStamp = ts', stamped = Post f t [] body}
           Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
@@ -980,7 +1056,7 @@ main = do
 
   do
     let mkStored i ts f t body = case parseTimeText ts of
-          Just ts' -> Stamped { stamp = i, timeStamp = ts', stamped = Post f t [] body }
+          Just ts' -> Stamped {stamp = i, timeStamp = ts', stamped = Post f t [] body}
           Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
@@ -993,7 +1069,7 @@ main = do
 
   do
     let mkStored i ts f t body = case parseTimeText ts of
-          Just ts' -> Stamped { stamp = i, timeStamp = ts', stamped = Post f t [] body }
+          Just ts' -> Stamped {stamp = i, timeStamp = ts', stamped = Post f t [] body}
           Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
@@ -1102,13 +1178,14 @@ main = do
     _ <- postLocal root (mkPost "human" ["echo"] "ping")
     _ <- postLocal root (mkPost "human" ["echo"] "🟢 landed")
     bus <- openBus root
-    let host = mkHost "echo" $ \ws -> pure $
-          if "task" `elem` ws
-            then [markGlyph Landed <> " task done"]
-            else
-              if "finish" `elem` ws
-                then [markGlyph StandDown <> " standing down"]
-                else map ("echo:" <>) ws
+    let host = mkHost "echo" $ \ws ->
+          pure $
+            if "task" `elem` ws
+              then [markGlyph Landed <> " task done"]
+              else
+                if "finish" `elem` ws
+                  then [markGlyph StandDown <> " standing down"]
+                  else map ("echo:" <>) ws
     runSeatBus bus "echo" ["echo"] (hostSeat host)
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
@@ -1179,8 +1256,8 @@ main = do
     let root = tmp </> "free-agent-tail-axioma"
         path = root </> "log.jsonl"
         mkStored i ts f t b = case parseTimeText ts of
-              Just ts' -> Stamped { stamp = i, timeStamp = ts', stamped = Post f t [] b }
-              Nothing -> error $ "bad timestamp: " <> show ts
+          Just ts' -> Stamped {stamp = i, timeStamp = ts', stamped = Post f t [] b}
+          Nothing -> error $ "bad timestamp: " <> show ts
         frame i ts f t b = frameStored @Text (mkStored i ts f t b)
     removePathForcibly root
     createDirectoryIfMissing True root

@@ -41,7 +41,6 @@ where
 
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
-import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Circuit.Agent.Framing
   ( Log (..),
     PostBody,
@@ -52,9 +51,9 @@ import Circuit.Agent.Framing
     frameStored,
     readLogFile,
   )
+import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Control.Arrow (runKleisli)
 import Control.Concurrent (ThreadId, forkIO, killThread)
-import Control.Exception (SomeException, bracket, displayException, try)
 import Control.Concurrent.STM
   ( STM,
     TMVar,
@@ -73,20 +72,20 @@ import Control.Concurrent.STM
     writeTQueue,
     writeTVar,
   )
+import Control.Exception (SomeException, bracket, displayException, try)
 import Control.Monad (forever, unless)
 import Control.Monad.State (runStateT)
 import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
 import Data.List (maximum)
-
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
 import Free.Agent.Seat (FreeSeat, interpretSeat)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath (takeDirectory, (</>), (<.>))
 import System.FileLock (SharedExclusive (Exclusive), withFileLock)
+import System.FilePath (takeDirectory, (<.>), (</>))
 import System.IO (IOMode (AppendMode), withFile)
 import Text.Printf (printf)
 
@@ -111,7 +110,7 @@ busLogPath = busPath
 --
 -- Loads any existing @log.jsonl@ into memory and starts the persistence
 -- thread. The lock file lives at @root/log.jsonl.lock@.
-openBus :: PostBody a => FilePath -> IO (Bus a)
+openBus :: (PostBody a) => FilePath -> IO (Bus a)
 openBus root = do
   createDirectoryIfMissing True root
   let path = root </> "log.jsonl"
@@ -136,7 +135,7 @@ closeBus = killThread . busThread
 -- | Bracketed 'openBus'/'closeBus': open a bus, run the action, kill the
 -- persistence thread on exit. The seat loop holds one bus for its whole
 -- lifetime and scribes replies in-process — no external scribe executable.
-withBus :: PostBody a => FilePath -> (Bus a -> IO b) -> IO b
+withBus :: (PostBody a) => FilePath -> (Bus a -> IO b) -> IO b
 withBus root = bracket (openBus root) closeBus
 
 -- | Append a bare post to the live log inside one STM transaction.
@@ -172,7 +171,7 @@ scribeIO bus p = do
 -- a single runtime that owns all writes; a long-lived seat's in-memory
 -- image goes stale the moment another process posts, and stale images
 -- assign colliding ids.
-postLocal :: PostBody a => FilePath -> Post a -> IO (Stamped a)
+postLocal :: (PostBody a) => FilePath -> Post a -> IO (Stamped a)
 postLocal root p = do
   createDirectoryIfMissing True root
   let path = root </> "log.jsonl"
@@ -191,14 +190,14 @@ postLocal root p = do
 --
 -- Shared durable image primitive for the live bus persistence loop. Does not
 -- assign ids or timestamps.
-appendStoredPosts :: PostBody a => FilePath -> [Stamped a] -> IO ()
+appendStoredPosts :: (PostBody a) => FilePath -> [Stamped a] -> IO ()
 appendStoredPosts path posts =
   withFileLock (path <.> "lock") Exclusive $ \_lock ->
     appendStoredPostsUnlocked path posts
 
 -- | Append stamped posts without taking the lock. Caller must already hold
 -- @path.lock@ (or otherwise guarantee exclusive writers).
-appendStoredPostsUnlocked :: PostBody a => FilePath -> [Stamped a] -> IO ()
+appendStoredPostsUnlocked :: (PostBody a) => FilePath -> [Stamped a] -> IO ()
 appendStoredPostsUnlocked path posts =
   withFile path AppendMode $ \h ->
     traverse_ (TIO.hPutStrLn h . frameStored) posts
@@ -281,7 +280,7 @@ runSeatBus bus agentName names seat = loop 0
 -- Batches all posts currently in the queue, appends them under a file lock,
 -- writes per-agent ping files, then repeats. Empty queue blocks via
 -- 'readTQueue'.
-persistLoop :: PostBody a => FilePath -> TQueue (Stamped a, TMVar ()) -> IO ()
+persistLoop :: (PostBody a) => FilePath -> TQueue (Stamped a, TMVar ()) -> IO ()
 persistLoop path q = forever $ do
   pairs <- atomically $ do
     first <- readTQueue q

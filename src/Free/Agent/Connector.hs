@@ -21,8 +21,8 @@ where
 import Circuit.Agent (Name, Post (..), deliversTo, mkPost)
 import Circuit.Agent.Framing (Stamped (..))
 import Circuit.Agent.StdPorts
-  ( ProcEnds (..),
-    ProcConfig (..),
+  ( ProcConfig (..),
+    ProcEnds (..),
     defaultProcConfig,
     ghciMarks,
     openProc,
@@ -100,8 +100,11 @@ runConnector cfg = do
           unless done $ loop bus repl name newId
 
 processPosts ::
-  ConnectorConfig -> Bus Text -> ProcEnds Text Text Text ->
-  [Stamped Text] -> IO Bool
+  ConnectorConfig ->
+  Bus Text ->
+  ProcEnds Text Text Text ->
+  [Stamped Text] ->
+  IO Bool
 processPosts cfg bus repl = go
   where
     name = connName cfg

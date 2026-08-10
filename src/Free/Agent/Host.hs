@@ -25,17 +25,18 @@ where
 
 import Circuit (Ends (..), endsK)
 import Circuit.Agent (Post (..), Shard, mkPost)
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, kimiCli, parseSessionId)
 import Circuit.Parser.Json (Json (..), encodeJson)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.State.Class (MonadState (..))
 import Data.Aeson (FromJSON (..), eitherDecode, withObject, (.:))
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL
+import Data.IORef (IORef)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, kimiCli, parseSessionId)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -79,7 +80,7 @@ mkHost name f = Host name BodyWords f
 bodyArgs :: BodyMode -> Text -> [Text]
 bodyArgs BodyWords = T.words
 bodyArgs BodyLines = T.lines
-bodyArgs BodyWhole = (:[])
+bodyArgs BodyWhole = (: [])
 
 -- | Turn a host into a stateful shard that consumes every committed post.
 --
@@ -157,6 +158,10 @@ cliHost name cli =
 -- Runs @kimi -p@ per body (see 'kimiCli'), with optional @-m <model>@,
 -- @--provider <provider>@, and session resume via @sessionFile@.  A stale
 -- session falls back to fresh.
+--
+-- When @mTranscript@ is 'Just', one JSONL transcript record is appended to
+-- the given file per invocation.  The caller writes the post id to the
+-- 'IORef' before each call; see 'Free.Agent.Cli.cliQuery' for details.
 kimiHost ::
   (MonadIO m) =>
   -- | Host name (used as the 'from' field of reply posts).
@@ -167,8 +172,11 @@ kimiHost ::
   Maybe Text ->
   -- | Session file for cross-call context.
   FilePath ->
+  -- | Optional transcript sink.
+  Maybe (IORef Int, FilePath) ->
   Host m
-kimiHost name model provider sessionFile = cliHost name (kimiCli model provider sessionFile)
+kimiHost name model provider sessionFile mTranscript =
+  cliHost name (kimiCli model provider sessionFile) {cliTranscript = mTranscript}
 
 -- | Hermes host on the shared 'Cli' seat.
 --
@@ -178,6 +186,10 @@ kimiHost name model provider sessionFile = cliHost name (kimiCli model provider 
 -- @--yolo -Q@ is passed to hermes.
 -- Sessions persist across calls via @sessionFile@; a stale session falls
 -- back to fresh.
+--
+-- When @mTranscript@ is 'Just', one JSONL transcript record is appended to
+-- the given file per invocation.  The caller writes the post id to the
+-- 'IORef' before each call; see 'Free.Agent.Cli.cliQuery' for details.
 --
 -- The caller is responsible for building the system prompt; this function
 -- knows nothing about design documents, protocol cards, or magic wording.
@@ -195,8 +207,10 @@ hermesHost ::
   Bool ->
   -- | Session file for cross-call context.
   FilePath ->
+  -- | Optional transcript sink.
+  Maybe (IORef Int, FilePath) ->
   Host m
-hermesHost name systemPrompt model provider yolo sessionFile =
+hermesHost name systemPrompt model provider yolo sessionFile mTranscript =
   Host
     { hostName = name,
       hostBodyMode = BodyWhole,
@@ -205,18 +219,19 @@ hermesHost name systemPrompt model provider yolo sessionFile =
   where
     runOne body =
       liftIO (cliQuery cli (systemPrompt <> "\n\nUser message:\n" <> body))
-    cli = hermesCli model provider yolo sessionFile
+    cli = hermesCli model provider yolo sessionFile mTranscript
 
 -- | Shared CLI recipe for hermes backends.
-hermesCli :: Maybe Text -> Maybe Text -> Bool -> FilePath -> Cli
-hermesCli model provider yolo sessionFile =
+-- When @cliTranscript@ is 'Just', one JSONL record is appended per invocation.
+hermesCli :: Maybe Text -> Maybe Text -> Bool -> FilePath -> Maybe (IORef Int, FilePath) -> Cli
+hermesCli model provider yolo sessionFile mTranscript =
   Cli
     { cliCommand = "hermes",
       cliArgv = \prompt mSid ->
         ["chat", "-q", T.unpack prompt]
           <> maybe [] (\m -> ["-m", T.unpack m]) model
           <> maybe [] (\p -> ["--provider", T.unpack p]) provider
-          <> if yolo then ["--yolo", "-Q"] else []
+          <> (if yolo then ["--yolo", "-Q"] else [])
           <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
       cliStdin = const "",
       cliSessionFile = sessionFile,
@@ -227,7 +242,8 @@ hermesCli model provider yolo sessionFile =
           || "Session not found" `T.isInfixOf` out,
       cliScrub = cleanCliOut,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing
+      cliStderrTee = Nothing,
+      cliTranscript = mTranscript
     }
 
 -- | Batch variant of 'hermesHost'. Joins all post bodies into a single user
@@ -236,8 +252,15 @@ hermesCli model provider yolo sessionFile =
 -- them as a combined conversation turn.
 hermesHostBatch ::
   (MonadIO m) =>
-  Text -> Text -> Maybe Text -> Maybe Text -> Bool -> FilePath -> Host m
-hermesHostBatch name systemPrompt model provider yolo sessionFile =
+  Text ->
+  Text ->
+  Maybe Text ->
+  Maybe Text ->
+  Bool ->
+  FilePath ->
+  Maybe (IORef Int, FilePath) ->
+  Host m
+hermesHostBatch name systemPrompt model provider yolo sessionFile mTranscript =
   Host
     { hostName = name,
       hostBodyMode = BodyWhole,
@@ -248,7 +271,7 @@ hermesHostBatch name systemPrompt model provider yolo sessionFile =
         pure [cleanCliOut rsp]
     }
   where
-    cli = hermesCli model provider yolo sessionFile
+    cli = hermesCli model provider yolo sessionFile mTranscript
 
 -- | Connection configuration for a direct API host.
 data BareConfig = BareConfig
@@ -326,11 +349,11 @@ chatCompletion cfg systemPrompt userMessage = do
   let status = statusCode (responseStatus response)
       body = responseBody response
   if status < 200 || status >= 300
-    then pure ("🔴 HTTP " <> T.pack (show status) <> ": " <> TE.decodeUtf8 (BL.toStrict body))
+    then pure ("\128308 HTTP " <> T.pack (show status) <> ": " <> TE.decodeUtf8 (BL.toStrict body))
     else case eitherDecode body of
-      Left err -> pure ("🔴 JSON error: " <> T.pack err)
+      Left err -> pure ("\128308 JSON error: " <> T.pack err)
       Right cr -> case responseChoices cr of
-        [] -> pure "🔴 empty choices"
+        [] -> pure "\128308 empty choices"
         (c : _) -> pure (messageContent (message c))
 
 newtype ChatResponse = ChatResponse {responseChoices :: [Choice]}

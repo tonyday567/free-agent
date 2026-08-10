@@ -29,8 +29,8 @@ import Free.Agent.Bus.File
     writeCursor,
   )
 import System.FilePath ((</>))
-import System.Posix.Process (getProcessID)
 import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
+import System.Posix.Process (getProcessID)
 
 -- | Start a seat loop.
 --
@@ -104,7 +104,9 @@ runAgentLoop agentName names root mQuiesce handlePost = do
                     exc = T.pack (displayException e)
                     recipients = from p : maybe [] (pure . qcPitboss) mQuiesce
                 hPutStrLn stderr $
-                  "🔴 " ++ T.unpack agentName ++ " handler failed on post "
+                  "🔴 "
+                    ++ T.unpack agentName
+                    ++ " handler failed on post "
                     ++ show (stamp stored)
                     ++ ": "
                     ++ T.unpack exc

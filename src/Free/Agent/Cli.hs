@@ -22,6 +22,10 @@ module Free.Agent.Cli
     -- * Shard adapters
     cliShard,
 
+    -- * Transcript
+    TranscriptRecord (..),
+    encodeTranscriptLine,
+
     -- * Generic adapters (re-exported from 'Circuit.Agent.Query')
     queryShard,
     queryShardWith,
@@ -45,13 +49,19 @@ import Circuit.Agent.Query
     synthShard,
     synthesisPosts,
   )
-import Data.Text (Text)
-import Control.Exception (SomeException, try)
-import Control.Monad (when)
+import Control.Exception (SomeException, catch, try)
+import Control.Monad (void, when)
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
+import Data.Char (chr, ord)
 import Data.Foldable (for_)
+import Data.IORef (IORef, readIORef)
 import Data.Maybe (listToMaybe)
+import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import GHC.IO.Handle (hGetContents)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (-<.>))
@@ -64,10 +74,6 @@ import System.Process
     readCreateProcessWithExitCode,
     waitForProcess,
   )
-
-import Data.ByteString qualified as BS
-import Data.ByteString.Lazy qualified as BL
-import GHC.IO.Handle (hGetContents)
 
 -- | Invocation recipe for a CLI agent.
 --
@@ -95,7 +101,12 @@ data Cli = Cli
     -- | Optional tee: raw stderr appended to this log file on every call,
     -- regardless of the policy (interiority stays searchable, never
     -- silently dropped).
-    cliStderrTee :: Maybe FilePath
+    cliStderrTee :: Maybe FilePath,
+    -- | Optional transcript sink: @(post_id_ref, transcript_jsonl_path)@.
+    -- The 'IORef' carries the current post id, set externally before each
+    -- query.  One JSONL record is appended per invocation; failure to write
+    -- is silent (tee failure is never fatal).
+    cliTranscript :: Maybe (IORef Int, FilePath)
   }
 
 -- | stderr routing for a CLI agent's output channels.
@@ -137,7 +148,8 @@ kimiCli model provider sessionFile =
       cliScrub = kimiText,
       cliStderr = StderrDrop,
       -- Interiority log: NAME.sid -> NAME.stderr.log
-      cliStderrTee = Just (sessionFile -<.> "stderr.log")
+      cliStderrTee = Just (sessionFile -<.> "stderr.log"),
+      cliTranscript = Nothing
     }
 
 -- | Scrape the @To resume this session: kimi -r \<id\>@ hint line.
@@ -173,7 +185,8 @@ grokCli model sessionFile =
         code /= ExitSuccess || "Failed to restore session" `T.isInfixOf` out,
       cliScrub = grokText,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing
+      cliStderrTee = Nothing,
+      cliTranscript = Nothing
     }
 
 -- | Reply text is the JSON @text@ field, unescaped; if there is no such
@@ -258,39 +271,44 @@ hermesCli model provider sessionFile =
           || "Session not found" `T.isInfixOf` out,
       cliScrub = cleanCliOut,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing
+      cliStderrTee = Nothing,
+      cliTranscript = Nothing
     }
 
 -- | One query against a CLI agent.
---
 -- First call (or no stored session) runs fresh; subsequent calls resume the
 -- stored session id.  A stale session falls back to fresh and records the
 -- new id.  Scraped ids are re-persisted on every successful call, so
 -- server-side session rotation is followed.
 cliQuery :: Cli -> Text -> IO Text
 cliQuery cli prompt = do
+  t0 <- getCurrentTime
   mSid <- readStoredSession (cliSessionFile cli)
   case mSid of
-    Nothing -> fresh
+    Nothing -> fresh t0
     Just sid -> do
-      (code, raw, routedOut) <- run (Just sid)
+      (code, raw, routedOut, elapsed) <- run t0 (Just sid)
       if cliStale cli code raw
-        then fresh
+        then fresh t0
         else do
-          scrape raw
+          let mSid' = cliSessionId cli raw
+          for_ mSid' (writeStoredSession (cliSessionFile cli))
+          writeTranscript t0 code raw elapsed mSid'
           pure (cliScrub cli routedOut)
   where
-    -- (exit code, raw merged out<>err pre-policy, policy-routed output).
+    -- (exit code, raw merged out<>err pre-policy, policy-routed output, elapsed ms).
     -- cliStale and scrape act on the raw merged stream: stale notices and
     -- resume hints live on stderr for some CLIs, and 'StderrDrop' must not
     -- hide them — it only filters the reply body.
-    run mSid = do
+    run t0' mSid = do
       (code, out, err) <-
         readCreateProcessWithExitCode
           (proc (cliCommand cli) (cliArgv cli prompt mSid))
           (cliStdin cli prompt)
+      t1 <- getCurrentTime
+      let elapsed = floor (realToFrac (diffUTCTime t1 t0') * (1000 :: Double))
       tee err
-      pure (code, T.pack out <> T.pack err, T.pack out <> routed (T.pack err))
+      pure (code, T.pack out <> T.pack err, T.pack out <> routed (T.pack err), elapsed)
     tee err =
       for_ (cliStderrTee cli) $ \path -> do
         createDirectoryIfMissing True (takeDirectory path)
@@ -301,8 +319,8 @@ cliQuery cli prompt = do
       StderrMark
         | T.null (T.strip err) -> ""
         | otherwise -> "\n-- stderr --\n" <> err
-    fresh = do
-      (code, raw, routedOut) <- run Nothing
+    fresh t0' = do
+      (code, raw, routedOut, elapsed) <- run t0' Nothing
       when (code /= ExitSuccess) $
         fail
           ( "cliQuery: "
@@ -312,10 +330,31 @@ cliQuery cli prompt = do
               <> ": "
               <> T.unpack (T.take 200 raw)
           )
-      scrape raw
+      let mSid' = cliSessionId cli raw
+      for_ mSid' (writeStoredSession (cliSessionFile cli))
+      writeTranscript t0' code raw elapsed mSid'
       pure (cliScrub cli routedOut)
-    scrape out =
-      for_ (cliSessionId cli out) (writeStoredSession (cliSessionFile cli))
+    writeTranscript t0' code raw elapsed mSid' =
+      for_ (cliTranscript cli) $ \(ref, path) -> do
+        pid <- readIORef ref
+        let rec =
+              TranscriptRecord
+                { trPostId = pid,
+                  trTimestamp = t0',
+                  trExitCode = case code of
+                    ExitSuccess -> 0
+                    ExitFailure n -> n,
+                  trElapsedMs = elapsed,
+                  trSessionId = mSid',
+                  trRaw = raw
+                }
+            line = encodeTranscriptLine rec <> "\n"
+        catch
+          ( do
+              createDirectoryIfMissing True (takeDirectory path)
+              TIO.appendFile path line
+          )
+          (\(_ :: SomeException) -> pure ())
 
 -- | Like 'cliQuery' but returns raw stdout as 'BS.ByteString' before
 -- any decoding or filtering.  Uses 'CreatePipe' to read bytes directly
@@ -400,6 +439,56 @@ cleanCliOut =
                 `elem` ("─│┌┐└┘╭╮╰╯" :: String)
         )
         t
+
+-- | One transcript record, as JSONL appended to the transcript log.
+data TranscriptRecord = TranscriptRecord
+  { trPostId :: Int,
+    trTimestamp :: UTCTime,
+    trExitCode :: Int,
+    trElapsedMs :: Int,
+    trSessionId :: Maybe Text,
+    trRaw :: Text
+  }
+
+-- | Encode a transcript record as a single JSON line (no trailing newline).
+encodeTranscriptLine :: TranscriptRecord -> Text
+encodeTranscriptLine r =
+  "{"
+    <> kv "post_id" (T.pack (show (trPostId r)))
+    <> ","
+    <> kv "ts" ("\"" <> escapeText (T.pack (show (trTimestamp r))) <> "\"")
+    <> ","
+    <> kv "exit_code" (T.pack (show (trExitCode r)))
+    <> ","
+    <> kv "elapsed_ms" (T.pack (show (trElapsedMs r)))
+    <> ","
+    <> kv "session_id" (maybe "null" (\t -> "\"" <> escapeText t <> "\"") (trSessionId r))
+    <> ","
+    <> kv "raw" ("\"" <> escapeText (trRaw r) <> "\"")
+    <> "}"
+  where
+    kv k v = "\"" <> k <> "\":" <> v
+
+-- | Minimal JSON string escaping: backslash, double-quote, control chars.
+escapeText :: Text -> Text
+escapeText = T.concatMap escChar
+  where
+    escChar c
+      | c == '\\' = "\\\\"
+      | c == '\"' = "\\\""
+      | c == '\n' = "\\n"
+      | c == '\r' = "\\r"
+      | c == '\t' = "\\t"
+      | c < '\x20' = "\\u" <> T.justifyRight 4 '0' (T.pack (showHex (fromEnum c) ""))
+      | otherwise = T.singleton c
+    showHex n s = case n `divMod` 16 of
+      (0, d) -> hexDigit d : s
+      (q, d) -> showHex q (hexDigit d : s)
+    hexDigit d
+      | d < 10 = chr (ord '0' + d)
+      | otherwise = chr (ord 'a' + d - 10)
+    chr = Data.Char.chr
+    ord = Data.Char.ord
 
 -- | A live CLI agent as a list 'Shard'.  Session file and process stay
 -- inside @IO@ — apply-only at this boundary.  @who@ is the agent nick

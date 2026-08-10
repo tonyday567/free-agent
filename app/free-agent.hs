@@ -23,6 +23,7 @@ import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (unless)
 import Control.Monad.State (runStateT)
 import Data.Foldable (traverse_)
+import Data.IORef (IORef, newIORef, writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -282,11 +283,15 @@ runHermes cfg = do
       sessionFile = fromMaybe (defaultSessionFile (hcRoot cfg) names) (hcSessionFile cfg)
       -- F3: inject agent name so the LLM knows its posting identity
       framedPrompt = "Your name on the free-agent bus is " <> agentName <> ". Use this name for all --from fields and cursor checks.\n\n" <> systemPrompt
+      transcriptPath = (hcRoot cfg) </> ".transcripts" </> T.unpack agentName <> ".jsonl"
   createDirectoryIfMissing True (takeDirectory sessionFile)
-  let host = hermesHostBatch agentName framedPrompt (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile
+  transcriptRef <- newIORef 0
+  let host = hermesHostBatch agentName framedPrompt (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile (Just (transcriptRef, transcriptPath))
       seat = hostSeat host
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
-      handle stored = filter keepReplyHermes <$> runOneSeat seat stored
+      handle stored = do
+        writeIORef transcriptRef (fromIntegral (stamp stored))
+        filter keepReplyHermes <$> runOneSeat seat stored
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
   runAgentLoop agentName names (hcRoot cfg) mQuiesce handle
 
@@ -297,8 +302,10 @@ runKimi cfg = do
   let names = kcNames cfg
       agentName = agentNameOf names
       sessionFile = fromMaybe (defaultSessionFile (kcRoot cfg) names) (kcSessionFile cfg)
+      transcriptPath = (kcRoot cfg) </> ".transcripts" </> T.unpack agentName <> ".jsonl"
   createDirectoryIfMissing True (takeDirectory sessionFile)
-  let host0 = kimiHost agentName (kcModel cfg) (kcProvider cfg) sessionFile
+  transcriptRef <- newIORef 0
+  let host0 = kimiHost agentName (kcModel cfg) (kcProvider cfg) sessionFile (Just (transcriptRef, transcriptPath))
       host =
         host0
           { hostRun =
@@ -306,7 +313,9 @@ runKimi cfg = do
           }
       seat = hostSeat host
       mQuiesce = buildQuiesce (kcQuiesce cfg) (kcPitboss cfg)
-      handle stored = filter keepReplyHermes <$> runOneSeat seat stored
+      handle stored = do
+        writeIORef transcriptRef (fromIntegral (stamp stored))
+        filter keepReplyHermes <$> runOneSeat seat stored
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
   runAgentLoop agentName names (kcRoot cfg) mQuiesce handle
 
@@ -391,4 +400,3 @@ runCommand cfg = do
         pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
   TIO.putStrLn $ "   command: " <> T.pack (ccCmd cfg) <> " " <> T.intercalate " " (map T.pack (ccArgs cfg))
   runAgentLoop agentName names (ccRoot cfg) mQuiesce handle
-

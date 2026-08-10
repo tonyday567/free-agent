@@ -22,7 +22,7 @@ module Free.Agent.Bus.Cli
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost)
-import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, parsePost, stamp, timeStamp, stamped)
+import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, parsePost, stamp, stamped, timeStamp)
 import Circuit.Agent.Mark (isHalt, markOf)
 import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -41,8 +41,8 @@ import Free.Agent.Bus.File (readCursor, writeCursor)
 import Options.Applicative
 import System.Directory (doesFileExist, listDirectory)
 import System.Exit (exitFailure)
-import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.FSNotify (Event (..), watchDir, withManager)
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO
   ( BufferMode (LineBuffering),
     Handle,
@@ -359,7 +359,9 @@ runStatus root threshold = do
             <> from (stamped lastPost)
             <> " at "
             <> T.pack (show (timeStamp lastPost))
-            <> " (" <> fmtAge age <> " ago)"
+            <> " ("
+            <> fmtAge age
+            <> " ago)"
         )
   entries <- listDirectory root
   let names = sort [n | e <- entries, Just n <- [T.stripPrefix ".cursor-" (T.pack e)]]
