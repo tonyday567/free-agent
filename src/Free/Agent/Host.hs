@@ -236,9 +236,8 @@ hermesCli model provider yolo sessionFile mTranscript =
       cliStdin = const "",
       cliSessionFile = sessionFile,
       cliSessionId = parseSessionId,
-      cliStale = \code out ->
-        code /= ExitSuccess
-          || "No session found matching" `T.isInfixOf` out
+      cliStale = \_ out ->
+        "No session found matching" `T.isInfixOf` out
           || "Session not found" `T.isInfixOf` out,
       cliScrub = cleanCliOut,
       cliStderr = StderrMerge,

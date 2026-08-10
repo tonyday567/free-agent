@@ -49,6 +49,7 @@ import Circuit.Agent.Query
     synthShard,
     synthesisPosts,
   )
+import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, catch, try)
 import Control.Monad (void, when)
 import Data.ByteString qualified as BS
@@ -265,15 +266,20 @@ hermesCli model provider sessionFile =
       cliStdin = const "",
       cliSessionFile = sessionFile,
       cliSessionId = parseSessionId,
-      cliStale = \code out ->
-        code /= ExitSuccess
-          || "No session found matching" `T.isInfixOf` out
+      cliStale = \_code out ->
+        "No session found matching" `T.isInfixOf` out
           || "Session not found" `T.isInfixOf` out,
       cliScrub = cleanCliOut,
       cliStderr = StderrMerge,
       cliStderrTee = Nothing,
       cliTranscript = Nothing
     }
+
+-- | Maximum retries for transient failures when resuming a session.
+-- A transient failure (non-zero exit, not stale) is retried with the
+-- same session id before giving up.
+cliMaxRetries :: Int
+cliMaxRetries = 3
 
 -- | One query against a CLI agent.
 -- First call (or no stored session) runs fresh; subsequent calls resume the
@@ -290,12 +296,42 @@ cliQuery cli prompt = do
       (code, raw, routedOut, elapsed) <- run t0 (Just sid)
       if cliStale cli code raw
         then fresh t0
-        else do
-          let mSid' = cliSessionId cli raw
-          for_ mSid' (writeStoredSession (cliSessionFile cli))
-          writeTranscript t0 code raw elapsed mSid'
-          pure (cliScrub cli routedOut)
+        else
+          if code /= ExitSuccess
+            then retryWithSession t0 sid 1
+            else do
+              let mSid' = cliSessionId cli raw
+              for_ mSid' (writeStoredSession (cliSessionFile cli))
+              writeTranscript t0 code raw elapsed mSid'
+              pure (cliScrub cli routedOut)
   where
+    -- Retry a transient failure with the same session id.  After
+    -- 'cliMaxRetries' attempts without success the error is propagated
+    -- upward to the seat loop (which posts 🔴 to pitboss).
+    retryWithSession t0' sid attempt
+      | attempt > cliMaxRetries =
+          fail
+            ( "cliQuery: "
+                <> cliCommand cli
+                <> " exited non-zero "
+                <> show cliMaxRetries
+                <> " times; last attempt with session "
+                <> T.unpack (T.take 20 sid)
+            )
+      | otherwise = do
+          -- Linear back-off: 100ms * attempt.
+          threadDelay (100000 * attempt)
+          (code', raw', routedOut', elapsed') <- run t0' (Just sid)
+          if cliStale cli code' raw'
+            then fresh t0'
+            else
+              if code' /= ExitSuccess
+                then retryWithSession t0' sid (attempt + 1)
+                else do
+                  let mSid' = cliSessionId cli raw'
+                  for_ mSid' (writeStoredSession (cliSessionFile cli))
+                  writeTranscript t0' code' raw' elapsed' mSid'
+                  pure (cliScrub cli routedOut')
     -- (exit code, raw merged out<>err pre-policy, policy-routed output, elapsed ms).
     -- cliStale and scrape act on the raw merged stream: stale notices and
     -- resume hints live on stderr for some CLIs, and 'StderrDrop' must not

@@ -1445,4 +1445,170 @@ main = do
     removePathForcibly nobusDir
     removePathForcibly busDir
 
+  -------------------------------------------------------------------------
+  -- Resume fix oracle (B6): transient failure retries with same session id;
+  -- stale session falls back to fresh.  Regression guard: if someone
+  -- restores `cliStale = \code _ -> code /= ExitSuccess`, test (a) fails
+  -- because the transient failure triggers fresh instead of retry.
+  -------------------------------------------------------------------------
+  putStrLn "Resume fix (B6)"
+
+  -- Test (a): transient failure → retry with same session id
+  do
+    tmp <- getTemporaryDirectory
+    let dir = tmp </> "free-agent-b6a"
+        script = dir </> "fake.sh"
+        sf = dir </> "session"
+        attemptFile = dir </> "attempt"
+    removePathForcibly dir
+    createDirectoryIfMissing True dir
+    -- Seed the session file with a known id.
+    TIO.writeFile sf "test-sid-b6a"
+    -- Fake CLI: fails on first call (exit 1), succeeds on second,
+    -- echoes argv so we can inspect the --resume flag.
+    TIO.writeFile script $
+      T.pack $
+        unlines
+          [ "#!/bin/sh",
+            "ATTEMPT=$(cat " <> attemptFile <> " 2>/dev/null || echo 0)",
+            "echo 'session_id: fake-b6a'",
+            "if [ \"$ATTEMPT\" -eq 0 ]; then",
+            "  echo 1 > " <> attemptFile,
+            "  exit 1",
+            "fi",
+            "echo \"argv:$*\"",
+            "printf 'stdin:'",
+            "cat"
+          ]
+    let cli =
+          Cli
+            { cliCommand = "/bin/sh",
+              cliArgv = \_ mSid -> [script] <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
+              cliStdin = T.unpack,
+              cliSessionFile = sf,
+              cliSessionId = parseSessionId,
+              cliStale = \_ out ->
+                "No session found matching" `T.isInfixOf` out
+                  || "Session not found" `T.isInfixOf` out,
+              cliScrub = id,
+              cliStderr = StderrMerge,
+              cliStderrTee = Nothing,
+              cliTranscript = Nothing
+            }
+    result <- cliQuery cli "hello-b6a"
+    -- Second invocation must carry the --resume flag with our seeded id.
+    assert "B6a: retry preserves session id in --resume" $
+      "--resume test-sid-b6a" `T.isInfixOf` result
+    -- Session file is re-persisted with the scraped id on success (standard).
+    stored <- TIO.readFile sf
+    assert "B6a: .sid updated with scraped id after retry success" $
+      T.strip stored == "fake-b6a"
+    removePathForcibly dir
+
+  -- Test (b): stale session → fresh, new .sid written
+  do
+    tmp <- getTemporaryDirectory
+    let dir = tmp </> "free-agent-b6b"
+        script = dir </> "fake.sh"
+        sf = dir </> "session"
+    removePathForcibly dir
+    createDirectoryIfMissing True dir
+    TIO.writeFile sf "old-stale-sid"
+    -- Fake CLI: returns a stale-session message, then a fresh id.
+    TIO.writeFile script $
+      T.pack $
+        unlines
+          [ "#!/bin/sh",
+            "echo 'No session found matching old-stale-sid'",
+            "echo 'session_id: fresh-b6b'",
+            "echo \"argv:$*\"",
+            "printf 'stdin:'",
+            "cat"
+          ]
+    let cli =
+          Cli
+            { cliCommand = "/bin/sh",
+              cliArgv = \_ mSid -> [script] <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
+              cliStdin = T.unpack,
+              cliSessionFile = sf,
+              cliSessionId = parseSessionId,
+              cliStale = \_ out ->
+                "No session found matching" `T.isInfixOf` out
+                  || "Session not found" `T.isInfixOf` out,
+              cliScrub = id,
+              cliStderr = StderrMerge,
+              cliStderrTee = Nothing,
+              cliTranscript = Nothing
+            }
+    result <- cliQuery cli "hello-b6b"
+    -- Must NOT carry the old --resume flag (it was a fresh call).
+    assert "B6b: stale session does NOT resume old sid" $
+      not ("--resume old-stale-sid" `T.isInfixOf` result)
+    -- Session file must be updated with the new id.
+    stored <- TIO.readFile sf
+    assert "B6b: .sid updated to fresh session id" $
+      T.strip stored == "fresh-b6b"
+    removePathForcibly dir
+
+  -- Test (c): mutation guard — code-is-stale regression
+  --
+  -- Same pattern as (a) but with the OLD hermesCli cliStale that treats
+  -- any non-zero exit as stale.  A transient error then triggers a fresh
+  -- call instead of a retry, and the old session id is dropped.
+  -- If someone regresses hermesCli back to code-is-stale, this test
+  -- catches it by asserting no --resume on the second call.
+  do
+    tmp <- getTemporaryDirectory
+    let dir = tmp </> "free-agent-b6c"
+        script = dir </> "fake.sh"
+        sf = dir </> "session"
+        attemptFile = dir </> "attempt"
+    removePathForcibly dir
+    createDirectoryIfMissing True dir
+    TIO.writeFile sf "should-not-survive"
+    TIO.writeFile script $
+      T.pack $
+        unlines
+          [ "#!/bin/sh",
+            "ATTEMPT=$(cat " <> attemptFile <> " 2>/dev/null || echo 0)",
+            "echo 'session_id: fresh-b6c'",
+            "if [ \"$ATTEMPT\" -eq 0 ]; then",
+            "  echo 1 > " <> attemptFile,
+            "  exit 1",
+            "fi",
+            "echo \"argv:$*\"",
+            "printf 'stdin:'",
+            "cat"
+          ]
+    -- DELIBERATE regression: code /= ExitSuccess makes all errors stale.
+    let cli =
+          Cli
+            { cliCommand = "/bin/sh",
+              cliArgv = \_ mSid -> [script] <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
+              cliStdin = T.unpack,
+              cliSessionFile = sf,
+              cliSessionId = parseSessionId,
+              cliStale = \code out ->
+                code /= ExitSuccess
+                  || "No session found matching" `T.isInfixOf` out
+                  || "Session not found" `T.isInfixOf` out,
+              cliScrub = id,
+              cliStderr = StderrMerge,
+              cliStderrTee = Nothing,
+              cliTranscript = Nothing
+            }
+    result <- cliQuery cli "hello-b6c"
+    -- With code-is-stale, the first invocation's exit 1 triggers stale →
+    -- fresh.  The second call (fresh) must NOT carry --resume.
+    assert "B6c: code-is-stale triggers fresh, old sid dropped" $
+      not ("--resume should-not-survive" `T.isInfixOf` result)
+    -- Fresh call DID produce output (the reply).
+    assert "B6c: fresh call produced reply" $
+      "stdin:hello-b6c" `T.isInfixOf` result
+    -- .sid was updated to the new session id from the fresh call.
+    stored <- TIO.readFile sf
+    assert "B6c: .sid updated to fresh session id" $
+      T.strip stored == "fresh-b6c"
+    removePathForcibly dir
+
   putStrLn "All tests passed"
