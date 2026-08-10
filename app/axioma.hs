@@ -1418,6 +1418,7 @@ main = do
     let freeAgentBin =
           myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent"
     -- Test: no env var, no log.jsonl → exit 1
+    unsetEnv "FREE_AGENT_BUS_ROOT"
     (code1, out1, _) <-
       readProcessWithExitCode
         freeAgentBin
