@@ -309,7 +309,7 @@ runKimi cfg = do
       host =
         host0
           { hostRun =
-              \bodies -> hostRun host0 (map (\b -> systemPrompt <> "\n\nUser message:\n" <> b) bodies)
+              hostRun host0 . map (\b -> systemPrompt <> "\n\nUser message:\n" <> b)
           }
       seat = hostSeat host
       mQuiesce = buildQuiesce (kcQuiesce cfg) (kcPitboss cfg)
