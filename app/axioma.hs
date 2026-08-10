@@ -1522,6 +1522,48 @@ main = do
     removePathForcibly root
 
   -------------------------------------------------------------------------
+  -- Empty-sentinel drop (B8): hermes's '(empty)' sentinel becomes truly
+  -- empty via cleanCliOut, then the B2 filter drops it.  One CLI protocol
+  -- token — not a content denylist.
+  --
+  -- Mutation guard: remove the sentinel line from cleanCliOut → '(empty)'
+  -- body appears in the log → test (b) fails.
+  -------------------------------------------------------------------------
+  putStrLn "Empty-sentinel drop (B8)"
+
+  -- Test (a): cleanCliOut drops the '(empty)' sentinel line.
+  do
+    let result = cleanCliOut "(empty)\n"
+    assert "B8a: cleanCliOut drops (empty) sentinel" $
+      T.null (T.strip result)
+
+  -- Test (b): handler returning (empty) → scrubbed to empty → B2 drop → no post.
+  -- Uses cleanCliOut to simulate the cliHost scrubbing path.
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-b8-empty"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    _ <- postLocal root (mkPost "human" ["hermes"] "ping")
+    _ <- postLocal root (mkPost "human" ["hermes"] "real")
+    _ <- postLocal root (mkPost "human" ["hermes"] (markGlyph Landed <> " done"))
+    bus <- openBus root
+    let host = mkHost "hermes" $ \ws ->
+          pure [cleanCliOut (if "ping" `elem` ws then "(empty)" else T.unwords ws)]
+    runSeatBus bus "hermes" ["hermes"] (hostSeat host)
+    closeBus bus
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+        fromHermes = [stamped s | s <- parsed, from (stamped s) == "hermes"]
+        hermesBodies = map body fromHermes
+    -- '(empty)' scrubbed to empty → B2 filter drops → no post.
+    assert "B8b: (empty) sentinel scrubbed then dropped — no post" $
+      not (any (\b -> "(empty)" `T.isInfixOf` b) hermesBodies)
+    assert "B8b: content reply still posts" $
+      "real" `elem` hermesBodies
+    removePathForcibly root
+
+  -------------------------------------------------------------------------
   -- Resume fix oracle (B6): transient failure retries with same session id;
   -- stale session falls back to fresh.  Regression guard: if someone
   -- restores `cliStale = \code _ -> code /= ExitSuccess`, test (a) fails

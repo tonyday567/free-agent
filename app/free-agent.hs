@@ -230,6 +230,7 @@ scrubReply p =
       clean = filter (not . noise) ls
       noise l =
         T.null l
+          || "(empty)" == l
           || "↪" `T.isPrefixOf` l
           || "session_id:" `T.isPrefixOf` l
           || "Warning:" `T.isPrefixOf` l

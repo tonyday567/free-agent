@@ -444,6 +444,7 @@ cleanCliOut =
   where
     keep l
       | T.null l = False
+      | "(empty)" == l = False
       | "session_id:" `T.isPrefixOf` l = False
       | "Warning:" `T.isPrefixOf` l = False
       | "Resumed session" `T.isInfixOf` l = False
