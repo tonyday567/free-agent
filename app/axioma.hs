@@ -27,7 +27,7 @@ import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, 
 import Control.Monad (when)
 import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.IORef (newIORef, writeIORef)
-import Data.List (inits, sort)
+import Data.List (inits, sort, sortOn)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -1744,47 +1744,51 @@ main = do
   -- Test (a): concurrent posters produce a contiguous total order.
   do
     tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-daemon-order"
-        posters = ["a", "b", "c", "d"]
+    let posters = ["a", "b", "c", "d"]
         postsPerPoster = 5
-    removePathForcibly root
-    createDirectoryIfMissing True root
-    tid <- forkIO (runDaemon @Text root)
-    threadDelay 100_000
-    mvars <-
-      mapM
-        ( \name -> do
-            mv <- newEmptyMVar
-            _ <- forkIO $ do
-              rs <-
-                mapM
-                  ( \i ->
-                      let body = name <> "-" <> T.pack (show (i :: Int))
-                       in postViaDaemon root (mkPost name [name] body)
-                  )
-                  [1 .. postsPerPoster]
-              putMVar mv rs
-            pure mv
-        )
-        posters
-    collected <- mapM takeMVar mvars
-    killThread tid
-    let receipts = concat collected
         expectedBodies =
           [name <> "-" <> T.pack (show i) | name <- posters, i <- [1 .. postsPerPoster]]
-    content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (parseLine @Text) (T.lines content)
-        ids = map stamp parsed
-        bodies = map (body . stamped) parsed
-    assert "daemon total order: contiguous ids from 0" $
-      sort ids == [0 .. fromIntegral (length posters * postsPerPoster - 1)]
-    assert "daemon total order: every body present exactly once" $
-      sort bodies == sort expectedBodies
-    assert "daemon total order: receipts equal log entries" $
-      sort (map stamp receipts) == sort ids
-    assert "daemon total order: timestamps monotone by id" $
-      and (zipWith (<=) (map timeStamp parsed) (drop 1 (map timeStamp parsed)))
-    removePathForcibly root
+        trialRoot n = tmp </> ("free-agent-daemon-order-" <> show (n :: Int))
+        runTrial n = do
+          let root = trialRoot n
+          removePathForcibly root
+          createDirectoryIfMissing True root
+          tid <- forkIO (runDaemon @Text root)
+          threadDelay 100_000
+          mvars <-
+            mapM
+              ( \name -> do
+                  mv <- newEmptyMVar
+                  _ <- forkIO $ do
+                    rs <-
+                      mapM
+                        ( \i ->
+                            let body = name <> "-" <> T.pack (show (i :: Int))
+                             in postViaDaemon root (mkPost name [name] body)
+                        )
+                        [1 .. postsPerPoster]
+                    putMVar mv rs
+                  pure mv
+              )
+              posters
+          collected <- mapM takeMVar mvars
+          killThread tid
+          let receipts = concat collected
+          content <- TIO.readFile (root </> "log.jsonl")
+          let parsed = mapMaybe (parseLine @Text) (T.lines content)
+              ids = map stamp parsed
+              bodies = map (body . stamped) parsed
+          assert ("daemon total order: contiguous ids from 0 (trial " <> show n <> ")") $
+            sort ids == [0 .. fromIntegral (length posters * postsPerPoster - 1)]
+          assert ("daemon total order: every body present exactly once (trial " <> show n <> ")") $
+            sort bodies == sort expectedBodies
+          assert ("daemon total order: receipts equal log entries (trial " <> show n <> ")") $
+            sort (map stamp receipts) == sort ids
+          assert ("daemon total order: timestamps monotone by id (trial " <> show n <> ")") $
+            and (zipWith (<=) (map timeStamp parsed) (drop 1 (map timeStamp parsed)))
+          pure root
+    roots <- mapM runTrial [1 .. 5]
+    mapM_ removePathForcibly roots
 
   -- Test (b): malformed FIFO input is skipped; the daemon survives.
   do
@@ -1810,5 +1814,112 @@ main = do
     assert "daemon log contains exactly the good post" $
       length parsed == 1
     removePathForcibly root
+
+  -------------------------------------------------------------------------
+  -- Tensor/par probe (⊗/⅋): the stamping office as a connective toggle.
+  --
+  -- Two exchanges share a single checker. The bodies are invariant under
+  -- permutation (⊗), but a stateful checker that reads in stamp order sees
+  -- the interleaving (⅋). With the daemon on, one canonical order wins;
+  -- with self-stamping, two different submission orders produce two
+  -- different checker states.
+  --
+  -- Mutation guard: if postLocal ignores submission order (e.g., stamps by
+  -- time), the AB/BA aggregates would be equal and the probe collapses.
+  -------------------------------------------------------------------------
+  putStrLn "Tensor/par probe"
+
+  do
+    tmp <- getTemporaryDirectory
+    let exchangeA = [("a1", "A1"), ("a2", "A2")]
+        exchangeB = [("b1", "B1"), ("b2", "B2")]
+        orderedAB = exchangeA <> exchangeB
+        orderedBA = exchangeB <> exchangeA
+        allBodies = sort (map snd orderedAB)
+        checkerOf posts =
+          T.intercalate "|" $
+            map (body . stamped) (sortOn stamp posts)
+        runViaDaemon :: FilePath -> [(Text, Text)] -> IO Text
+        runViaDaemon root posts = do
+          tid <- forkIO (runDaemon @Text root)
+          threadDelay 100_000
+          stamped <-
+            mapM
+              ( \(sender, b) ->
+                  postViaDaemon root (mkPost sender ["checker"] b)
+              )
+              posts
+          killThread tid
+          pure (checkerOf stamped)
+        runViaPostLocal :: FilePath -> [(Text, Text)] -> IO Text
+        runViaPostLocal root posts = do
+          stamped <-
+            mapM
+              ( \(sender, b) ->
+                  postLocal root (mkPost sender ["checker"] b)
+              )
+              posts
+          pure (checkerOf stamped)
+        invariantSet :: Text -> [Stamped Text] -> Bool
+        invariantSet recipient posts =
+          sort (map (body . stamped) (filter (deliversToRecipient recipient) posts))
+            == allBodies
+          where
+            deliversToRecipient r s = r `elem` to (stamped s)
+
+    -- Office on: daemon imposes a canonical order; repeated trials agree.
+    officeOnTrials <-
+      mapM
+        ( \n -> do
+            let root = tmp </> ("free-agent-probe-on-" <> show (n :: Int))
+            removePathForcibly root
+            createDirectoryIfMissing True root
+            ag <- runViaDaemon root orderedAB
+            content <- TIO.readFile (root </> "log.jsonl")
+            let parsed = mapMaybe (parseLine @Text) (T.lines content)
+            assert ("daemon-on invariant for trial " <> show n) $
+              invariantSet "checker" parsed
+            pure ag
+        )
+        [1 .. 5]
+    case officeOnTrials of
+      (on0 : _) -> do
+        assert "daemon-on trials all agree" $
+          all (== on0) (drop 1 officeOnTrials)
+
+        -- Office off, order AB: checker sees A before B.
+        let rootAB = tmp </> "free-agent-probe-off-ab"
+        removePathForcibly rootAB
+        createDirectoryIfMissing True rootAB
+        agAB <- runViaPostLocal rootAB orderedAB
+        contentAB <- TIO.readFile (rootAB </> "log.jsonl")
+        let parsedAB = mapMaybe (parseLine @Text) (T.lines contentAB)
+        assert "office-off AB invariant" $ invariantSet "checker" parsedAB
+
+        -- Office off, order BA: checker sees B before A.
+        let rootBA = tmp </> "free-agent-probe-off-ba"
+        removePathForcibly rootBA
+        createDirectoryIfMissing True rootBA
+        agBA <- runViaPostLocal rootBA orderedBA
+        contentBA <- TIO.readFile (rootBA </> "log.jsonl")
+        let parsedBA = mapMaybe (parseLine @Text) (T.lines contentBA)
+        assert "office-off BA invariant" $ invariantSet "checker" parsedBA
+
+        -- The witness: shared checker is order-sensitive.
+        assert "office-off AB differs from BA (shared checker is order-sensitive)" $
+          agAB /= agBA
+
+        -- The daemon's canonical order matches the AB submission order used above.
+        assert "daemon-on aggregate matches office-off AB" $
+          on0 == agAB
+
+        mapM_
+          removePathForcibly
+          [ tmp </> ("free-agent-probe-on-" <> show n)
+          | n <- [1 .. 5] :: [Int]
+          ]
+        removePathForcibly rootAB
+        removePathForcibly rootBA
+      _ -> assert "daemon-on produced at least one trial" False
 
   putStrLn "All tests passed"
