@@ -22,11 +22,11 @@ module Free.Agent.Seat
   )
 where
 
-import Circuit (composeEnds)
 import Circuit.Agent
   ( Agent,
     Post,
     Shard,
+    composeShard,
     runAgentM,
   )
 import Circuit.Agent.Tensor
@@ -119,7 +119,7 @@ bundleSeat :: ([[Post Text]] -> [Post Text]) -> [FreeSeat] -> FreeSeat
 bundleSeat = fanInSeat
 
 -- | Fold a free seat term into a shard by interpreting each generator and
--- composing the resulting shards with 'composeEnds'.
+-- composing the resulting shards with 'composeShard'.
 --
 -- The result lives in 'StateT [Post Text] IO' so that real process hosts can share
 -- the same buffer monad as pure pipeline stages.
@@ -130,7 +130,7 @@ interpretSeat (SeatPipeline p) = pipelineShard p
 interpretSeat (SeatHost h) = hostShard h
 interpretSeat SeatSilent = silentShard
 interpretSeat (SeatCompose g f) =
-  composeEnds (interpretSeat f) (interpretSeat g)
+  composeShard (interpretSeat f) (interpretSeat g)
 interpretSeat (SeatFork f) = interpretSeat f
 interpretSeat (SeatAwait f g) =
   awaitShard (interpretSeat f) (interpretSeat g)

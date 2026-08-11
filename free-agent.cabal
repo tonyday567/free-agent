@@ -101,6 +101,7 @@ executable free-agent-axioma
   hs-source-dirs: app
   main-is: axioma.hs
   build-depends:
+    async >=2.2 && <2.3,
     base >=4.18 && <5,
     circuits,
     circuits-agent,
@@ -109,8 +110,10 @@ executable free-agent-axioma
     free-agent,
     mtl >=2.3 && <2.4,
     process >=1.6 && <1.7,
+    stm >=2.5 && <2.6,
     string-diagrams,
     text >=2.0 && <3,
+    time >=1.12 && <1.15,
 
 executable free-agent
   import: ghc-options-stanza

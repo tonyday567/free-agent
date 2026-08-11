@@ -11,14 +11,25 @@
 -- turn boundaries, and the emit end blocks until a complete frame arrives.
 -- No polling; the timeouts here are deadlines around blocking reads, not
 -- backoff loops.
+--
+-- Turn correlation is content-decided, not geometry-decided.  Each addressed
+-- post is treated as an /ask/ whose bus 'stamp' is the correlation id.  The
+-- response post carries that id in its 'thread' and is addressed back to the
+-- asker.  Zero-frame and two-frame violations are reported as in-band
+-- diagnostic posts with the same ask id, so downstream consumers can detect
+-- them by the stamped output grammar rather than by timing.
 module Free.Agent.Connector
   ( ConnectorConfig (..),
     defaultConnectorConfig,
     runConnector,
+
+    -- * Turn handler (exported for oracles)
+    TurnResult (..),
+    runTurn,
   )
 where
 
-import Circuit.Agent (Name, Post (..), deliversTo, mkPost)
+import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost)
 import Circuit.Agent.Framing (Stamped (..))
 import Circuit.Agent.StdPorts
   ( ProcConfig (..),
@@ -33,6 +44,7 @@ import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically)
 import Control.Monad (unless, void)
+import Data.Foldable (traverse_)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -49,7 +61,11 @@ data ConnectorConfig = ConnectorConfig
     -- | Deadline (microseconds) for the repl's first frame.
     connStartupTimeout :: Int,
     -- | Deadline (microseconds) for one command's reply frame.
-    connCommandTimeout :: Int
+    connCommandTimeout :: Int,
+    -- | Microseconds to wait for a second frame after the first, used to
+    -- detect two-frame commits.  Should be short: the second frame, if it
+    -- belongs to the same turn, is already enqueued by the pumper.
+    connExtraFrameTimeout :: Int
   }
 
 defaultConnectorConfig :: Name -> ConnectorConfig
@@ -64,7 +80,8 @@ defaultConnectorConfig name =
             procMarks = ghciMarks
           },
       connStartupTimeout = 180_000_000,
-      connCommandTimeout = 60_000_000
+      connCommandTimeout = 60_000_000,
+      connExtraFrameTimeout = 10_000
     }
 
 runConnector :: ConnectorConfig -> IO ()
@@ -109,29 +126,68 @@ processPosts cfg bus repl = go
   where
     name = connName cfg
     go [] = pure False
-    go (Stamped _pid _ts post : rest) = do
-      if deliversTo post [name] || name `elem` to post
+    go (stored : rest) = do
+      if deliversTo (stamped stored) [name] || name `elem` to (stamped stored)
         then do
-          let cmd = body post
+          let cmd = body (stamped stored)
           if cmd == "quit" || cmd == ":quit"
             then scribeIO bus (mkPost name [] "closing") >> pure True
             else do
-              hPutStrLn stderr $ "connector: " <> T.unpack (T.take 100 cmd)
-              commitText (procStdio repl) cmd
-              mOut <- timeout (connCommandTimeout cfg) (emitText (procStdio repl))
-              let outText = fromMaybe "<command deadline expired>" mOut
-              errText <- drainStderr (procStderr repl)
-              let reply =
-                    T.unlines
-                      [ "-- stdout --",
-                        outText,
-                        "",
-                        "-- stderr --",
-                        errText
-                      ]
-              void $ scribeIO bus (mkPost name [from post] reply)
+              replies <- runTurn cfg repl stored
+              traverse_ (scribeIO bus) replies
               go rest
         else go rest
+
+-- | The result of one critical-section turn, before scribing.
+data TurnResult
+  = -- | Exactly one response frame.
+    TurnOk Text
+  | -- | No frame arrived before the deadline.
+    TurnZeroFrame
+  | -- | More than one frame arrived for the same ask.
+    TurnMultiFrame [Text]
+  deriving (Eq, Show)
+
+-- | Run one critical-section turn for an addressed post.
+--
+-- The ask is identified by the incoming post's bus 'stamp'.  The response
+-- carries that id in its 'thread' and is addressed back to the asker.  This
+-- makes correlation content-decided: a dropped, doubled, or misordered frame
+-- is observable from the bus log, not inferred from pipe adjacency.
+runTurn ::
+  ConnectorConfig ->
+  ProcEnds Text Text Text ->
+  Stamped Text ->
+  IO [Post Text]
+runTurn cfg repl stored = do
+  let ask = stamped stored
+      asker = from ask
+      askId = stamp stored
+      name = connName cfg
+      stdio = procStdio repl
+
+  unless (T.null (body ask)) $ commitText stdio (body ask)
+
+  mFirst <- timeout (connCommandTimeout cfg) (emitText stdio)
+  case mFirst of
+    Nothing -> pure [stampedPost name asker askId "<zero-frame>"]
+    Just out -> do
+      mSecond <- timeout (connExtraFrameTimeout cfg) (emitText stdio)
+      case mSecond of
+        Nothing -> pure [replyPost name asker askId out]
+        Just out2 ->
+          pure
+            [ replyPost name asker askId out,
+              stampedPost name asker askId ("<extra-frame> " <> out2)
+            ]
+
+replyPost :: Name -> Name -> PostId -> Text -> Post Text
+replyPost name asker askId bodyText =
+  (mkPost name [asker] bodyText) {thread = [askId]}
+
+stampedPost :: Name -> Name -> PostId -> Text -> Post Text
+stampedPost name asker askId bodyText =
+  (mkPost name [asker] bodyText) {thread = [askId]}
 
 -- | Commit one 'Text' token through an 'Ends' conjoint.
 commitText :: Ends (Kleisli IO) Text b -> Text -> IO ()
