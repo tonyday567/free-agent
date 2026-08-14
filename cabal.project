@@ -6,7 +6,6 @@ packages:
   ../string-diagrams/string-diagrams.cabal
   ../circuits-parser/circuits-parser.cabal
   ../harpie/harpie.cabal
-  ../harpie-numhask/harpie-numhask.cabal
   ../numhask/numhask.cabal
   ../numhask-diff/numhask-diff.cabal
   ../process-stats/process-stats.cabal
