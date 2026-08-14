@@ -2,12 +2,11 @@ packages:
   ./free-agent.cabal
   ../circuits-agent/circuits-agent.cabal
   ../circuits/circuits.cabal
-  ../circuits-ad/circuits-ad.cabal
+  ../circuits-diff/circuits-diff.cabal
   ../string-diagrams/string-diagrams.cabal
   ../circuits-parser/circuits-parser.cabal
   ../harpie/harpie.cabal
   ../numhask/numhask.cabal
-  ../numhask-diff/numhask-diff.cabal
   ../process-stats/process-stats.cabal
   ../strings-svg/strings-svg.cabal
   ../chart-svg/chart-svg.cabal
