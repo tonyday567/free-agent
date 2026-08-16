@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Main (main) where
@@ -6,7 +7,7 @@ module Main (main) where
 import Circuit (Ends (..), close)
 import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), Shard, awaitA, branchesByIndex, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
-import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, parseTimeText, stamp, stamped)
+import Circuit.Agent.Framing (Stamped, pattern Stamped, frameStored, unframeStored, parseTimeText, stamp, stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, markGlyph, markOf)
 import Circuit.Agent.StdPorts (ProcEnds (..))
 import Circuit.Agent.Tensor
@@ -20,7 +21,7 @@ import Circuit.Category (Category (id, (.)), ObDict (..))
 import Circuit.Channel (Strength (..), Traced (..))
 import Circuit.Ends (endsK)
 import Circuit.Layer ((:~>))
-import Circuit.Poly (Mono, System (..), monoDir)
+import Circuit.Poly (Mono, System, system, monoDir)
 import Circuit.ChannelPoly (iterateSystem, runSystem)
 import Circuit.Poly.StringDiagram (SDiagram (..))
 import Circuit.Poly.StringDiagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
@@ -872,7 +873,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "diagram bridge"
   do
-    let sysN = System (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: System (->) Int (Mono Int Int)
+    let sysN = system (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: System (->) Int (Mono Int Int)
     assert "diagram step is runSystem's (put, get)" $
       diagramStep sysN 5 3 == (snd (runSystem sysN 5) 3, fst (runSystem sysN 5))
     assert "diagram steps mirror iterateSystem" $
@@ -909,7 +910,7 @@ main = do
       scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 2, 3, 4]
 
   do
-    let sysN = System (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: System (->) Int (Mono Int Int)
+    let sysN = system (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: System (->) Int (Mono Int Int)
     assert "register body with delay mirrors iterateSystem" $
       scan (mooreProcess sysN 0) [1 .. 5] == iterateSystem sysN 0 [1 .. 5]
 
@@ -1120,7 +1121,7 @@ main = do
 
   do
     let mkStored i ts f t body = case parseTimeText ts of
-          Just ts' -> Stamped {stamp = i, timeStamp = ts', stamped = Post f t [] body}
+          Just ts' -> Stamped (ts', i) (Post f t [] body)
           Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
@@ -1142,7 +1143,7 @@ main = do
 
   do
     let mkStored i ts f t body = case parseTimeText ts of
-          Just ts' -> Stamped {stamp = i, timeStamp = ts', stamped = Post f t [] body}
+          Just ts' -> Stamped (ts', i) (Post f t [] body)
           Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
@@ -1155,7 +1156,7 @@ main = do
 
   do
     let mkStored i ts f t body = case parseTimeText ts of
-          Just ts' -> Stamped {stamp = i, timeStamp = ts', stamped = Post f t [] body}
+          Just ts' -> Stamped (ts', i) (Post f t [] body)
           Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
@@ -1195,14 +1196,14 @@ main = do
     runSeatBus bus "echo" ["echo"] (hostSeat (mkHost "echo" (pure . map ("echo:" <>))))
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
     assert "seat replied to the work post with a thread edge" $
       case fromEcho of
         [p] -> body p == "echo:hello" && to p == ["human"] && thread p == [0]
         _ -> False
     assert "ids are coherent across postLocal and the seat scribe" $
-      map stamp parsed == [0, 1, 2]
+      map (snd . stamp) parsed == [0, 1, 2]
     assert "the halt mark got silence, not a reply" $
       length fromEcho == 1
 
@@ -1228,7 +1229,7 @@ main = do
     runSeatBus bus "fragile" ["fragile"] (hostSeat fragileHost)
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromFragile = [stamped s | s <- parsed, from (stamped s) == "fragile"]
         escalations = filter (maybe False isEscalate . markOf) fromFragile
     assert "seat replies to the first post" $
@@ -1240,7 +1241,7 @@ main = do
     assert "seat replies to the third post after a failure" $
       any (\p -> body p == "fragile:world" && to p == ["human"] && thread p == [2]) fromFragile
     assert "ids are coherent across postLocal, replies, and escalation" $
-      map stamp parsed == [0, 1, 2, 3, 4, 5, 6]
+      map (snd . stamp) parsed == [0, 1, 2, 3, 4, 5, 6]
 
   -------------------------------------------------------------------------
   -- Bus seat self-halt (tail-chatter, R3c): a seat's own 🔵 stops the loop.
@@ -1275,7 +1276,7 @@ main = do
     runSeatBus bus "echo" ["echo"] (hostSeat host)
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
     assert "a 🟢 reply lands the exchange but the seat hosts more" $
       any (\p -> body p == markGlyph Landed <> " task done" && thread p == [0]) fromEcho
@@ -1285,7 +1286,7 @@ main = do
     assert "no reply after the stand-down (tail-chatter)" $
       not (any (\p -> "ping" `T.isInfixOf` body p) fromEcho)
     assert "ids are coherent: 5 planted + 3 replies, then quiet" $
-      map stamp parsed == [0, 1, 2, 3, 4, 5, 6, 7]
+      map (snd . stamp) parsed == [0, 1, 2, 3, 4, 5, 6, 7]
 
   -------------------------------------------------------------------------
   -- Multi-seat card meeting: two FreeSeats share a subscription on the bus
@@ -1314,7 +1315,7 @@ main = do
     takeMVar doneBeta
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromAlpha = [stamped s | s <- parsed, from (stamped s) == "alpha"]
         fromBeta = [stamped s | s <- parsed, from (stamped s) == "beta"]
     assert "alpha replied to the seed" $
@@ -1326,7 +1327,7 @@ main = do
         [p] -> body p == "beta:discuss" && to p == ["human"] && thread p == [0]
         _ -> False
     assert "ids are coherent across postLocal and seat scribes" $
-      map stamp parsed == [0, 1, 2, 3]
+      map (snd . stamp) parsed == [0, 1, 2, 3]
     assert "the halt mark got silence from every seat" $
       length (fromAlpha ++ fromBeta) == 2
 
@@ -1342,7 +1343,7 @@ main = do
     let root = tmp </> "free-agent-tail-axioma"
         path = root </> "log.jsonl"
         mkStored i ts f t b = case parseTimeText ts of
-          Just ts' -> Stamped {stamp = i, timeStamp = ts', stamped = Post f t [] b}
+          Just ts' -> Stamped (ts', i) (Post f t [] b)
           Nothing -> error $ "bad timestamp: " <> show ts
         frame i ts f t b = frameStored @Text (mkStored i ts f t b)
     removePathForcibly root
@@ -1404,11 +1405,11 @@ main = do
     -- Test 1: postLocal on a real bus works
     stored <- postLocal busRoot (mkPost "verify" [] "works")
     assert "post to an existing bus succeeds" $
-      stamp stored == 1
+      snd (stamp stored) == 1
     -- Test 2: postLocal on a non-bus directory creates one (existing behavior)
     stored2 <- postLocal badRoot (mkPost "verify" [] "also-works")
     assert "postLocal creates bus when absent (library, not CLI)" $
-      stamp stored2 == 0
+      snd (stamp stored2) == 0
     removePathForcibly busRoot
     removePathForcibly badRoot
 
@@ -1448,10 +1449,10 @@ main = do
     unsetEnv "FREE_AGENT_BUS_ROOT"
     assert "CLI post with FREE_AGENT_BUS_ROOT exits 0" $
       code2 == ExitSuccess
-    let parsed = parseLine @Text (T.strip (T.pack out2))
+    let parsed = unframeStored @Text (T.strip (T.pack out2))
     assert "CLI post lands on the correct bus" $
       case parsed of
-        Just s -> stamp s >= 0 && body (stamped s) == "env-var-works"
+        Just s -> snd (stamp s) >= 0 && body (stamped s) == "env-var-works"
         Nothing -> False
     removePathForcibly nobusDir
     removePathForcibly busDir
@@ -1483,7 +1484,7 @@ main = do
     runSeatBus bus "echo" ["echo"] (hostSeat host)
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
         echoBodies = map body fromEcho
     -- Content replies land: "hello", "world".
@@ -1521,7 +1522,7 @@ main = do
     runSeatBus bus "silent" ["silent"] (hostSeat host)
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromSilent = [stamped s | s <- parsed, from (stamped s) == "silent"]
     -- Empty-body post is dropped.
     assert "B2b: empty-body post dropped" $
@@ -1563,7 +1564,7 @@ main = do
     runSeatBus bus "hermes" ["hermes"] (hostSeat host)
     closeBus bus
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromHermes = [stamped s | s <- parsed, from (stamped s) == "hermes"]
         hermesBodies = map body fromHermes
     -- '(empty)' scrubbed to empty → B2 filter drops → no post.
@@ -1783,17 +1784,17 @@ main = do
           killThread tid
           let receipts = concat collected
           content <- TIO.readFile (root </> "log.jsonl")
-          let parsed = mapMaybe (parseLine @Text) (T.lines content)
-              ids = map stamp parsed
+          let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+              ids = map (snd . stamp) parsed
               bodies = map (body . stamped) parsed
           assert ("daemon total order: contiguous ids from 0 (trial " <> show n <> ")") $
             sort ids == [0 .. fromIntegral (length posters * postsPerPoster - 1)]
           assert ("daemon total order: every body present exactly once (trial " <> show n <> ")") $
             sort bodies == sort expectedBodies
           assert ("daemon total order: receipts equal log entries (trial " <> show n <> ")") $
-            sort (map stamp receipts) == sort ids
+            sort (map (snd . stamp) receipts) == sort ids
           assert ("daemon total order: timestamps monotone by id (trial " <> show n <> ")") $
-            and (zipWith (<=) (map timeStamp parsed) (drop 1 (map timeStamp parsed)))
+            and (zipWith (<=) (map (fst . stamp) parsed) (drop 1 (map (fst . stamp) parsed)))
           pure root
     roots <- mapM runTrial [1 .. 5]
     mapM_ removePathForcibly roots
@@ -1816,9 +1817,9 @@ main = do
     assert "daemon survives garbage input" $
       body (stamped stored) == "ok"
     assert "daemon garbage survivor gets id 0" $
-      stamp stored == 0
+      snd (stamp stored) == 0
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (parseLine @Text) (T.lines content)
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
     assert "daemon log contains exactly the good post" $
       length parsed == 1
     removePathForcibly root
@@ -1846,7 +1847,7 @@ main = do
         allBodies = sort (map snd orderedAB)
         checkerOf posts =
           T.intercalate "|" $
-            map (body . stamped) (sortOn stamp posts)
+            map (body . stamped) (sortOn (snd . stamp) posts)
         runViaDaemon :: FilePath -> [(Text, Text)] -> IO Text
         runViaDaemon root posts = do
           tid <- forkIO (runDaemon @Text root)
@@ -1884,7 +1885,7 @@ main = do
             createDirectoryIfMissing True root
             ag <- runViaDaemon root orderedAB
             content <- TIO.readFile (root </> "log.jsonl")
-            let parsed = mapMaybe (parseLine @Text) (T.lines content)
+            let parsed = mapMaybe (unframeStored @Text) (T.lines content)
             assert ("daemon-on invariant for trial " <> show n) $
               invariantSet "checker" parsed
             pure ag
@@ -1901,7 +1902,7 @@ main = do
         createDirectoryIfMissing True rootAB
         agAB <- runViaPostLocal rootAB orderedAB
         contentAB <- TIO.readFile (rootAB </> "log.jsonl")
-        let parsedAB = mapMaybe (parseLine @Text) (T.lines contentAB)
+        let parsedAB = mapMaybe (unframeStored @Text) (T.lines contentAB)
         assert "office-off AB invariant" $ invariantSet "checker" parsedAB
 
         -- Office off, order BA: checker sees B before A.
@@ -1910,7 +1911,7 @@ main = do
         createDirectoryIfMissing True rootBA
         agBA <- runViaPostLocal rootBA orderedBA
         contentBA <- TIO.readFile (rootBA </> "log.jsonl")
-        let parsedBA = mapMaybe (parseLine @Text) (T.lines contentBA)
+        let parsedBA = mapMaybe (unframeStored @Text) (T.lines contentBA)
         assert "office-off BA invariant" $ invariantSet "checker" parsedBA
 
         -- The witness: shared checker is order-sensitive.
@@ -1943,7 +1944,7 @@ main = do
   do
     let mkAsk pid asker addrs bodyText = do
           now <- getCurrentTime
-          pure (Stamped now pid (mkPost asker addrs bodyText))
+          pure (Stamped (now, pid) (mkPost asker addrs bodyText))
         testCfg =
           (defaultConnectorConfig "connector")
             { connCommandTimeout = 100_000,

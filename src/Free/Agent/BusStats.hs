@@ -29,7 +29,7 @@ module Free.Agent.BusStats
 where
 
 import Circuit.Agent (Post (..), PostId)
-import Circuit.Agent.Framing (Stamped (..))
+import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Data.Aeson (ToJSON (..), encode, object, (.=))
 import Data.ByteString.Lazy qualified as BL
 import Data.List (minimumBy, sort, sortOn)
@@ -139,7 +139,7 @@ slicePosts (WindowMinutes m) posts =
     [] -> []
     _ -> map (\(k, vs) -> (bucketLabel k, vs)) (Map.toList buckets)
   where
-    timed = [(timeStamp p, p) | p <- posts]
+    timed = [(fst (stamp p), p) | p <- posts]
     base = minimum (map fst timed)
     bucket t = floor (minutes base t) `div` m
     buckets = Map.fromListWith (flip (++)) (map (\(t, p) -> (bucket t, [p])) timed)
@@ -150,12 +150,12 @@ slicePosts (WindowMinutes m) posts =
 slicePosts ByThread posts =
   sortOn fst [(showt k, v) | (k, v) <- Map.toList roots]
   where
-    idx = Map.fromList [(stamp p, p) | p <- posts]
+    idx = Map.fromList [(snd (stamp p), p) | p <- posts]
     rootOf p = case thread (stamped p) of
-      [] -> stamp p
+      [] -> snd (stamp p)
       ts -> case mapMaybe (`Map.lookup` idx) ts of
         [] -> minimum ts
-        ps -> rootOf (minimumBy (comparing stamp) ps)
+        ps -> rootOf (minimumBy (comparing (snd . stamp)) ps)
     roots = Map.fromListWith (++) [(rootOf p, [p]) | p <- posts]
 slicePosts ByAgent posts =
   sortOn fst [(k, v) | (k, v) <- Map.toList byAuthor]
@@ -214,7 +214,7 @@ computeStats rules damping label posts =
   where
     n = length posts
     agents = sort $ Map.keys $ Map.fromList [(from (stamped p), ()) | p <- posts]
-    timestamps = map timeStamp posts
+    timestamps = map (fst . stamp) posts
     (startTime, endTime) = case timestamps of
       [] -> (Nothing, Nothing)
       ts -> (Just (minimum ts), Just (maximum ts))
@@ -244,7 +244,7 @@ computeStats rules damping label posts =
       Nothing -> 0
       Just start ->
         let signalPosts = [p | p <- posts, classify rules (stamped p) == Signal]
-            signalTimes = map timeStamp signalPosts
+            signalTimes = map (fst . stamp) signalPosts
          in case signalTimes of
               [] -> 0
               ts -> minutes start (maximum ts)

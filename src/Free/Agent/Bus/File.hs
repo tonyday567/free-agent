@@ -18,7 +18,7 @@ module Free.Agent.Bus.File
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo)
-import Circuit.Agent.Framing (Stamped (..), parseLine, stamp, stamped)
+import Circuit.Agent.Framing (Stamped, unframeStored, stamp, stamped)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
   ( TMVar,
@@ -106,8 +106,8 @@ latestPostId root = do
       let ls = filter (not . T.null) (T.lines txt)
       case ls of
         [] -> pure 0
-        _ -> case parseLine @Text (last ls) of
-          Just stored -> pure (stamp stored + 1)
+        _ -> case unframeStored @Text (last ls) of
+          Just stored -> pure (snd (stamp stored) + 1)
           Nothing -> pure (fromIntegral (length ls))
 
 -- | Persist the cursor for an agent. Writes @stamp + 1@ so the next wake
@@ -230,13 +230,13 @@ tailLog path names startCursor mQuiesce cb = do
           )
 
     filterStoredSince cursor line = do
-      stored <- parseLine @Text line
-      guard (stamp stored >= cursor)
+      stored <- unframeStored @Text line
+      guard (snd (stamp stored) >= cursor)
       guard (deliversTo (stamped stored) names)
       pure stored
 
     filterStored line = do
-      stored <- parseLine @Text line
+      stored <- unframeStored @Text line
       if deliversTo (stamped stored) names then Just stored else Nothing
 
     -- Wait for a halt or a new-posts signal, whichever lands first.

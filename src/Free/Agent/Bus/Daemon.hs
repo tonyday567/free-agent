@@ -1,4 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -33,10 +34,11 @@ where
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
 import Circuit.Agent.Framing
   ( PostBody,
-    Stamped (..),
+    Stamped,
+    pattern Stamped,
     framePost,
     frameStored,
-    parseLine,
+    unframeStored,
     parsePost,
     stamp,
     stamped,
@@ -111,7 +113,7 @@ stampOne path p = do
   ts <- getCurrentTime
   withFileLock (path <.> "lock") Exclusive $ \_lock -> do
     n <- BS.count 0x0A <$> BS.readFile path
-    let stored = Stamped ts (fromIntegral n) p
+    let stored = Stamped (ts, fromIntegral n) p
     appendStoredPostsUnlocked path [stored]
     pure stored
 
@@ -141,7 +143,7 @@ waitReceipt root p = go (200 :: Int)
         then delay >> go (n - 1)
         else do
           line <- TIO.readFile path
-          case parseLine @Text line of
+          case unframeStored @Text line of
             Just stored
               | matches stored -> pure stored
               | otherwise -> delay >> go (n - 1)
@@ -168,6 +170,6 @@ writePings path posts = traverse_ writeOne recipients
       case to (stamped stored) of
         [] -> []
         [""] -> []
-        ts -> [(name, stamp stored) | name <- ts]
+        ts -> [(name, snd (stamp stored)) | name <- ts]
     writeOne (name, pid) =
       TIO.writeFile (pingFile name) (T.pack (show pid))

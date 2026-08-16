@@ -17,7 +17,7 @@ module Main (main) where
 
 import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), mkPost, sortNub)
-import Circuit.Agent.Framing (Stamped (..), stamp, stamped)
+import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Control.Applicative ((<|>))
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (unless)
@@ -265,7 +265,7 @@ runOneSeat :: FreeSeat -> Stamped Text -> IO [Post Text]
 runOneSeat seat stored = do
   let stored' = decorateSender stored
       p = stamped stored'
-      parentId = stamp stored
+      parentId = snd (stamp stored)
       sh = interpretSeat seat
   (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
   pure [routeReply (scrubReply out) {thread = sortNub (parentId : thread out)} | out <- outs]
@@ -291,7 +291,7 @@ runHermes cfg = do
       seat = hostSeat host
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
       handle stored = do
-        writeIORef transcriptRef (fromIntegral (stamp stored))
+        writeIORef transcriptRef (fromIntegral (snd (stamp stored)))
         filter keepReplyHermes <$> runOneSeat seat stored
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
   runAgentLoop agentName names (hcRoot cfg) mQuiesce handle
@@ -315,7 +315,7 @@ runKimi cfg = do
       seat = hostSeat host
       mQuiesce = buildQuiesce (kcQuiesce cfg) (kcPitboss cfg)
       handle stored = do
-        writeIORef transcriptRef (fromIntegral (stamp stored))
+        writeIORef transcriptRef (fromIntegral (snd (stamp stored)))
         filter keepReplyHermes <$> runOneSeat seat stored
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
   runAgentLoop agentName names (kcRoot cfg) mQuiesce handle
@@ -348,7 +348,7 @@ runLlm cfg = do
           mQuiesce = buildQuiesce (lcQuiesce cfg) (lcPitboss cfg)
           handle stored = do
             let p = stamped stored
-                parentId = stamp stored
+                parentId = snd (stamp stored)
                 sh = interpretSeat seat
             (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
             pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
@@ -374,7 +374,7 @@ runGateway cfg = do
       mQuiesce = buildQuiesce (gcwQuiesce cfg) (gcwPitboss cfg)
       handle stored = do
         let p = stamped stored
-            parentId = stamp stored
+            parentId = snd (stamp stored)
             sh = interpretSeat seat
         (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
         pure [routeReply out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
@@ -395,7 +395,7 @@ runCommand cfg = do
       mQuiesce = buildQuiesce (ccQuiesce cfg) (ccPitboss cfg)
       handle stored = do
         let p = stamped stored
-            parentId = stamp stored
+            parentId = snd (stamp stored)
             sh = interpretSeat seat
         (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
         pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]

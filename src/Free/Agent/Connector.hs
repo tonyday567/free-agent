@@ -30,7 +30,7 @@ module Free.Agent.Connector
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost)
-import Circuit.Agent.Framing (Stamped (..))
+import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.StdPorts
   ( ProcConfig (..),
     ProcEnds (..),
@@ -38,7 +38,7 @@ import Circuit.Agent.StdPorts
     ghciMarks,
     openProc,
   )
-import Circuit.Ends (Ends (..), HasUnit (..), commit, emit, open)
+import Circuit.Ends (Ends (..), HasDual (..), In (..), Out (..))
 import Circuit.Layer (run)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (threadDelay)
@@ -113,7 +113,7 @@ runConnector cfg = do
         then threadDelay 500_000 >> loop bus repl name lastId
         else do
           done <- processPosts cfg bus repl ps
-          let newId = maximum (map stamp ps) + 1
+          let newId = maximum (map (snd . stamp) ps) + 1
           unless done $ loop bus repl name newId
 
 processPosts ::
@@ -162,7 +162,7 @@ runTurn ::
 runTurn cfg repl stored = do
   let ask = stamped stored
       asker = from ask
-      askId = stamp stored
+      askId = snd (stamp stored)
       name = connName cfg
       stdio = procStdio repl
 

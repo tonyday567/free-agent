@@ -36,7 +36,7 @@ import Circuit.Agent.Tensor
     raceShard,
     silentShard,
   )
-import Circuit.Poly (System (..), monoDir)
+import Circuit.Poly (System, system, monoDir)
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent.STM (STM, atomically)
 import Control.Monad.State (StateT)
@@ -189,12 +189,12 @@ data HAgentS where
 
 -- | Lift a pure pipeline into a batch STM agent.
 pipelineS :: Pipeline (Post Text) (Post Text) -> Agent (Kleisli STM) () [Post Text] [Post Text]
-pipelineS p = System $ Kleisli $ \((), d) ->
+pipelineS p = system $ Kleisli $ \((), d) ->
   pure ((), (runPipeline p (monoDir d), ()))
 
 -- | Silent STM agent: emits nothing, state unchanged.
 silentS :: Agent (Kleisli STM) () [Post Text] [Post Text]
-silentS = System $ Kleisli $ \((), _) -> pure ((), ([], ()))
+silentS = system $ Kleisli $ \((), _) -> pure ((), ([], ()))
 
 -- | Sequential composition in STM: outputs of @f@ on the whole batch are fed
 -- as the next batch to @g@.
@@ -202,7 +202,7 @@ composeS ::
   Agent (Kleisli STM) sg [Post Text] [Post Text] ->
   Agent (Kleisli STM) sf [Post Text] [Post Text] ->
   Agent (Kleisli STM) (sf, sg) [Post Text] [Post Text]
-composeS g f = System $ Kleisli $ \((sf, sg), d) -> do
+composeS g f = system $ Kleisli $ \((sf, sg), d) -> do
   (outs, sf') <- runAgentM f sf (monoDir d)
   (outs', sg') <- runAgentM g sg outs
   pure ((sf', sg'), (outs', ()))
@@ -213,7 +213,7 @@ awaitBatchS ::
   Agent (Kleisli STM) s1 [Post Text] [Post Text] ->
   Agent (Kleisli STM) s2 [Post Text] [Post Text] ->
   Agent (Kleisli STM) (s1, s2) [Post Text] [Post Text]
-awaitBatchS f g = System $ Kleisli $ \((sf, sg), d) -> do
+awaitBatchS f g = system $ Kleisli $ \((sf, sg), d) -> do
   (outsF, sf') <- runAgentM f sf (monoDir d)
   (outsG, sg') <- runAgentM g sg (monoDir d)
   pure ((sf', sg'), (outsF <> outsG, ()))
@@ -223,7 +223,7 @@ raceBatchS ::
   Agent (Kleisli STM) s1 [Post Text] [Post Text] ->
   Agent (Kleisli STM) s2 [Post Text] [Post Text] ->
   Agent (Kleisli STM) (s1, s2) [Post Text] [Post Text]
-raceBatchS f g = System $ Kleisli $ \((sf, sg), d) -> do
+raceBatchS f g = system $ Kleisli $ \((sf, sg), d) -> do
   (outsF, sf') <- runAgentM f sf (monoDir d)
   (outsG, sg') <- runAgentM g sg (monoDir d)
   let outs = if null outsF then outsG else outsF
@@ -232,7 +232,7 @@ raceBatchS f g = System $ Kleisli $ \((sf, sg), d) -> do
 -- | Fan-out in STM: run every branch on the same input batch and concatenate
 -- the outputs. Branch states are kept in a heterogeneous list.
 fanOutS :: Agent (Kleisli STM) [HAgentS] [Post Text] [Post Text]
-fanOutS = System $ Kleisli $ \(hs, d) -> do
+fanOutS = system $ Kleisli $ \(hs, d) -> do
   let batch = monoDir d
   pairs <- mapM (\(HAgentS s a) -> do (os, s') <- runAgentM a s batch; pure (HAgentS s' a, os)) hs
   let hs' = map fst pairs
@@ -241,7 +241,7 @@ fanOutS = System $ Kleisli $ \(hs, d) -> do
 -- | Fan-in in STM: run every branch on the same input batch, then collapse
 -- the branch outputs with the summary function.
 fanInS :: ([[Post Text]] -> [Post Text]) -> Agent (Kleisli STM) [HAgentS] [Post Text] [Post Text]
-fanInS summary = System $ Kleisli $ \(hs, d) -> do
+fanInS summary = system $ Kleisli $ \(hs, d) -> do
   let batch = monoDir d
   pairs <- mapM (\(HAgentS s a) -> do (os, s') <- runAgentM a s batch; pure (HAgentS s' a, os)) hs
   let hs' = map fst pairs

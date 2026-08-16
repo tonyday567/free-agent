@@ -12,7 +12,7 @@ module Free.Agent.Agent.Runner
 where
 
 import Circuit.Agent (Name, Post (..), mkPost)
-import Circuit.Agent.Framing (Stamped (..), stamp, stamped)
+import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Control.Exception (SomeException, displayException, try)
 import Data.Foldable (forM_, traverse_)
@@ -88,13 +88,13 @@ runAgentLoop agentName names root mQuiesce handlePost = do
   tailLog path names cursor (fmap (\qc -> (qc, onQuiesce)) mQuiesce) $ \stored ->
     controlFlow stored >>= \case
       Just flow -> do
-        writeCursor root agentName (stamp stored + 1)
+        writeCursor root agentName (snd (stamp stored) + 1)
         pure flow
       Nothing -> do
         -- F2: skip self-posts — an agent should never receive its own posts
         if from (stamped stored) == agentName
           then do
-            writeCursor root agentName (stamp stored + 1)
+            writeCursor root agentName (snd (stamp stored) + 1)
             pure Continue
           else do
             ereplies <- try @SomeException (handlePost stored)
@@ -107,7 +107,7 @@ runAgentLoop agentName names root mQuiesce handlePost = do
                   "🔴 "
                     ++ T.unpack agentName
                     ++ " handler failed on post "
-                    ++ show (stamp stored)
+                    ++ show (snd (stamp stored))
                     ++ ": "
                     ++ T.unpack exc
                 _ <-
@@ -126,5 +126,5 @@ runAgentLoop agentName names root mQuiesce handlePost = do
                   if any ((== Just StandDown) . markOf) replies
                     then Halt
                     else Continue
-            writeCursor root agentName (stamp stored + 1)
+            writeCursor root agentName (snd (stamp stored) + 1)
             pure flow

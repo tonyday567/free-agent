@@ -36,8 +36,8 @@ where
 
 import Circuit.Agent (Agent, Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Query (synthesisPosts)
-import Circuit.Poly (System (..), monoDir, monoIn)
-import Circuit.ChannelPoly (runSystem)
+import Circuit.Poly (System, runSystem, system, monoDir, monoIn)
+import Circuit.ChannelPoly qualified as CP
 import Data.List (inits, intersect)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -54,17 +54,17 @@ data AgentBox where
 -- ('iterateSystem' semantics — output is read from the post-input state).
 runAgentBox :: AgentBox -> [Post Text] -> [PostId] -> ([Post Text], AgentBox)
 runAgentBox (AgentBox s ag) ins ids =
-  let s' = snd (runSystem ag s) (ins, ids)
-      (outs, _) = runSystem ag s'
+  let s' = snd (CP.runSystem ag s) (ins, ids)
+      (outs, _) = CP.runSystem ag s'
    in (outs, AgentBox s' ag)
 
 -- | Lift an agent that ignores ids into one that accepts the boxed
 -- @(posts, ids)@ input.  This is the minimal adapter for existing agents
 -- that do not need provenance.
 withIds :: Agent (->) s [Post Text] [Post Text] -> Agent (->) s ([Post Text], [PostId]) [Post Text]
-withIds (System f) = System $ \(s, d) ->
+withIds ag = system $ \(s, d) ->
   let (ins, _ids) = monoDir d
-   in f (s, monoIn ins)
+   in runSystem ag (s, monoIn ins)
 
 -- | A deterministic oracle agent: answers each batch with one honest
 -- synthesis post ('synthesisPosts') whose body quotes what it saw.  @tag@
@@ -74,7 +74,7 @@ withIds (System f) = System $ \(s, d) ->
 -- the state carries the last batch and its ids seen, and the emit answers
 -- it.
 quoter :: Name -> Text -> Agent (->) ([Post Text], [PostId], [Post Text], [PostId]) ([Post Text], [PostId]) [Post Text]
-quoter who tag = System $ \((hist, histIds, batch, batchIds), d) ->
+quoter who tag = system $ \((hist, histIds, batch, batchIds), d) ->
   let (ins, insIds) = monoDir d
       out = case batch of
         [] -> []

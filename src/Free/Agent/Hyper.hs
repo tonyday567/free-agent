@@ -34,7 +34,7 @@ module Free.Agent.Hyper
   )
 where
 
-import Circuit.Poly (Mono, System (..))
+import Circuit.Poly (Mono, System, runSystem, system)
 
 -- | Fork: duplicate a stream.
 copyP :: [a] -> ([a], [a])
@@ -59,7 +59,7 @@ braidP ((a, b), (c, d)) = ((a, c), (b, d))
 
 -- | The silent agent: emits nothing.  Additive zero for 'both'.
 silent :: System (->) () (Mono a [b])
-silent = System (\((), _) -> ((), ([], ())))
+silent = system (\((), _) -> ((), ([], ())))
 
 -- | Merge two bundle-output agents: both see the same input, outputs are
 -- appended in left-then-right order.  The state is the pair.
@@ -71,7 +71,7 @@ both ::
   System (->) s1 (Mono a [b]) ->
   System (->) s2 (Mono a [b]) ->
   System (->) (s1, s2) (Mono a [b])
-both (System f) (System g) = System $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = f (s1, d)
-      (s2', (o2, ())) = g (s2, d)
+both x y = system $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = runSystem x (s1, d)
+      (s2', (o2, ())) = runSystem y (s2, d)
    in ((s1', s2'), (o1 ++ o2, ()))

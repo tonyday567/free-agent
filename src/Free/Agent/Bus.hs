@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | STM callback bus over a global JSONL log.
 --
@@ -45,7 +46,10 @@ import Circuit.Agent.Framing
   ( Log (..),
     PostBody,
     Snoc (..),
-    Stamped (..),
+    Stamped,
+    pattern Stamped,
+    stamp,
+    stamped,
     Uncons (..),
     encodeLog,
     frameStored,
@@ -147,7 +151,7 @@ scribe :: Bus a -> UTCTime -> Post a -> STM (Stamped a, TMVar ())
 scribe bus ts p = do
   log0 <- readTVar (busLog bus)
   let pid = fromIntegral (length (unLog log0))
-      stored = Stamped ts pid p
+      stored = Stamped (ts, pid) p
   ack <- newEmptyTMVar
   writeTVar (busLog bus) (snoc log0 stored)
   writeTQueue (busPending bus) (stored, ack)
@@ -180,7 +184,7 @@ postLocal root p = do
   ts <- getCurrentTime
   stored <- withFileLock (path <.> "lock") Exclusive $ \_lock -> do
     n <- BS.count 0x0A <$> BS.readFile path
-    let stored = Stamped ts (fromIntegral n) p
+    let stored = Stamped (ts, fromIntegral n) p
     appendStoredPostsUnlocked path [stored]
     pure stored
   writePings path [stored]
@@ -210,7 +214,7 @@ readSince :: Bus a -> [Name] -> PostId -> STM [Stamped a]
 readSince bus names since = do
   log0 <- readTVar (busLog bus)
   let posts = unLog log0
-  pure [s | s <- posts, stamp s >= since, deliversTo (stamped s) names]
+  pure [s | s <- posts, snd (stamp s) >= since, deliversTo (stamped s) names]
 
 -- | Wait until at least one matching post exists after the cursor.
 awaitSince :: Bus a -> [Name] -> PostId -> STM [Stamped a]
@@ -246,7 +250,7 @@ runSeatBus bus agentName names seat = loop 0
           work = filter (not . halts . stamped) posts
       selfHalt <- go work
       unless (marked || selfHalt) $
-        loop (maximum (map stamp posts) + 1)
+        loop (maximum (map (snd . stamp) posts) + 1)
     go [] = pure False
     go (stored : rest) = do
       outs <- processOne stored
@@ -263,7 +267,7 @@ runSeatBus bus agentName names seat = loop 0
       er <-
         try @SomeException $ do
           let p = stamped stored
-              parentId = stamp stored
+              parentId = snd (stamp stored)
           (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
           pure [out {thread = sortNub (parentId : thread out)} | out <- outs]
       case er of
@@ -318,6 +322,6 @@ writePings path posts = traverse_ writeOne recipients
       case to (stamped stored) of
         [] -> []
         [""] -> []
-        ts -> [(name, stamp stored) | name <- ts]
+        ts -> [(name, snd (stamp stored)) | name <- ts]
     writeOne (name, pid) =
       TIO.writeFile (pingFile name) (T.pack (show pid))

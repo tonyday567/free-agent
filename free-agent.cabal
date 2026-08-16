@@ -73,7 +73,7 @@ library
     aeson >=2.1 && <2.4,
     base >=4.18 && <5,
     bytestring >=0.11 && <0.13,
-    circuits >=0.3 && <0.4,
+    circuits >=0.3 && <0.5,
     circuits-agent >=0.1 && <0.2,
     circuits-parser,
     containers >=0.6 && <0.9,

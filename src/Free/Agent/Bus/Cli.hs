@@ -22,7 +22,7 @@ module Free.Agent.Bus.Cli
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost)
-import Circuit.Agent.Framing (Stamped (..), frameStored, parseLine, parsePost, stamp, stamped, timeStamp)
+import Circuit.Agent.Framing (Stamped, frameStored, unframeStored, parsePost, stamp, stamped)
 import Circuit.Agent.Mark (isHalt, markOf)
 import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -292,7 +292,7 @@ runWatch root names = do
 
 filterStored :: [Name] -> Text -> Maybe Text
 filterStored names line = do
-  stored <- parseLine @Text line
+  stored <- unframeStored @Text line
   let p = stamped stored
   if deliversTo p names then Just line else Nothing
 
@@ -316,9 +316,9 @@ runRead root names since = do
 
 filterStoredSince :: [Name] -> PostId -> Text -> Maybe Text
 filterStoredSince names sinceId line = do
-  stored <- parseLine @Text line
+  stored <- unframeStored @Text line
   let p = stamped stored
-  guard (stamp stored >= sinceId)
+  guard (snd (stamp stored) >= sinceId)
   guard (deliversTo p names)
   pure line
 
@@ -372,16 +372,16 @@ runStatus root threshold = do
     exitFailure
   content <- TIO.readFile path
   let ls = filter (not . T.null) (T.lines content)
-      posts = mapMaybe (parseLine @Text) ls
+      posts = mapMaybe (unframeStored @Text) ls
       idless = length ls - length posts
-      maxId = maximum (0 : map stamp posts)
+      maxId = maximum (0 : map (snd . stamp) posts)
   now <- getCurrentTime
   case posts of
     [] ->
       TIO.putStrLn ("🟡 " <> T.pack root <> " — empty bus (0 posts)")
     _ -> do
       let lastPost = last posts
-          age = diffUTCTime now (timeStamp lastPost)
+          age = diffUTCTime now (fst (stamp lastPost))
           live = age < threshold
       TIO.putStrLn
         ( (if live then "🟢 " else "🟡 ")
@@ -391,11 +391,11 @@ runStatus root threshold = do
             <> " posts"
             <> (if idless > 0 then " (" <> T.pack (show idless) <> " id-less)" else "")
             <> "; last id="
-            <> T.pack (show (stamp lastPost))
+            <> T.pack (show (snd (stamp lastPost)))
             <> " from="
             <> from (stamped lastPost)
             <> " at "
-            <> T.pack (show (timeStamp lastPost))
+            <> T.pack (show (fst (stamp lastPost)))
             <> " ("
             <> fmtAge age
             <> " ago)"
@@ -439,7 +439,7 @@ runStatus root threshold = do
             Just stored -> maybe False isHalt (markOf (stamped stored))
 
     latestBy :: Name -> [Stamped Text] -> Maybe (Stamped Text)
-    latestBy n = listToMaybe . sortOn (Down . stamp) . filter ((== n) . from . stamped)
+    latestBy n = listToMaybe . sortOn (Down . snd . stamp) . filter ((== n) . from . stamped)
 
 -- | Scribe stamps naive UTC; raw appends may carry an offset. Take both.
 parseTs :: Text -> Maybe UTCTime
