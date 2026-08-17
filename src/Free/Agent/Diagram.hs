@@ -40,8 +40,8 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.Poly (Mono, System)
 import Circuit.ChannelPoly (runSystem, systemAsLens)
+import Circuit.Poly (Mono, System)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
 import Circuit.Process (Process, register, pattern P)
 import Data.List (delete, elemIndex, foldl', mapAccumL)

@@ -36,7 +36,7 @@ import Circuit.Agent.Tensor
     raceShard,
     silentShard,
   )
-import Circuit.Poly (System, system, monoDir)
+import Circuit.Poly (System, monoDir, system)
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent.STM (STM, atomically)
 import Control.Monad.State (StateT)

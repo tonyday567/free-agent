@@ -47,13 +47,13 @@ import Circuit.Agent.Framing
     PostBody,
     Snoc (..),
     Stamped,
-    pattern Stamped,
-    stamp,
-    stamped,
     Uncons (..),
     encodeLog,
     frameStored,
     readLogFile,
+    stamp,
+    stamped,
+    pattern Stamped,
   )
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Control.Arrow (runKleisli)

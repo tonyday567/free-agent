@@ -102,8 +102,8 @@ hostShard h =
     ( do
         xs <- get
         put []
-        fmap concat $
-          traverse
+        concat
+          <$> traverse
             ( \p -> do
                 outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
                 pure [mkPost (hostName h) [from p] o | o <- outs]

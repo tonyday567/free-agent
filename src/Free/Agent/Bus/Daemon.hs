@@ -1,6 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -35,13 +35,13 @@ import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
 import Circuit.Agent.Framing
   ( PostBody,
     Stamped,
-    pattern Stamped,
     framePost,
     frameStored,
-    unframeStored,
     parsePost,
     stamp,
     stamped,
+    unframeStored,
+    pattern Stamped,
   )
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, when)

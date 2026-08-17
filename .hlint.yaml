@@ -1,3 +1,29 @@
 - ignore: {name: Use if}
 - ignore: {name: Use bimap}
 - ignore: {name: Eta reduce}
+- ignore: {name: "Fuse foldr/map"}
+- ignore: {name: "Hoist not"}
+- ignore: {name: "Move map inside list comprehension"}
+- ignore: {name: "Redundant bracket"}
+- ignore: {name: "Redundant lambda"}
+- ignore: {name: "Use :"}
+- ignore: {name: "Use camelCase"}
+- ignore: {name: "Use head"}
+- ignore: {name: "Use id"}
+- ignore: {name: "Use isNothing"}
+- ignore: {name: "Use map once"}
+- ignore: {name: "Use null"}
+- ignore: {name: "Use record patterns"}
+- ignore: {name: "Use sum"}
+- ignore: {name: "Use uncurry"}
+- ignore: {name: "Use const"}
+- ignore: {name: "Use first"}
+- ignore: {name: "Use notElem"}
+- ignore: {name: "Use when"}
+- ignore: {name: "Avoid lambda"}
+- ignore: {name: "Avoid lambda using `infix`"}
+- ignore: {name: "Use tuple-section"}
+- ignore: {name: "Use list comprehension"}
+- ignore: {name: "Use lambda-case"}
+- ignore: {name: "Use &&"}
+- ignore: {name: "Redundant if"}

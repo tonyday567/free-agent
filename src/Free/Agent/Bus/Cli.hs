@@ -22,7 +22,7 @@ module Free.Agent.Bus.Cli
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost)
-import Circuit.Agent.Framing (Stamped, frameStored, unframeStored, parsePost, stamp, stamped)
+import Circuit.Agent.Framing (Stamped, frameStored, parsePost, stamp, stamped, unframeStored)
 import Circuit.Agent.Mark (isHalt, markOf)
 import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)

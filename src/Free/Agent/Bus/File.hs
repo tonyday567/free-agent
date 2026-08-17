@@ -18,7 +18,7 @@ module Free.Agent.Bus.File
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo)
-import Circuit.Agent.Framing (Stamped, unframeStored, stamp, stamped)
+import Circuit.Agent.Framing (Stamped, stamp, stamped, unframeStored)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
   ( TMVar,
@@ -182,7 +182,7 @@ tailLog path names startCursor mQuiesce cb = do
     -- manually re-drain.  FSEvents on macOS does not reliably fire on
     -- append, so the timeout fallback ensures delivery within ~1 s.
     pollLoop offRef signal halted = do
-      h <- atomically (readTVar halted)
+      h <- readTVarIO halted
       if h
         then pure ()
         else do
@@ -250,7 +250,7 @@ tailLog path names startCursor mQuiesce cb = do
         Just True -> pure ()
         Just False -> quiesceLoop qc signal busy halted 0 onQuiesce
         Nothing -> do
-          inProgress <- atomically (readTVar busy)
+          inProgress <- readTVarIO busy
           if inProgress
             then quiesceLoop qc signal busy halted 0 onQuiesce
             else do

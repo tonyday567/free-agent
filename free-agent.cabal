@@ -39,6 +39,7 @@ common ghc-options-stanza
     -Wincomplete-uni-patterns
     -Wpartial-fields
     -Wredundant-constraints
+    -Wno-pattern-namespace-specifier
 
 common ghc2024-stanza
   default-language: GHC2024

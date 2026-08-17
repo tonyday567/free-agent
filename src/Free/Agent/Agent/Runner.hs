@@ -16,6 +16,7 @@ import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Control.Exception (SomeException, displayException, try)
 import Data.Foldable (forM_, traverse_)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -68,7 +69,7 @@ runAgentLoop agentName names root mQuiesce handlePost = do
   TIO.putStrLn $ "   root: " <> T.pack root
   let path = root </> "log.jsonl"
       onQuiesce = do
-        let qc = maybe (error "quiesce action without config") id mQuiesce
+        let qc = fromMaybe (error "quiesce action without config") mQuiesce
             p = mkPost agentName [qcPitboss qc] (markGlyph StandDown <> " standing down after " <> T.pack (show (qcCycles qc)) <> " empty cycles")
         _ <- postLocal root p
         pure ()
