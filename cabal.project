@@ -1,19 +1,4 @@
-packages:
-  ./free-agent.cabal
-  ../circuits-agent/circuits-agent.cabal
-  ../circuits-mat/circuits-mat.cabal
-  ../circuits/circuits.cabal
-  ../circuits-diff/circuits-diff.cabal
-  ../string-diagrams/string-diagrams.cabal
-  ../circuits-parser/circuits-parser.cabal
-  ../harpie/harpie.cabal
-  ../numhask/numhask.cabal
-  ../circuits-stats/circuits-stats.cabal
-  ../strings-svg/strings-svg.cabal
-  ../chart-svg/chart-svg.cabal
-  ../markup-parse/markup-parse.cabal
-  ../numhask-space/numhask-space.cabal
-  ../formatn/formatn.cabal
+packages: free-agent.cabal
 
 write-ghc-environment-files: always
 
