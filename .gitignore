@@ -8,3 +8,4 @@ cabal.project.local*
 /.hkgr/
 .ghcid-output
 .ghcid-trigger
+/cabal.project.local*
