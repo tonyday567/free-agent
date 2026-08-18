@@ -17,7 +17,7 @@ import Circuit.Agent.Tensor
     raceShard,
     silentShard,
   )
-import Circuit.Category (Category (id, (.)), ObDict (..))
+import Circuit.Category (Category (id, (.)))
 import Circuit.Channel (Strength (..), Traced (..))
 import Circuit.ChannelPoly (iterateSystem, runSystem)
 import Circuit.Diagram (SDiagram (..))
@@ -166,8 +166,8 @@ main = do
         freeF = Lift f :: FreeAgent (->) Int Int
         freeG = Lift g :: FreeAgent (->) Int Int
         freeGF = freeG `Compose` freeF
-        target = bindFreeAgent id id freeF :: (->) Int Int
-        targetGF = bindFreeAgent id id freeGF :: (->) Int Int
+        target = bindFreeAgent id freeF :: (->) Int Int
+        targetGF = bindFreeAgent id freeGF :: (->) Int Int
     assert "bind/unit: bind id (Lift f) == f" $ target 5 == 6
     assert "bind preserves Compose" $ targetGF 5 == 12
 
@@ -181,8 +181,8 @@ main = do
         freeGF = freeG `Compose` freeF
         toMaybe :: (->) :~> Kleisli Maybe
         toMaybe h = Kleisli (Just . h)
-        targetF = bindFreeAgent (\_ -> ObDict) toMaybe freeF :: Kleisli Maybe Int Int
-        targetGF = bindFreeAgent (\_ -> ObDict) toMaybe freeGF :: Kleisli Maybe Int Int
+        targetF = bindFreeAgent toMaybe freeF :: Kleisli Maybe Int Int
+        targetGF = bindFreeAgent toMaybe freeGF :: Kleisli Maybe Int Int
     assert "bindFreeAgent folds into a discrete target (Kleisli Maybe)" $
       runKleisli targetF 5 == Just 6
     assert "bindFreeAgent preserves Compose into Kleisli Maybe" $

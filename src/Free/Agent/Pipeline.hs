@@ -48,7 +48,6 @@ data Pipeline a b where
 
 -- | Pipelines form a category: 'id' is @'Map' id@; composition is 'Compose'.
 instance Category Pipeline where
-  type Ob Pipeline a = ()
   id = Map (\x -> x)
   (.) = Compose
 
