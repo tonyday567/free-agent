@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 
 module Main (main) where
 
@@ -526,7 +527,9 @@ main = do
     tlog <- TIO.readFile transcriptLog
     let tlines = filter (not . T.null) (T.lines tlog)
     assert "transcript has exactly one record" $ length tlines == 1
-    let line = head tlines
+    line <- case tlines of
+      [x] -> pure x
+      _ -> error "expected exactly one transcript record"
     assert "transcript record has post_id:42" $ "\"post_id\":42" `T.isInfixOf` line
     assert "transcript record has exit_code:0" $ "\"exit_code\":0" `T.isInfixOf` line
     assert "transcript record has session_id" $ "\"session_id\":\"fake-tid\"" `T.isInfixOf` line
@@ -1383,7 +1386,7 @@ main = do
     assert "partial trailing line is delivered once it is completed" $
       bodies == ["one", "two", "halt"]
     assert "halt mid-batch stops delivery" $
-      not ("four" `elem` bodies)
+      "four" `notElem` bodies
 
   -------------------------------------------------------------------------
   -- bus post anti-pollution (B4)

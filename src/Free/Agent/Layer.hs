@@ -39,7 +39,7 @@ instance Layer FreeAgent where
     FreeAgent arr a b ->
     arr' a b
   bind h (Lift f) = h f
-  bind h (Compose @_ @b1 g f) = bind h g . bind h f
+  bind h (Compose @_ @_ g f) = bind h g . bind h f
 
 -- | Fold a free agent term back into its base category.
 runFreeAgent ::

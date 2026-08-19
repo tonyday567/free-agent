@@ -31,6 +31,7 @@ where
 import Circuit.Agent (Post (..), PostId)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Data.Aeson (ToJSON (..), encode, object, (.=))
+import Data.Bifunctor (first)
 import Data.ByteString.Lazy qualified as BL
 import Data.List (minimumBy, sort, sortOn)
 import Data.Map (Map)
@@ -137,7 +138,7 @@ slicePosts WholeLog posts = [("whole", posts)]
 slicePosts (WindowMinutes m) posts =
   case timed of
     [] -> []
-    _ -> map (\(k, vs) -> (bucketLabel k, vs)) (Map.toList buckets)
+    _ -> map (first bucketLabel) (Map.toList buckets)
   where
     timed = [(fst (stamp p), p) | p <- posts]
     base = minimum (map fst timed)

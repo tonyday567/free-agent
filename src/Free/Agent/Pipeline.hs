@@ -48,7 +48,7 @@ data Pipeline a b where
 
 -- | Pipelines form a category: 'id' is @'Map' id@; composition is 'Compose'.
 instance Category Pipeline where
-  id = Map (\x -> x)
+  id = Map id
   (.) = Compose
 
 -- | Keep only inputs that satisfy the predicate.

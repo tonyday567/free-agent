@@ -524,8 +524,6 @@ escapeText = T.concatMap escChar
     hexDigit d
       | d < 10 = chr (ord '0' + d)
       | otherwise = chr (ord 'a' + d - 10)
-    chr = Data.Char.chr
-    ord = Data.Char.ord
 
 -- | A live CLI agent as a list 'Shard'.  Session file and process stay
 -- inside @IO@ — apply-only at this boundary.  @who@ is the agent nick

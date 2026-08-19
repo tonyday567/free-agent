@@ -17,6 +17,7 @@ module Free.Agent.Bus.Claim
   )
 where
 
+import Control.Monad (when)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -62,7 +63,7 @@ releaseTask :: FilePath -> Int -> IO ()
 releaseTask root n = do
   let path = claimPath root n
   e <- doesFileExist path
-  if e then removeFile path else pure ()
+  when e $ removeFile path
 
 -- | List all current claims.  Returns @[(task number, holder)]@.
 listClaims :: FilePath -> IO [(Int, Text)]

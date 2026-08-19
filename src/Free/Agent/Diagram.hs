@@ -117,7 +117,7 @@ meetingSkeleton ps = foldr1 SThenD (snd (mapAccumL step dangling [0 .. length ps
     -- stamped meeting).
     sources =
       [ [if i < fromIntegral j then Just i else Nothing | i <- thread p]
-      | (j, p) <- zip [0 ..] ps
+      | (j, p) <- zip ([0 ..] :: [Int]) ps
       ]
     -- the citation edges of post j, in consumer (log) order
     cited j = [(i, pos) | (i, ss) <- zip [0 ..] sources, (pos, Just j') <- zip [0 ..] ss, j' == fromIntegral j]
@@ -185,3 +185,4 @@ skeletonLabels SUnitR' = ["unitR'"]
 skeletonLabels SAssoc = ["assoc"]
 skeletonLabels SAssoc' = ["assoc'"]
 skeletonLabels SSwap = ["swap"]
+skeletonLabels (STrace f) = skeletonLabels f

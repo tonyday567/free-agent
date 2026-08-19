@@ -441,14 +441,6 @@ runStatus root threshold = do
     latestBy :: Name -> [Stamped Text] -> Maybe (Stamped Text)
     latestBy n = listToMaybe . sortOn (Down . snd . stamp) . filter ((== n) . from . stamped)
 
--- | Scribe stamps naive UTC; raw appends may carry an offset. Take both.
-parseTs :: Text -> Maybe UTCTime
-parseTs t =
-  iso8601ParseM s
-    <|> (localTimeToUTC utc <$> (iso8601ParseM s :: Maybe LocalTime))
-  where
-    s = T.unpack t
-
 fmtAge :: NominalDiffTime -> Text
 fmtAge s
   | s < 120 = T.pack (show (round s :: Int)) <> "s"
