@@ -195,7 +195,7 @@ gatewayHost name systemPrompt c =
 -- | Parse one SSE event frame (@event: x\\ndata: {…}@) into the event name
 -- and decoded JSON payload.  'Nothing' for comment\/keep-alive frames.
 --
--- >>> parseSseFrame "event: done\ndata: {\"seq\": 7}"
+-- >>> parseSseFrame (Data.ByteString.Char8.pack "event: done\ndata: {\"seq\": 7}")
 -- Just ("done",Object ...)
 parseSseFrame :: BS.ByteString -> Maybe (Text, Value)
 parseSseFrame f = do
