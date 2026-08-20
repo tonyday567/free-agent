@@ -73,9 +73,9 @@ library
 
   build-depends:
     aeson >=2.1 && <2.4,
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     bytestring >=0.11 && <0.13,
-    circuits >=0.3 && <0.5,
+    circuits >=0.3 && <0.4,
     circuits-agent >=0.1 && <0.2,
     circuits-diagrams >=0.1 && <0.2,
     circuits-parser,
@@ -87,13 +87,13 @@ library
     http-client >=0.7 && <0.8,
     http-client-tls >=0.3 && <0.4,
     http-types >=0.12 && <0.13,
-    mtl >=2.3 && <2.4,
-    optparse-applicative >=0.18 && <0.20,
+    mtl >=2.2.2 && <2.4,
+    optparse-applicative >=0.17 && <0.20,
     process >=1.6 && <1.7,
     regex-tdfa >=1.3 && <1.4,
     stm >=2.5 && <2.6,
-    text >=2.0 && <3,
-    time >=1.12 && <1.15,
+    text >=1.2 && <3,
+    time >=1.9 && <1.15,
     unix >=2.8 && <2.9,
     vector,
 
@@ -104,18 +104,18 @@ executable free-agent-axioma
   main-is: axioma.hs
   build-depends:
     async >=2.2 && <2.3,
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     circuits,
     circuits-agent,
     circuits-diagrams,
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
     free-agent,
-    mtl >=2.3 && <2.4,
+    mtl >=2.2.2 && <2.4,
     process >=1.6 && <1.7,
     stm >=2.5 && <2.6,
-    text >=2.0 && <3,
-    time >=1.12 && <1.15,
+    text >=1.2 && <3,
+    time >=1.9 && <1.15,
 
 executable free-agent
   import: ghc-options-stanza
@@ -123,16 +123,16 @@ executable free-agent
   hs-source-dirs: app
   main-is: free-agent.hs
   build-depends:
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     circuits,
     circuits-agent,
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
     free-agent,
-    mtl >=2.3 && <2.4,
-    optparse-applicative >=0.18 && <0.20,
-    text >=2.0 && <3,
-    time >=1.12 && <1.15,
+    mtl >=2.2.2 && <2.4,
+    optparse-applicative >=0.17 && <0.20,
+    text >=1.2 && <3,
+    time >=1.9 && <1.15,
 
 executable bus-claim
   import: ghc-options-stanza
@@ -140,7 +140,7 @@ executable bus-claim
   hs-source-dirs: app
   main-is: bus-claim.hs
   build-depends:
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     free-agent,
-    optparse-applicative >=0.18 && <0.20,
-    text >=2.0 && <3,
+    optparse-applicative >=0.17 && <0.20,
+    text >=1.2 && <3,
