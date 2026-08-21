@@ -15,13 +15,11 @@
 --   free-agent status [ROOT] [--threshold SECS]
 module Main (main) where
 
-import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), mkPost, sortNub)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
+import Circuit.Agent.Tensor (closeShardIO)
 import Control.Applicative ((<|>))
-import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad (unless)
-import Control.Monad.State (runStateT)
 import Data.Foldable (traverse_)
 import Data.IORef (IORef, newIORef, writeIORef)
 import Data.Maybe (fromMaybe)
@@ -267,7 +265,7 @@ runOneSeat seat stored = do
       p = stamped stored'
       parentId = snd (stamp stored)
       sh = interpretSeat seat
-  (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
+  (outs, _st) <- closeShardIO sh [p] []
   pure [routeReply (scrubReply out) {thread = sortNub (parentId : thread out)} | out <- outs]
 
 keepReplyHermes :: Post Text -> Bool
@@ -350,7 +348,7 @@ runLlm cfg = do
             let p = stamped stored
                 parentId = snd (stamp stored)
                 sh = interpretSeat seat
-            (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
+            (outs, _st) <- closeShardIO sh [p] []
             pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
       TIO.putStrLn $ "   base: " <> baseUrl bareCfg
       TIO.putStrLn $ "   model: " <> model bareCfg
@@ -376,7 +374,7 @@ runGateway cfg = do
         let p = stamped stored
             parentId = snd (stamp stored)
             sh = interpretSeat seat
-        (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
+        (outs, _st) <- closeShardIO sh [p] []
         pure [routeReply out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
   TIO.putStrLn $ "   gateway: " <> gwBaseUrl gwCfg
   TIO.putStrLn $ "   session: " <> gcSessionId client
@@ -397,7 +395,7 @@ runCommand cfg = do
         let p = stamped stored
             parentId = snd (stamp stored)
             sh = interpretSeat seat
-        (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
+        (outs, _st) <- closeShardIO sh [p] []
         pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
   TIO.putStrLn $ "   command: " <> T.pack (ccCmd cfg) <> " " <> T.intercalate " " (map T.pack (ccArgs cfg))
   runAgentLoop agentName names (ccRoot cfg) mQuiesce handle

@@ -16,7 +16,7 @@
 --     @session\/set_config_option {configId: "mode", value: "auto"}@.
 --   * @session\/request_permission@ responses are broken in kimi 0.33.0;
 --     in @auto@ mode file I\/O arrives as @fs\/*@ reverse-RPCs instead.
---   * @fs\/*@ params carry @uri@ (with a @file:\/\/@ prefix), not the
+--   * @fs\/*@ params carry @uri@ (with a @file:\/\/\/\/@ prefix), not the
 --     spec's @path@ — both are accepted here.
 --
 -- Requests travel through the shared stdin 'commit' port of
@@ -64,21 +64,20 @@ import Circuit.Agent.StdPorts
   )
 import Circuit.Ends (Ends, commit, companion, conjoint, emit, open)
 import Circuit.Layer (run)
+import Circuit.Parser.Json (Json (..), decodeJson)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
-import Data.Aeson (Result (..), Value (..), eitherDecodeStrict, encode, fromJSON, object, (.=))
-import Data.Aeson.Key qualified as K
-import Data.Aeson.KeyMap qualified as KM
-import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (foldr)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text.IO qualified as TIO
 import Data.Time (diffUTCTime, getCurrentTime)
+import Free.Agent.Json
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
@@ -160,50 +159,42 @@ logFrame :: AcpClient -> Text -> Text -> IO ()
 logFrame c dir raw =
   forM_ (acpTranscript (acpConfig c)) $ \fp -> do
     now <- getCurrentTime
-    let line = encodeText (object ["ts" .= show now, "dir" .= dir, "raw" .= raw])
+    let line = encodeJsonText (jobject [("ts", jtext (T.pack (show now))), ("dir", jtext dir), ("raw", jtext raw)])
     TIO.appendFile fp (line <> "\n")
 
 -- ---------------------------------------------------------------------------
 -- JSON plumbing
 -- ---------------------------------------------------------------------------
 
-encodeText :: Value -> Text
-encodeText = decodeUtf8 . BL.toStrict . encode
+resultOf :: Json -> Maybe Json
+resultOf = objLookup "result"
 
-objGet :: Text -> Value -> Maybe Value
-objGet k (Object o) = KM.lookup (K.fromText k) o
-objGet _ _ = Nothing
-
-textAt :: Text -> Value -> Maybe Text
-textAt k v = case objGet k v of
-  Just (String t) -> Just t
-  _ -> Nothing
-
-resultOf :: Value -> Maybe Value
-resultOf = objGet "result"
+jsonToInt :: Json -> Maybe Int
+jsonToInt (JNumber n) = toBoundedInteger n
+jsonToInt _ = Nothing
 
 -- | A classified incoming frame.
 data Frame
   = -- | Response to one of our requests: id and the whole message
     -- (@result@ or @error@ lives inside).
-    Response Int Value
+    Response Int Json
   | -- | Reverse-RPC: kimi requests something from the client.
-    AgentRequest Int Text Value
+    AgentRequest Int Text Json
   | -- | Notification (no id): method and params.
-    Notification Text Value
+    Notification Text Json
   deriving (Show)
 
 -- | Classify a decoded message.  Note ids are 'Int's and may be 0 (kimi
 -- sends @id: 0@ on @session\/request_permission@).
-classifyFrame :: Value -> Maybe Frame
-classifyFrame v = case (objGet "id" v, objGet "method" v) of
-  (Just idV, Just (String m))
-    | Success i <- fromJSON @Int idV ->
-        Just (AgentRequest i m (fromMaybe Null (objGet "params" v)))
+classifyFrame :: Json -> Maybe Frame
+classifyFrame j = case (objLookup "id" j, objLookup "method" j) of
+  (Just idV, Just (JString m))
+    | Just i <- jsonToInt idV ->
+        Just (AgentRequest i m (fromMaybe JNull (objLookup "params" j)))
   (Just idV, _)
-    | Success i <- fromJSON @Int idV -> Just (Response i v)
-  (_, Just (String m)) ->
-    Just (Notification m (fromMaybe Null (objGet "params" v)))
+    | Just i <- jsonToInt idV -> Just (Response i j)
+  (_, Just (JString m)) ->
+    Just (Notification m (fromMaybe JNull (objLookup "params" j)))
   _ -> Nothing
 
 -- ---------------------------------------------------------------------------
@@ -214,19 +205,19 @@ classifyFrame v = case (objGet "id" v, objGet "method" v) of
 data Update
   = AgentMessageChunk Text
   | AgentThoughtChunk Text
-  | ToolCall Value
-  | ToolCallUpdate Value
-  | AvailableCommandsUpdate Value
-  | SessionInfoUpdate Value
-  | UsageUpdate Value
-  | UnknownUpdate Text Value
+  | ToolCall Json
+  | ToolCallUpdate Json
+  | AvailableCommandsUpdate Json
+  | SessionInfoUpdate Json
+  | UsageUpdate Json
+  | UnknownUpdate Text Json
   deriving (Eq, Show)
 
 -- | Parse the @params@ of a @session\/update@ notification.  'Nothing' if
 -- the @update@ object or its @sessionUpdate@ tag is missing.
-parseUpdate :: Value -> Maybe Update
+parseUpdate :: Json -> Maybe Update
 parseUpdate params = do
-  upd <- objGet "update" params
+  upd <- objLookup "update" params
   tag <- textAt "sessionUpdate" upd
   pure $ case tag of
     "agent_message_chunk" -> AgentMessageChunk (contentText upd)
@@ -239,16 +230,16 @@ parseUpdate params = do
     other -> UnknownUpdate other upd
   where
     contentText upd =
-      fromMaybe "" (objGet "content" upd >>= textAt "text")
+      fromMaybe "" (objLookup "content" upd >>= textAt "text")
 
 -- ---------------------------------------------------------------------------
 -- Send / receive
 -- ---------------------------------------------------------------------------
 
 -- | Encode and commit one JSON-RPC message line, logging the raw frame.
-acpSendValue :: AcpClient -> Value -> IO ()
+acpSendValue :: AcpClient -> Json -> IO ()
 acpSendValue c v = do
-  let line = encodeText v
+  let line = encodeJsonText v
   logFrame c "send" line
   runKleisli
     (commit (stdIn (acpPorts c)) (companion (open :: Ends (Kleisli IO) () ())))
@@ -268,14 +259,14 @@ acpReadLine c = do
 -- | Read the next decodable JSON message, blocking on the stdout queue
 -- until one arrives or the timeout (microseconds) expires.  Lines that fail
 -- to parse are skipped (they stay in the transcript).
-acpReadFrame :: AcpClient -> Int -> IO (Maybe Value)
+acpReadFrame :: AcpClient -> Int -> IO (Maybe Json)
 acpReadFrame c micros = timeout micros go
   where
     go = do
       t <- acpReadLine c
       if T.null t
         then go
-        else case eitherDecodeStrict (encodeUtf8 t) of
+        else case decodeJson (encodeUtf8 t) of
           Right v -> pure v
           Left _ -> go
 
@@ -283,16 +274,16 @@ acpReadFrame c micros = timeout micros go
 -- Reverse-RPC
 -- ---------------------------------------------------------------------------
 
--- | kimi sends @uri@ with a @file:\/\/@ prefix where the ACP schema says
+-- | kimi sends @uri@ with a @file:\/\/\/\/@ prefix where the ACP schema says
 -- @path@; accept both.
-uriPath :: Value -> Maybe FilePath
+uriPath :: Json -> Maybe FilePath
 uriPath params = case textAt "uri" params of
   Just u -> Just (T.unpack (fromMaybe u (T.stripPrefix "file://" u)))
   Nothing -> T.unpack <$> textAt "path" params
 
-sendResult :: AcpClient -> Int -> Value -> IO ()
+sendResult :: AcpClient -> Int -> Json -> IO ()
 sendResult c rid r =
-  acpSendValue c (object ["jsonrpc" .= t2, "id" .= rid, "result" .= r])
+  acpSendValue c (jobject [("jsonrpc", jtext t2), ("id", jnum rid), ("result", r)])
   where
     t2 = "2.0" :: Text
 
@@ -300,10 +291,10 @@ sendError :: AcpClient -> Int -> Int -> Text -> IO ()
 sendError c rid code msg =
   acpSendValue
     c
-    ( object
-        [ "jsonrpc" .= t2,
-          "id" .= rid,
-          "error" .= object ["code" .= code, "message" .= msg]
+    ( jobject
+        [ ("jsonrpc", jtext t2),
+          ("id", jnum rid),
+          ("error", jobject [("code", jnum code), ("message", jtext msg)])
         ]
     )
   where
@@ -315,14 +306,14 @@ sendError c rid code msg =
 -- @session\/request_permission@ gets a best-effort schema-shaped approval
 -- (kimi 0.33.0 mishandles every known response shape — switch to @auto@
 -- mode instead); anything else gets @-32601@.
-acpAnswer :: AcpClient -> Int -> Text -> Value -> IO ()
+acpAnswer :: AcpClient -> Int -> Text -> Json -> IO ()
 acpAnswer c rid method params = case method of
   "fs/read_text_file" -> case uriPath params of
     Nothing -> sendError c rid (-32602) "fs/read_text_file: missing uri/path"
     Just p -> do
       r <- try @SomeException (TIO.readFile p)
       case r of
-        Right content -> sendResult c rid (object ["content" .= content])
+        Right content -> sendResult c rid (jobject [("content", jtext content)])
         Left e -> sendError c rid (-32000) (T.pack (show e))
   "fs/write_text_file" -> case uriPath params of
     Nothing -> sendError c rid (-32602) "fs/write_text_file: missing uri/path"
@@ -332,22 +323,23 @@ acpAnswer c rid method params = case method of
         try @SomeException
           (createDirectoryIfMissing True (takeDirectory p) >> TIO.writeFile p content)
       case r of
-        Right () -> sendResult c rid (object [])
+        Right () -> sendResult c rid (jobject [])
         Left e -> sendError c rid (-32000) (T.pack (show e))
   "session/request_permission" ->
     sendResult
       c
       rid
-      ( object
-          [ "outcome"
-              .= object
-                ["outcome" .= ("selected" :: Text), "optionId" .= firstOption]
+      ( jobject
+          [ ( "outcome",
+              jobject
+                [("outcome", jtext ("selected" :: Text)), ("optionId", jtext firstOption)]
+            )
           ]
       )
   _ -> sendError c rid (-32601) ("method not found: " <> method)
   where
-    firstOption = case objGet "options" params of
-      Just (Array os) ->
+    firstOption = case objLookup "options" params of
+      Just (JArray os) ->
         fromMaybe "approve_once" (listToMaybe (mapMaybe (textAt "optionId") (foldr (:) [] os)))
       _ -> "approve_once"
 
@@ -359,16 +351,16 @@ acpAnswer c rid method params = case method of
 -- (microseconds) expires.  Interleaved reverse-RPCs are answered (see
 -- 'acpAnswer'); every frame seen (including the response) is returned in
 -- arrival order alongside the response.
-acpRequest :: AcpClient -> Int -> Text -> Value -> IO (Maybe Value, [Value])
+acpRequest :: AcpClient -> Int -> Text -> Json -> IO (Maybe Json, [Json])
 acpRequest c micros method params = do
   rid <- atomicModifyIORef' (acpNextId c) (\i -> (i + 1, i))
   acpSendValue
     c
-    ( object
-        [ "jsonrpc" .= t2,
-          "id" .= rid,
-          "method" .= method,
-          "params" .= params
+    ( jobject
+        [ ("jsonrpc", jtext t2),
+          ("id", jnum rid),
+          ("method", jtext method),
+          ("params", params)
         ]
     )
   start <- getCurrentTime
@@ -395,57 +387,55 @@ acpRequest c micros method params = do
 
 -- | @initialize@ handshake: protocolVersion 1, fs client capabilities on,
 -- terminal off.
-acpInitialize :: AcpClient -> Int -> IO (Maybe Value, [Value])
+acpInitialize :: AcpClient -> Int -> IO (Maybe Json, [Json])
 acpInitialize c micros =
   acpRequest
     c
     micros
     "initialize"
-    ( object
-        [ "protocolVersion" .= (1 :: Int),
-          "clientInfo"
-            .= object
-              [ "name" .= ("free-agent-acp" :: Text),
-                "version" .= ("0.1.0" :: Text)
-              ],
-          "clientCapabilities"
-            .= object
-              [ "fs" .= object ["readTextFile" .= True, "writeTextFile" .= True],
-                "terminal" .= False
-              ]
+    ( jobject
+        [ ("protocolVersion", jnum (1 :: Int)),
+          ( "clientInfo",
+            jobject
+              [("name", jtext ("free-agent-acp" :: Text)), ("version", jtext ("0.1.0" :: Text))]
+          ),
+          ( "clientCapabilities",
+            jobject
+              [("fs", jobject [("readTextFile", jbool True), ("writeTextFile", jbool True)]), ("terminal", jbool False)]
+          )
         ]
     )
 
 -- | @session/new@ with the session cwd pinned.  Returns the sessionId on
 -- success.
-acpNewSession :: AcpClient -> Int -> FilePath -> IO (Maybe Text, [Value])
+acpNewSession :: AcpClient -> Int -> FilePath -> IO (Maybe Text, [Json])
 acpNewSession c micros cwd = do
   (mresp, msgs) <-
     acpRequest
       c
       micros
       "session/new"
-      (object ["cwd" .= cwd, "mcpServers" .= ([] :: [Value])])
+      (jobject [("cwd", jtext (T.pack cwd)), ("mcpServers", jarray [])])
   pure (mresp >>= resultOf >>= textAt "sessionId", msgs)
 
 -- | @session/set_config_option@ — returns the full configOptions array.
 acpSetConfigOption ::
-  AcpClient -> Int -> Text -> Text -> Text -> IO (Maybe Value, [Value])
+  AcpClient -> Int -> Text -> Text -> Text -> IO (Maybe Json, [Json])
 acpSetConfigOption c micros sid configId value =
   acpRequest
     c
     micros
     "session/set_config_option"
-    ( object
-        [ "sessionId" .= sid,
-          "configId" .= configId,
-          "value" .= value
+    ( jobject
+        [ ("sessionId", jtext sid),
+          ("configId", jtext configId),
+          ("value", jtext value)
         ]
     )
 
 -- | Switch a session to @auto@ mode.  Do NOT use @session\/set_mode@ — it
 -- hangs in kimi 0.33.0.
-acpSetModeAuto :: AcpClient -> Int -> Text -> IO (Maybe Value, [Value])
+acpSetModeAuto :: AcpClient -> Int -> Text -> IO (Maybe Json, [Json])
 acpSetModeAuto c micros sid = acpSetConfigOption c micros sid "mode" "auto"
 
 -- | The result of one prompt turn.
@@ -459,7 +449,7 @@ data PromptResult = PromptResult
     -- | All parsed session updates, in arrival order.
     prUpdates :: [Update],
     -- | Every raw frame seen during the turn.
-    prMessages :: [Value]
+    prMessages :: [Json]
   }
   deriving (Show)
 
@@ -473,10 +463,11 @@ acpPrompt c micros sid promptText = do
       c
       micros
       "session/prompt"
-      ( object
-          [ "sessionId" .= sid,
-            "prompt"
-              .= [object ["type" .= ("text" :: Text), "text" .= promptText]]
+      ( jobject
+          [ ("sessionId", jtext sid),
+            ( "prompt",
+              jarray [jobject [("type", jtext ("text" :: Text)), ("text", jtext promptText)]]
+            )
           ]
       )
   trailing <- drain
@@ -516,10 +507,10 @@ acpCancel :: AcpClient -> Text -> IO ()
 acpCancel c sid =
   acpSendValue
     c
-    ( object
-        [ "jsonrpc" .= t2,
-          "method" .= ("session/cancel" :: Text),
-          "params" .= object ["sessionId" .= sid]
+    ( jobject
+        [ ("jsonrpc", jtext t2),
+          ("method", jtext ("session/cancel" :: Text)),
+          ("params", jobject [("sessionId", jtext sid)])
         ]
     )
   where

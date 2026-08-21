@@ -5,14 +5,16 @@
 
 module Main (main) where
 
-import Circuit (Ends (..), close)
+import Circuit (Ends (..))
 import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), Shard, awaitA, branchesByIndex, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
 import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, markGlyph, markOf)
 import Circuit.Agent.StdPorts (ProcEnds (..))
 import Circuit.Agent.Tensor
-  ( awaitShard,
+  ( AgentShard,
+    awaitShard,
+    closeShardIO,
     fanInShard,
     fanOutShard,
     raceShard,
@@ -32,7 +34,6 @@ import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, 
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM (atomically, newTQueueIO, readTQueue, writeTQueue)
 import Control.Monad (when)
-import Control.Monad.State (State, StateT, runState, runStateT)
 import Data.Foldable (traverse_)
 import Data.IORef (newIORef, writeIORef)
 import Data.List (inits, sort, sortOn)
@@ -115,16 +116,6 @@ countSpiders (m, n) (SSpider m' n') = if m == m' && n == n' then 1 else 0
 countSpiders mn (SBeside f g) = countSpiders mn f + countSpiders mn g
 countSpiders mn (SThenD f g) = countSpiders mn f + countSpiders mn g
 countSpiders _ _ = 0
-
--- | Close a same-type shard once under State.
-closeShard :: Shard (State s) a a -> a -> s -> (a, s)
-closeShard sh x s0 =
-  runState (runKleisli (close (conjoint sh) (companion sh)) x) s0
-
--- | Close a same-type shard once under StateT IO.
-closeShardIO :: Shard (StateT s IO) a a -> a -> s -> IO (a, s)
-closeShardIO sh x s0 =
-  runStateT (runKleisli (close (conjoint sh) (companion sh)) x) s0
 
 main :: IO ()
 main = do
@@ -214,7 +205,7 @@ main = do
       runPipeline pid xs == xs
 
   -------------------------------------------------------------------------
-  -- Pipeline round-trip into Shard (State [Post Text]) [Post Text] [Post Text]
+  -- Pipeline round-trip into AgentShard [Post Text] [Post Text]
   -------------------------------------------------------------------------
   putStrLn "Pipeline round-trip"
 
@@ -227,9 +218,9 @@ main = do
             mkPost "human" ["bot"] "noise",
             mkPost "human" ["bot"] "world"
           ]
-        sh :: Shard (State [Post Text]) [Post Text] [Post Text]
+        sh :: AgentShard [Post Text] [Post Text]
         sh = pipelineShard p
-        (outs, st) = closeShard sh posts []
+    (outs, st) <- closeShardIO sh posts []
     assert "runPipeline agrees with shard emit" $
       map body outs == map body (runPipeline p posts)
     assert "noise filtered and prefix added" $
@@ -243,10 +234,10 @@ main = do
 
   do
     let h = mkHost "echo" (pure . map ("echo:" <>))
-        sh :: Shard (State [Post Text]) [Post Text] [Post Text]
+        sh :: AgentShard [Post Text] [Post Text]
         sh = hostShard h
         p = mkPost "human" ["echo"] "hi there"
-        (outs, st) = closeShard sh [p] []
+    (outs, st) <- closeShardIO sh [p] []
     assert "host replies to sender" $
       map body outs == ["echo:hi", "echo:there"]
         && all (\x -> to x == ["human"]) outs
@@ -256,13 +247,13 @@ main = do
 
   do
     let h = mkHost "echo" (pure . map ("echo:" <>))
-        sh :: Shard (State [Post Text]) [Post Text] [Post Text]
+        sh :: AgentShard [Post Text] [Post Text]
         sh = hostShard h
         posts =
           [ mkPost "human" ["echo"] "one two",
             mkPost "human" ["echo"] "three"
           ]
-        (outs, st) = closeShard sh posts []
+    (outs, st) <- closeShardIO sh posts []
     assert "host emits one reply batch per committed post" $
       map body outs == ["echo:one", "echo:two", "echo:three"]
         && length outs == 3
@@ -272,10 +263,10 @@ main = do
 
   do
     let h = (mkHost "echo" (pure . map ("echo:" <>))) {hostBodyMode = BodyLines}
-        sh :: Shard (State [Post Text]) [Post Text] [Post Text]
+        sh :: AgentShard [Post Text] [Post Text]
         sh = hostShard h
         p = mkPost "human" ["echo"] "hi\nthere"
-        (outs, st) = closeShard sh [p] []
+    (outs, st) <- closeShardIO sh [p] []
     assert "host BodyLines splits on newlines" $
       map body outs == ["echo:hi", "echo:there"]
         && all (\x -> to x == ["human"]) outs
@@ -293,7 +284,7 @@ main = do
         h = mkHost "echo" (pure . map ("echo:" <>))
         seat :: FreeSeat
         seat = SeatCompose (hostSeat h) (pipelineSeat p)
-        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
+        sh :: AgentShard [Post Text] [Post Text]
         sh = interpretSeat seat
         posts =
           [ mkPost "human" ["bot"] "hello world",
@@ -351,7 +342,7 @@ main = do
 
   do
     let h = processHost "shell" "echo" ["hello"]
-        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
+        sh :: AgentShard [Post Text] [Post Text]
         sh = hostShard h
         p = mkPost "human" ["shell"] "ignored"
     (outs, st) <- closeShardIO sh [p] []
@@ -398,23 +389,23 @@ main = do
         && all (\x -> to x == ["out"]) outsL
 
   -------------------------------------------------------------------------
-  -- Real process host sharing StateT IO buffer with pipeline stages
+  -- Real process host sharing a threaded IO buffer with pipeline stages
   -------------------------------------------------------------------------
-  putStrLn "Real host in shared StateT IO buffer"
+  putStrLn "Real host in shared threaded IO buffer"
 
   do
     let p = forName "shell" :: Pipeline (Post Text) (Post Text)
         h = processHost "shell" "echo" ["ok"]
         seat :: FreeSeat
         seat = SeatCompose (hostSeat h) (pipelineSeat p)
-        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
+        sh :: AgentShard [Post Text] [Post Text]
         sh = interpretSeat seat
         posts =
           [ mkPost "human" ["shell"] "world",
             mkPost "human" ["skip"] "no"
           ]
     (outs, st) <- closeShardIO sh posts []
-    assert "process host shares StateT IO buffer with pipeline" $
+    assert "process host shares threaded IO buffer with pipeline" $
       map body outs == ["ok world"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "shell") outs
@@ -456,7 +447,7 @@ main = do
               cliTranscript = Nothing
             }
         h = cliHost "fake" cli
-        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
+        sh :: AgentShard [Post Text] [Post Text]
         sh = hostShard h
         p = mkPost "human" ["fake"] "hello\nworld"
     (outs, st) <- closeShardIO sh [p] []
@@ -583,7 +574,7 @@ main = do
               cliTranscript = Just (postRef, transcriptLog)
             }
         h = cliHost "fake" cli
-        sh :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
+        sh :: AgentShard [Post Text] [Post Text]
         sh = hostShard h
     -- Post 1
     writeIORef postRef 1

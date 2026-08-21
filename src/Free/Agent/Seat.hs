@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 
 -- | Free seat syntax: pipelines and hosts as inspectable terms that fold into
--- 'Circuit.Agent.Shard' values in 'StateT [Post Text] IO', and into STM agents via
+-- 'Circuit.Agent.Tensor.AgentShard' values, with STM agents via
 -- 'interpretSeatS'.
 module Free.Agent.Seat
   ( FreeSeat (..),
@@ -22,24 +22,24 @@ module Free.Agent.Seat
   )
 where
 
+import Circuit (Body (..))
 import Circuit.Agent
   ( Agent,
     Post,
-    Shard,
-    composeShard,
     runAgentM,
   )
 import Circuit.Agent.Tensor
-  ( awaitShard,
+  ( AgentShard,
+    awaitShard,
     fanInShard,
     fanOutShard,
     raceShard,
     silentShard,
   )
+import Circuit.Ends (composeEnds0)
 import Circuit.Poly (System, monoDir, system)
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent.STM (STM, atomically)
-import Control.Monad.State (StateT)
 import Data.Text (Text)
 import Free.Agent.Host (Host, hostShard)
 import Free.Agent.Pipeline (Pipeline, pipelineShard, runPipeline)
@@ -66,7 +66,7 @@ data FreeSeat where
   -- | A pure pipeline stage.
   SeatPipeline :: Pipeline (Post Text) (Post Text) -> FreeSeat
   -- | A one-shot host stage (may perform IO).
-  SeatHost :: Host (StateT [Post Text] IO) -> FreeSeat
+  SeatHost :: Host -> FreeSeat
   -- | The silent seat: emits the empty list.
   SeatSilent :: FreeSeat
   -- | Sequential composition of seats.
@@ -87,7 +87,7 @@ pipelineSeat :: Pipeline (Post Text) (Post Text) -> FreeSeat
 pipelineSeat = SeatPipeline
 
 -- | Lift a host into a free seat term.
-hostSeat :: Host (StateT [Post Text] IO) -> FreeSeat
+hostSeat :: Host -> FreeSeat
 hostSeat = SeatHost
 
 -- | The silent seat: emits nothing.
@@ -118,19 +118,19 @@ fanInSeat = SeatFanIn
 bundleSeat :: ([[Post Text]] -> [Post Text]) -> [FreeSeat] -> FreeSeat
 bundleSeat = fanInSeat
 
--- | Fold a free seat term into a shard by interpreting each generator and
--- composing the resulting shards with 'composeShard'.
+-- | Fold a free seat term into an agent shard by interpreting each generator
+-- and composing the resulting shards with 'composeEnds0'.
 --
--- The result lives in 'StateT [Post Text] IO' so that real process hosts can share
--- the same buffer monad as pure pipeline stages.
+-- The buffer state is carried by the base arrow ('Body (,) (Kleisli IO)
+-- [Post Text]') rather than a monad transformer.
 interpretSeat ::
   FreeSeat ->
-  Shard (StateT [Post Text] IO) [Post Text] [Post Text]
+  AgentShard [Post Text] [Post Text]
 interpretSeat (SeatPipeline p) = pipelineShard p
 interpretSeat (SeatHost h) = hostShard h
 interpretSeat SeatSilent = silentShard
 interpretSeat (SeatCompose g f) =
-  composeShard (interpretSeat f) (interpretSeat g)
+  composeEnds0 (interpretSeat f) (interpretSeat g)
 interpretSeat (SeatFork f) = interpretSeat f
 interpretSeat (SeatAwait f g) =
   awaitShard (interpretSeat f) (interpretSeat g)

@@ -30,9 +30,8 @@ where
 
 import Circuit.Agent (Post (..), PostId)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
-import Data.Aeson (ToJSON (..), encode, object, (.=))
+import Circuit.Parser.Json (Json (..))
 import Data.Bifunctor (first)
-import Data.ByteString.Lazy qualified as BL
 import Data.List (minimumBy, sort, sortOn)
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -40,9 +39,9 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (decodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
+import Free.Agent.Json (encodeJsonText, jarray, jbool, jnum, jobject, jtext)
 import Numeric.Natural (Natural)
 import Text.Printf (printf)
 import Text.Regex.TDFA ((=~))
@@ -295,30 +294,33 @@ showd = T.pack . printf "%0.3f"
 -- | JSON report.
 renderStatsJson :: Rules -> [Stats] -> Text
 renderStatsJson rules stats =
-  decodeUtf8 (BL.toStrict (encode (object ["rules" .= rulesObj, "slices" .= map statsObject stats])))
+  encodeJsonText (jobject [("rules", rulesObj), ("slices", jarray (map statsObject stats))])
   where
     rulesObj =
-      object
-        [ "noise" .= noiseRE rules,
-          "signal" .= signalRE rules,
-          "deliverable" .= deliverableRE rules
+      jobject
+        [ ("noise", jtext (noiseRE rules)),
+          ("signal", jtext (signalRE rules)),
+          ("deliverable", jtext (deliverableRE rules))
         ]
     statsObject s =
-      object
-        [ "slice" .= statSlice s,
-          "posts" .= statPosts s,
-          "agents" .= statAgents s,
-          "duration_minutes" .= statDurationMinutes s,
-          "posts_per_minute" .= statPostsPerMinute s,
-          "damping_rules" .= statDamping s,
-          "re_bus" .= statReBus s,
-          "signal" .= statSignal s,
-          "noise" .= statNoise s,
-          "unclassified" .= statUnclassified s,
-          "snr" .= statSNR s,
-          "snr_prime" .= statSNRPrime s,
-          "deliverables" .= statDeliverables s,
-          "done_claims" .= statDoneClaims s,
-          "posts_per_deliverable" .= statPostsPerDeliverable s,
-          "time_to_quiescence_minutes" .= statTimeToQuiescenceMinutes s
+      jobject
+        [ ("slice", jtext (statSlice s)),
+          ("posts", jnum (statPosts s)),
+          ("agents", jnum (statAgents s)),
+          ("duration_minutes", jdouble (statDurationMinutes s)),
+          ("posts_per_minute", jdouble (statPostsPerMinute s)),
+          ("damping_rules", jnum (statDamping s)),
+          ("re_bus", jdouble (statReBus s)),
+          ("signal", jnum (statSignal s)),
+          ("noise", jnum (statNoise s)),
+          ("unclassified", jnum (statUnclassified s)),
+          ("snr", jmaybe jdouble (statSNR s)),
+          ("snr_prime", jmaybe jdouble (statSNRPrime s)),
+          ("deliverables", jnum (statDeliverables s)),
+          ("done_claims", jnum (statDoneClaims s)),
+          ("posts_per_deliverable", jmaybe jdouble (statPostsPerDeliverable s)),
+          ("time_to_quiescence_minutes", jdouble (statTimeToQuiescenceMinutes s))
         ]
+    jdouble = JNumber . fromRational . toRational
+    jmaybe _ Nothing = JNull
+    jmaybe f (Just x) = f x

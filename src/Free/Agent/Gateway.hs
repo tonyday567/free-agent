@@ -37,11 +37,8 @@ where
 
 import Circuit.Agent (run1)
 import Circuit.Agent.StdPorts (frameAgent, sseMarks)
+import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Control.Exception (throwIO)
-import Control.Monad.IO.Class (MonadIO (..))
-import Data.Aeson (Value (..), eitherDecodeStrict, encode, object, (.=))
-import Data.Aeson.Key qualified as K
-import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Data.ByteString.Lazy qualified as BL
@@ -49,8 +46,9 @@ import Data.Foldable (foldl')
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (decodeUtf8)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Free.Agent.Host (BodyMode (..), Host (..))
+import Free.Agent.Json (jobject, jtext)
 import Network.HTTP.Client
 import Network.HTTP.Types (RequestHeaders, statusCode)
 import System.Environment (lookupEnv)
@@ -104,10 +102,10 @@ openGateway cfg = do
         req0
           { method = "POST",
             requestHeaders = hdrs key,
-            requestBody = RequestBodyLBS (encode (object ["cwd" .= gwCwd cfg]))
+            requestBody = RequestBodyLBS (BL.fromStrict (encodeJson (jobject [("cwd", jtext (T.pack (gwCwd cfg)))])))
           }
   resp <- httpLbs req mgr
-  case eitherDecodeStrict (BL.toStrict (responseBody resp)) of
+  case decodeJson (BL.toStrict (responseBody resp)) of
     Left e -> throwIO (userError ("🔴 api_server session create: " <> e))
     Right v -> do
       let sid = textAt ["session", "id"] v
@@ -133,7 +131,7 @@ gatewayChat c msg = do
         req0
           { method = "POST",
             requestHeaders = hdrs (gcKey c),
-            requestBody = RequestBodyLBS (encode (object ["message" .= msg]))
+            requestBody = RequestBodyLBS (BL.fromStrict (encodeJson (jobject [("message", jtext msg)])))
           }
   withResponse req (gcManager c) $ \resp -> do
     let status = statusCode (responseStatus resp)
@@ -173,19 +171,18 @@ gatewayChat c msg = do
 -- cycle join into one user message (the 'Free.Agent.Host.hermesHostBatch'
 -- convention); the reply is one text.
 gatewayHost ::
-  (MonadIO m) =>
   -- | Host name (used as the 'from' field of reply posts).
   Text ->
   -- | System prompt text prepended to every message.
   Text ->
   GatewayClient ->
-  Host m
+  Host
 gatewayHost name systemPrompt c =
   Host
     { hostName = name,
       hostBodyMode = BodyWhole,
       hostRun = \bodies ->
-        (: []) <$> liftIO (gatewayChat c (systemPrompt <> "\n\nUser messages:\n" <> T.unlines bodies))
+        (: []) <$> gatewayChat c (systemPrompt <> "\n\nUser messages:\n" <> T.unlines bodies)
     }
 
 -- ---------------------------------------------------------------------------
@@ -195,14 +192,14 @@ gatewayHost name systemPrompt c =
 -- | Parse one SSE event frame (@event: x\\ndata: {…}@) into the event name
 -- and decoded JSON payload.  'Nothing' for comment\/keep-alive frames.
 --
--- >>> parseSseFrame (Data.ByteString.Char8.pack "event: done\ndata: {\"seq\": 7}")
+-- >>> parseSseFrame (Data.ByteString.Char8.pack "event: done\\ndata: {\"seq\": 7}")
 -- Just ("done",Object ...)
-parseSseFrame :: BS.ByteString -> Maybe (Text, Value)
+parseSseFrame :: BS.ByteString -> Maybe (Text, Json)
 parseSseFrame f = do
   let ls = BSC.lines f
   ev <- listToMaybe [BSC.drop 6 l | l <- ls, "event:" `BS.isPrefixOf` l]
   dat <- listToMaybe [BSC.drop 5 l | l <- ls, "data:" `BS.isPrefixOf` l]
-  v <- either (const Nothing) Just (eitherDecodeStrict (BSC.dropWhile (== ' ') dat))
+  v <- either (const Nothing) Just (decodeJson (BSC.dropWhile (== ' ') dat))
   pure (decodeUtf8 (BSC.dropWhile (== ' ') ev), v)
   where
     listToMaybe [] = Nothing
@@ -215,10 +212,10 @@ parseSseFrame f = do
 hdrs :: BS.ByteString -> RequestHeaders
 hdrs key = [("Authorization", "Bearer " <> key), ("Content-Type", "application/json")]
 
-textAt :: [Text] -> Value -> Text
+textAt :: [Text] -> Json -> Text
 textAt path v = go path v
   where
-    go [] (String t) = t
+    go [] (JString t) = t
     go [] _ = ""
-    go (p : ps) (Object o) = maybe "" (go ps) (KM.lookup (K.fromText p) o)
+    go (p : ps) (JObject o) = maybe "" (go ps) (lookup p o)
     go _ _ = ""

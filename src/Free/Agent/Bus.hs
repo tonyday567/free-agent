@@ -56,7 +56,7 @@ import Circuit.Agent.Framing
     pattern Stamped,
   )
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
-import Control.Arrow (runKleisli)
+import Circuit.Agent.Tensor (closeShardIO)
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.STM
   ( STM,
@@ -78,7 +78,6 @@ import Control.Concurrent.STM
   )
 import Control.Exception (SomeException, bracket, displayException, try)
 import Control.Monad (forever, unless)
-import Control.Monad.State (runStateT)
 import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
 import Data.List (maximum)
@@ -268,7 +267,7 @@ runSeatBus bus agentName names seat = loop 0
         try @SomeException $ do
           let p = stamped stored
               parentId = snd (stamp stored)
-          (outs, _st) <- runStateT (runKleisli (close (conjoint sh) (companion sh)) [p]) []
+          (outs, _st) <- closeShardIO sh [p] []
           pure [out {thread = sortNub (parentId : thread out)} | out <- outs]
       case er of
         Left e -> do

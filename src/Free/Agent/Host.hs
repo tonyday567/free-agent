@@ -23,12 +23,9 @@ module Free.Agent.Host
   )
 where
 
-import Circuit (Ends (..), endsK)
-import Circuit.Agent (Post (..), Shard, mkPost)
-import Circuit.Parser.Json (Json (..), encodeJson)
-import Control.Monad.IO.Class (MonadIO (..))
-import Control.Monad.State.Class (MonadState (..))
-import Data.Aeson (FromJSON (..), eitherDecode, withObject, (.:))
+import Circuit.Agent (Post (..), mkPost)
+import Circuit.Agent.Tensor (AgentShard, ioShard)
+import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL
 import Data.IORef (IORef)
@@ -40,7 +37,6 @@ import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, kimiC
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
-import System.Exit (ExitCode (..))
 import System.Process (readProcess)
 
 -- $setup
@@ -63,17 +59,17 @@ data BodyMode
 -- The host receives arguments derived from the body of an incoming post and
 -- produces output lines.  The caller decides how to turn those lines back into
 -- posts; 'hostShard' uses the default mapping (reply to sender).
-data Host m = Host
+data Host = Host
   { -- | Name used as the 'from' field of reply posts.
     hostName :: Text,
     -- | How to split the incoming post body before calling 'hostRun'.
     hostBodyMode :: BodyMode,
     -- | Run the host on the prepared arguments.
-    hostRun :: [Text] -> m [Text]
+    hostRun :: [Text] -> IO [Text]
   }
 
 -- | Smart constructor with the default 'BodyWords' mode.
-mkHost :: Text -> ([Text] -> m [Text]) -> Host m
+mkHost :: Text -> ([Text] -> IO [Text]) -> Host
 mkHost name f = Host name BodyWords f
 
 -- | Split a post body according to the host's 'BodyMode'.
@@ -92,24 +88,15 @@ bodyArgs BodyWhole = (: [])
 -- Note: a generic host has no access to stamped log ids, so emitted replies
 -- carry no thread edge.  Callers that need provenance should thread by id
 -- outside the host.
-hostShard ::
-  (MonadState [Post Text] m) =>
-  Host m ->
-  Shard m [Post Text] [Post Text]
-hostShard h =
-  endsK
-    (\xs -> put xs)
-    ( do
-        xs <- get
-        put []
-        concat
-          <$> traverse
-            ( \p -> do
-                outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
-                pure [mkPost (hostName h) [from p] o | o <- outs]
-            )
-            xs
-    )
+hostShard :: Host -> AgentShard [Post Text] [Post Text]
+hostShard h = ioShard $ \xs ->
+  concat
+    <$> traverse
+      ( \p -> do
+          outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
+          pure [mkPost (hostName h) [from p] o | o <- outs]
+      )
+      xs
 
 -- | A host backed by an external process.
 --
@@ -117,20 +104,19 @@ hostShard h =
 -- (one argument when 'BodyWhole', whitespace-split words by default).  Output
 -- lines become reply posts.  Uses 'System.Process.readProcess'.
 processHost ::
-  (MonadIO m) =>
   -- | Host name.
   Text ->
   -- | Command to run.
   FilePath ->
   -- | Fixed command arguments.
   [String] ->
-  Host m
+  Host
 processHost name cmd args =
   Host
     { hostName = name,
       hostBodyMode = BodyWhole,
       hostRun = \ws -> do
-        out <- liftIO (readProcess cmd (args ++ map T.unpack ws) "")
+        out <- readProcess cmd (args ++ map T.unpack ws) ""
         pure (map T.pack (lines out))
     }
 
@@ -140,17 +126,16 @@ processHost name cmd args =
 -- fallback happens inside the recipe.  One reply text per body (multi-line
 -- bodies and replies are preserved).
 cliHost ::
-  (MonadIO m) =>
   -- | Host name (used as the 'from' field of reply posts).
   Text ->
   -- | Invocation recipe.
   Cli ->
-  Host m
+  Host
 cliHost name cli =
   Host
     { hostName = name,
       hostBodyMode = BodyWhole,
-      hostRun = traverse (liftIO . cliQuery cli)
+      hostRun = traverse (cliQuery cli)
     }
 
 -- | Kimi host on the shared 'Cli' seat.
@@ -163,7 +148,6 @@ cliHost name cli =
 -- the given file per invocation.  The caller writes the post id to the
 -- 'IORef' before each call; see 'Free.Agent.Cli.cliQuery' for details.
 kimiHost ::
-  (MonadIO m) =>
   -- | Host name (used as the 'from' field of reply posts).
   Text ->
   -- | Model name passed to @kimi -m@, if any.
@@ -174,7 +158,7 @@ kimiHost ::
   FilePath ->
   -- | Optional transcript sink.
   Maybe (IORef Int, FilePath) ->
-  Host m
+  Host
 kimiHost name model provider sessionFile mTranscript =
   cliHost name (kimiCli model provider sessionFile) {cliTranscript = mTranscript}
 
@@ -194,7 +178,6 @@ kimiHost name model provider sessionFile mTranscript =
 -- The caller is responsible for building the system prompt; this function
 -- knows nothing about design documents, protocol cards, or magic wording.
 hermesHost ::
-  (MonadIO m) =>
   -- | Host name (used as the 'from' field of reply posts).
   Text ->
   -- | System prompt text prepended to every body.
@@ -209,7 +192,7 @@ hermesHost ::
   FilePath ->
   -- | Optional transcript sink.
   Maybe (IORef Int, FilePath) ->
-  Host m
+  Host
 hermesHost name systemPrompt model provider yolo sessionFile mTranscript =
   Host
     { hostName = name,
@@ -218,7 +201,7 @@ hermesHost name systemPrompt model provider yolo sessionFile mTranscript =
     }
   where
     runOne body =
-      liftIO (cliQuery cli (systemPrompt <> "\n\nUser message:\n" <> body))
+      cliQuery cli (systemPrompt <> "\n\nUser message:\n" <> body)
     cli = hermesCli model provider yolo sessionFile mTranscript
 
 -- | Shared CLI recipe for hermes backends.
@@ -250,15 +233,21 @@ hermesCli model provider yolo sessionFile mTranscript =
 -- multiple posts may arrive in a single wake cycle and the agent should see
 -- them as a combined conversation turn.
 hermesHostBatch ::
-  (MonadIO m) =>
+  -- | Host name (used as the 'from' field of reply posts).
   Text ->
+  -- | System prompt text prepended to every body.
   Text ->
+  -- | Model name passed to @hermes -m@, if any.
   Maybe Text ->
+  -- | Provider passed to @hermes --provider@, if any.
   Maybe Text ->
+  -- | Pass @--yolo -Q@ to hermes.
   Bool ->
+  -- | Session file for cross-call context.
   FilePath ->
+  -- | Optional transcript sink.
   Maybe (IORef Int, FilePath) ->
-  Host m
+  Host
 hermesHostBatch name systemPrompt model provider yolo sessionFile mTranscript =
   Host
     { hostName = name,
@@ -266,7 +255,7 @@ hermesHostBatch name systemPrompt model provider yolo sessionFile mTranscript =
       hostRun = \bodies -> do
         let userMessage = T.unlines bodies
             prompt = systemPrompt <> "\n\nUser messages:\n" <> userMessage
-        rsp <- liftIO (cliQuery cli prompt)
+        rsp <- cliQuery cli prompt
         pure [cleanCliOut rsp]
     }
   where
@@ -300,19 +289,18 @@ defaultBareConfig =
 -- The caller supplies the system prompt; the post body becomes the user
 -- message. There is no tooling, memory, or context-file injection.
 bareHost ::
-  (MonadIO m) =>
   -- | Connection configuration.
   BareConfig ->
   -- | System prompt.
   Text ->
-  Host m
+  Host
 bareHost cfg systemPrompt =
   Host
     { hostName = agentName cfg,
       hostBodyMode = BodyWhole,
       hostRun = \bodies -> do
         let userMessage = T.unlines bodies
-        rsp <- liftIO $ chatCompletion cfg systemPrompt userMessage
+        rsp <- chatCompletion cfg systemPrompt userMessage
         pure [rsp]
     }
 
@@ -348,30 +336,19 @@ chatCompletion cfg systemPrompt userMessage = do
   let status = statusCode (responseStatus response)
       body = responseBody response
   if status < 200 || status >= 300
-    then pure ("\128308 HTTP " <> T.pack (show status) <> ": " <> TE.decodeUtf8 (BL.toStrict body))
-    else case eitherDecode body of
-      Left err -> pure ("\128308 JSON error: " <> T.pack err)
-      Right cr -> case responseChoices cr of
-        [] -> pure "\128308 empty choices"
-        (c : _) -> pure (messageContent (message c))
-
-newtype ChatResponse = ChatResponse {responseChoices :: [Choice]}
-  deriving (Show)
-
-newtype Choice = Choice {message :: Message}
-  deriving (Show)
-
-newtype Message = Message {messageContent :: Text}
-  deriving (Show)
-
-instance FromJSON ChatResponse where
-  parseJSON = withObject "ChatResponse" $ \v ->
-    ChatResponse <$> v .: "choices"
-
-instance FromJSON Choice where
-  parseJSON = withObject "Choice" $ \v ->
-    Choice <$> v .: "message"
-
-instance FromJSON Message where
-  parseJSON = withObject "Message" $ \v ->
-    Message <$> v .: "content"
+    then pure ("🔴 HTTP " <> T.pack (show status) <> ": " <> TE.decodeUtf8 (BL.toStrict body))
+    else case decodeJson (BL.toStrict body) of
+      Left err -> pure ("🔴 JSON error: " <> T.pack err)
+      Right j -> case jObjLookup "choices" j of
+        Just (JArray vs) -> case V.toList vs of
+          [] -> pure "🔴 empty choices"
+          (c : _) -> case jObjLookup "message" c of
+            Just m -> case jObjLookup "content" m of
+              Just (JString t) -> pure t
+              _ -> pure "🔴 missing content"
+            _ -> pure "🔴 missing message"
+        _ -> pure "🔴 empty choices"
+  where
+    jObjLookup :: Text -> Json -> Maybe Json
+    jObjLookup k (JObject ps) = lookup k ps
+    jObjLookup _ _ = Nothing

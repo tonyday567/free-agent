@@ -23,10 +23,11 @@ module Free.Agent.Pipeline
   )
 where
 
-import Circuit (Ends (..), endsK)
-import Circuit.Agent (Name, Post (..), Shard, deliversTo)
+import Circuit (Body (..))
+import Circuit.Agent (Name, Post (..), deliversTo)
 import Circuit.Category (Category (..))
-import Control.Monad.State.Class (MonadState (..))
+import Circuit.Ends (Ends, ends0)
+import Control.Arrow (Kleisli (..))
 import Data.Text (Text)
 import Prelude hiding (id, (.))
 
@@ -94,16 +95,8 @@ runPipeline (Compose g f) = runPipeline g . runPipeline f
 --
 -- The state holds the pending input batch.  Commit replaces it; emit applies
 -- the pipeline and clears the buffer.
-pipelineShard ::
-  forall m a b.
-  (MonadState [a] m) =>
-  Pipeline a b ->
-  Shard m [a] [b]
-pipelineShard p =
-  endsK
-    (\xs -> put xs)
-    ( do
-        xs <- get
-        put []
-        pure (runPipeline p xs)
-    )
+pipelineShard :: Pipeline a b -> Ends (Body (,) (Kleisli IO) [a]) [a] [b]
+pipelineShard p = ends0 writeBatch readBatch
+  where
+    writeBatch = Body $ Kleisli $ \(_, xs) -> pure (xs, ())
+    readBatch = Body $ Kleisli $ \(s, ()) -> pure ([], runPipeline p s)
