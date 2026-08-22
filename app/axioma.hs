@@ -5,7 +5,7 @@
 
 module Main (main) where
 
-import Circuit (Ends (..))
+import Circuit (Poles (..))
 import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), Shard, awaitA, branchesByIndex, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
 import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
@@ -22,10 +22,10 @@ import Circuit.Agent.Tensor
   )
 import Circuit.Category (Category (id, (.)), K (..))
 import Circuit.Channel (Strength (..), Traced (..))
-import Circuit.ChannelPoly (iterateSystem, runSystem)
+import Circuit.System (iterateSystem, runSystemMono)
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
-import Circuit.Ends (endsK)
+import Circuit.Poles (polesK)
 import Circuit.Layer ((:~>))
 import Circuit.Poly (Mono, System, monoDir, system)
 import Circuit.Process (delay, register, scan)
@@ -868,7 +868,7 @@ main = do
   do
     let sysN = system (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: System (->) Int (Mono Int Int)
     assert "diagram step is runSystem's (put, get)" $
-      diagramStep sysN 5 3 == (snd (runSystem sysN 5) 3, fst (runSystem sysN 5))
+      diagramStep sysN 5 3 == (snd (runSystemMono sysN 5) 3, fst (runSystemMono sysN 5))
     assert "diagram steps mirror iterateSystem" $
       diagramSteps sysN 0 [1 .. 5] == iterateSystem sysN 0 [1 .. 5]
 
@@ -884,7 +884,7 @@ main = do
           ]
     assert "tape agent: diagram step is runSystem's (put, get)" $
       diagramStep echo [] p0
-        == (snd (runSystem echo []) p0, fst (runSystem echo []))
+        == (snd (runSystemMono echo []) p0, fst (runSystemMono echo []))
     assert "tape agent: diagram steps mirror iterateSystem" $
       diagramSteps echo [] ins == iterateSystem echo [] ins
 
@@ -1946,8 +1946,8 @@ main = do
         mockProcEnds frames = do
           cmdQ <- newTQueueIO
           respQ <- newTQueueIO
-          let stdio = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-              stderrE = endsK (\_ -> pure ()) (pure "")
+          let stdio = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
+              stderrE = polesK (\_ -> pure ()) (pure "")
               ends = ProcEnds stdio stderrE (pure ())
           pump <- async $ do
             _ <- atomically $ readTQueue cmdQ

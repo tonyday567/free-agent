@@ -63,8 +63,9 @@ import Circuit.Agent.StdPorts
     openStdPorts,
   )
 import Circuit.Category (K (..))
-import Circuit.Ends (Ends, commit, companion, conjoint, emit, open)
+import Circuit.Poles (In (..), Out (..), Poles (..), HasDual (..))
 import Circuit.Layer (run)
+import Circuit.Syntax (eval)
 import Circuit.Parser.Json (Json (..), decodeJson)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
@@ -138,7 +139,7 @@ openAcp cfg = do
             procWorkingDir = wd,
             procMarks = lineMarks
           }
-  pp <- runK (run (openStdPorts encodeUtf8 decodeUtf8 replCfg)) ()
+  pp <- runK (eval (openStdPorts encodeUtf8 decodeUtf8 replCfg)) ()
   nref <- newIORef 1
   pure
     AcpClient
@@ -242,7 +243,7 @@ acpSendValue c v = do
   let line = encodeJsonText v
   logFrame c "send" line
   runK
-    (commit (stdIn (acpPorts c)) (companion (open :: Ends (K IO) () ())))
+    (commit (stdIn (acpPorts c)) (companion (open :: Poles (K IO) () ())))
     line
 
 -- | Read the next stdout line, blocking until a complete line frame
@@ -251,7 +252,7 @@ acpReadLine :: AcpClient -> IO Text
 acpReadLine c = do
   t <-
     runK
-      (emit (stdOut (acpPorts c)) (conjoint (open :: Ends (K IO) () ())))
+      (emit (stdOut (acpPorts c)) (conjoint (open :: Poles (K IO) () ())))
       ()
   logFrame c "recv" t
   pure t
@@ -530,7 +531,7 @@ acpReadStderr c = go []
       m <-
         timeout 100_000 $
           runK
-            (emit (stdErr (acpPorts c)) (conjoint (open :: Ends (K IO) () ())))
+            (emit (stdErr (acpPorts c)) (conjoint (open :: Poles (K IO) () ())))
             ()
       case m of
         Nothing -> pure (T.unlines (reverse acc))

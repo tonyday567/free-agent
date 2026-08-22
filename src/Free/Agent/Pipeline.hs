@@ -26,7 +26,7 @@ where
 import Circuit (Body (..))
 import Circuit.Agent (Name, Post (..), deliversTo)
 import Circuit.Category (Category (..), K (..))
-import Circuit.Ends (Ends, ends0)
+import Circuit.Poles (Poles (..), poles0)
 import Data.Text (Text)
 import Prelude hiding (id, (.))
 
@@ -94,8 +94,8 @@ runPipeline (Compose g f) = runPipeline g . runPipeline f
 --
 -- The state holds the pending input batch.  Commit replaces it; emit applies
 -- the pipeline and clears the buffer.
-pipelineShard :: Pipeline a b -> Ends (Body (,) (K IO) [a]) [a] [b]
-pipelineShard p = ends0 writeBatch readBatch
+pipelineShard :: Pipeline a b -> Poles (Body (,) [a] (K IO)) [a] [b]
+pipelineShard p = poles0 writeBatch readBatch
   where
     writeBatch = Body $ K $ \(_, xs) -> pure (xs, ())
     readBatch = Body $ K $ \(s, ()) -> pure ([], runPipeline p s)

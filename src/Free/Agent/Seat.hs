@@ -37,7 +37,7 @@ import Circuit.Agent.Tensor
     silentShard,
   )
 import Circuit.Category (K (..))
-import Circuit.Ends (composeEnds0)
+import Circuit.Poles (compose0)
 import Circuit.Poly (System, monoDir, system)
 import Control.Concurrent.STM (STM, atomically)
 import Data.Text (Text)
@@ -130,7 +130,7 @@ interpretSeat (SeatPipeline p) = pipelineShard p
 interpretSeat (SeatHost h) = hostShard h
 interpretSeat SeatSilent = silentShard
 interpretSeat (SeatCompose g f) =
-  composeEnds0 (interpretSeat f) (interpretSeat g)
+  compose0 (interpretSeat f) (interpretSeat g)
 interpretSeat (SeatFork f) = interpretSeat f
 interpretSeat (SeatAwait f g) =
   awaitShard (interpretSeat f) (interpretSeat g)

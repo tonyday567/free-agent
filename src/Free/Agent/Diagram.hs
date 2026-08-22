@@ -40,10 +40,10 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.ChannelPoly (runSystem, systemAsLens)
+import Circuit.System (runSystemMono, systemAsLens)
 import Circuit.Poly (Mono, System)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
-import Circuit.Process (Process, register, pattern P)
+import Circuit.Process (Process (..), register)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 
@@ -55,7 +55,7 @@ agentDiagram :: System (->) s (Mono i o) -> Diagram s s o i
 agentDiagram = box . systemAsLens
 
 -- | One Moore step as a diagram run: @(next state, output at current
--- state)@.  Definitionally @(snd (runSystem sys s) i, fst (runSystem
+-- state)@.  Definitionally @(snd (runSystemMono sys s) i, fst (runSystemMono
 -- sys s))@ — the oracle pins exactly this.
 diagramStep :: System (->) s (Mono i o) -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
@@ -76,7 +76,7 @@ diagramSteps sys s (i : is) =
 
 -- | Lift a pure function to a stateless 'Process' (the box a bend closes).
 liftProcess :: (a -> b) -> Process a b
-liftProcess f = P id (const id) f
+liftProcess f = Process id (const id) f
 
 -- | The stateless body of a system as a 'Process': consume the input
 -- (state transition), then read the output of the new state, and emit the
@@ -84,7 +84,7 @@ liftProcess f = P id (const id) f
 -- 'systemAsProcess' semantics: the output is read /after/ consuming the
 -- input.
 mooreBody :: System (->) s (Mono i o) -> Process (i, s) (o, s)
-mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runSystem sys s) i in (fst (runSystem sys s'), s'))
+mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runSystemMono sys s) i in (fst (runSystemMono sys s'), s'))
 
 -- | A system as a 'Process': the stateless 'mooreBody' with its state wire
 -- bent back through a one-tick 'delay' — 'register' makes the delay

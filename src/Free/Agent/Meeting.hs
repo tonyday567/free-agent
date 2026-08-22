@@ -36,7 +36,7 @@ where
 
 import Circuit.Agent (Agent, Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Query (synthesisPosts)
-import Circuit.ChannelPoly qualified as CP
+import Circuit.System qualified as System
 import Circuit.Poly (System, monoDir, monoIn, runSystem, system)
 import Data.List (inits, intersect)
 import Data.Text (Text)
@@ -54,8 +54,8 @@ data AgentBox where
 -- ('iterateSystem' semantics — output is read from the post-input state).
 runAgentBox :: AgentBox -> [Post Text] -> [PostId] -> ([Post Text], AgentBox)
 runAgentBox (AgentBox s ag) ins ids =
-  let s' = snd (CP.runSystem ag s) (ins, ids)
-      (outs, _) = CP.runSystem ag s'
+  let s' = snd (System.runSystemMono ag s) (ins, ids)
+      (outs, _) = System.runSystemMono ag s'
    in (outs, AgentBox s' ag)
 
 -- | Lift an agent that ignores ids into one that accepts the boxed
