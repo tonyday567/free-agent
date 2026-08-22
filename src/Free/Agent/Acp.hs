@@ -64,8 +64,8 @@ import Circuit.Agent.StdPorts
   )
 import Circuit.Ends (Ends, commit, companion, conjoint, emit, open)
 import Circuit.Layer (run)
+import Circuit.Category (K (..))
 import Circuit.Parser.Json (Json (..), decodeJson)
-import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
 import Data.Foldable (foldr)
@@ -138,7 +138,7 @@ openAcp cfg = do
             procWorkingDir = wd,
             procMarks = lineMarks
           }
-  pp <- runKleisli (run (openStdPorts encodeUtf8 decodeUtf8 replCfg)) ()
+  pp <- runK (run (openStdPorts encodeUtf8 decodeUtf8 replCfg)) ()
   nref <- newIORef 1
   pure
     AcpClient
@@ -241,8 +241,8 @@ acpSendValue :: AcpClient -> Json -> IO ()
 acpSendValue c v = do
   let line = encodeJsonText v
   logFrame c "send" line
-  runKleisli
-    (commit (stdIn (acpPorts c)) (companion (open :: Ends (Kleisli IO) () ())))
+  runK
+    (commit (stdIn (acpPorts c)) (companion (open :: Ends (K IO) () ())))
     line
 
 -- | Read the next stdout line, blocking until a complete line frame
@@ -250,8 +250,8 @@ acpSendValue c v = do
 acpReadLine :: AcpClient -> IO Text
 acpReadLine c = do
   t <-
-    runKleisli
-      (emit (stdOut (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
+    runK
+      (emit (stdOut (acpPorts c)) (conjoint (open :: Ends (K IO) () ())))
       ()
   logFrame c "recv" t
   pure t
@@ -529,8 +529,8 @@ acpReadStderr c = go []
     go acc = do
       m <-
         timeout 100_000 $
-          runKleisli
-            (emit (stdErr (acpPorts c)) (conjoint (open :: Ends (Kleisli IO) () ())))
+          runK
+            (emit (stdErr (acpPorts c)) (conjoint (open :: Ends (K IO) () ())))
             ()
       case m of
         Nothing -> pure (T.unlines (reverse acc))

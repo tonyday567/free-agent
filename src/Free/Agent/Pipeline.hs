@@ -25,9 +25,8 @@ where
 
 import Circuit (Body (..))
 import Circuit.Agent (Name, Post (..), deliversTo)
-import Circuit.Category (Category (..))
+import Circuit.Category (Category (..), K (..))
 import Circuit.Ends (Ends, ends0)
-import Control.Arrow (Kleisli (..))
 import Data.Text (Text)
 import Prelude hiding (id, (.))
 
@@ -95,8 +94,8 @@ runPipeline (Compose g f) = runPipeline g . runPipeline f
 --
 -- The state holds the pending input batch.  Commit replaces it; emit applies
 -- the pipeline and clears the buffer.
-pipelineShard :: Pipeline a b -> Ends (Body (,) (Kleisli IO) [a]) [a] [b]
+pipelineShard :: Pipeline a b -> Ends (Body (,) (K IO) [a]) [a] [b]
 pipelineShard p = ends0 writeBatch readBatch
   where
-    writeBatch = Body $ Kleisli $ \(_, xs) -> pure (xs, ())
-    readBatch = Body $ Kleisli $ \(s, ()) -> pure ([], runPipeline p s)
+    writeBatch = Body $ K $ \(_, xs) -> pure (xs, ())
+    readBatch = Body $ K $ \(s, ()) -> pure ([], runPipeline p s)

@@ -39,8 +39,8 @@ import Circuit.Agent.StdPorts
     openProc,
   )
 import Circuit.Ends (Ends (..), HasDual (..), In (..), Out (..))
+import Circuit.Category (K (..))
 import Circuit.Layer (run)
-import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically)
 import Control.Monad (unless, void)
@@ -88,7 +88,7 @@ runConnector :: ConnectorConfig -> IO ()
 runConnector cfg = do
   let name = connName cfg
   bus <- openBus (connBusRoot cfg)
-  repl <- runKleisli (run (openProc encodeUtf8 decodeUtf8 (connRepl cfg))) ()
+  repl <- runK (run (openProc encodeUtf8 decodeUtf8 (connRepl cfg))) ()
   void $ scribeIO bus (mkPost name [] ("starting repl: " <> T.pack (procCommand (connRepl cfg)) <> " " <> T.unwords (map T.pack (procArgs (connRepl cfg)))))
 
   -- Drain the initial frame (up to the first prompt).
@@ -190,22 +190,22 @@ stampedPost name asker askId bodyText =
   (mkPost name [asker] bodyText) {thread = [askId]}
 
 -- | Commit one 'Text' token through an 'Ends' conjoint.
-commitText :: Ends (Kleisli IO) Text b -> Text -> IO ()
-commitText e t = runKleisli (commit (conjoint e) outU) t
+commitText :: Ends (K IO) Text b -> Text -> IO ()
+commitText e t = runK (commit (conjoint e) outU) t
   where
     Ends _ outU = open
 
 -- | Emit one 'Text' frame from an 'Ends' companion.  Blocks until a
 -- complete frame arrives.
-emitText :: Ends (Kleisli IO) a Text -> IO Text
-emitText e = runKleisli (emit (companion e) inU) ()
+emitText :: Ends (K IO) a Text -> IO Text
+emitText e = runK (emit (companion e) inU) ()
   where
     Ends inU _ = open
 
 -- | Drain pending stderr lines, bounded: returns after ~100ms of quiet.
 -- Stderr is diagnostics, not dialogue — a bounded drain, not a blocking
 -- read, so a silent stderr cannot stall the turn.
-drainStderr :: Ends (Kleisli IO) a Text -> IO Text
+drainStderr :: Ends (K IO) a Text -> IO Text
 drainStderr e = go []
   where
     go acc = do

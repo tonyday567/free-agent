@@ -28,8 +28,8 @@ import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), P
 import Circuit.Ends (endsK)
 import Circuit.Layer ((:~>))
 import Circuit.Poly (Mono, System, monoDir, system)
+import Circuit.Category (K (..))
 import Circuit.Process (delay, register, scan)
-import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM (atomically, newTQueueIO, readTQueue, writeTQueue)
@@ -171,14 +171,14 @@ main = do
         freeF = Lift f :: FreeAgent (->) Int Int
         freeG = Lift g :: FreeAgent (->) Int Int
         freeGF = freeG `Compose` freeF
-        toMaybe :: (->) :~> Kleisli Maybe
-        toMaybe h = Kleisli (Just . h)
-        targetF = bindFreeAgent toMaybe freeF :: Kleisli Maybe Int Int
-        targetGF = bindFreeAgent toMaybe freeGF :: Kleisli Maybe Int Int
-    assert "bindFreeAgent folds into a discrete target (Kleisli Maybe)" $
-      runKleisli targetF 5 == Just 6
-    assert "bindFreeAgent preserves Compose into Kleisli Maybe" $
-      runKleisli targetGF 5 == Just 12
+        toMaybe :: (->) :~> K Maybe
+        toMaybe h = K (Just . h)
+        targetF = bindFreeAgent toMaybe freeF :: K Maybe Int Int
+        targetGF = bindFreeAgent toMaybe freeGF :: K Maybe Int Int
+    assert "bindFreeAgent folds into a discrete target (K Maybe)" $
+      runK targetF 5 == Just 6
+    assert "bindFreeAgent preserves Compose into K Maybe" $
+      runK targetGF 5 == Just 12
 
   -------------------------------------------------------------------------
   -- Pipeline laws (on the pure fold)
