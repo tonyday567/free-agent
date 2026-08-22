@@ -62,9 +62,9 @@ import Circuit.Agent.StdPorts
     lineMarks,
     openStdPorts,
   )
+import Circuit.Category (K (..))
 import Circuit.Ends (Ends, commit, companion, conjoint, emit, open)
 import Circuit.Layer (run)
-import Circuit.Category (K (..))
 import Circuit.Parser.Json (Json (..), decodeJson)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_)

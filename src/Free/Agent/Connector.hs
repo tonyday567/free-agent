@@ -38,8 +38,8 @@ import Circuit.Agent.StdPorts
     ghciMarks,
     openProc,
   )
-import Circuit.Ends (Ends (..), HasDual (..), In (..), Out (..))
 import Circuit.Category (K (..))
+import Circuit.Ends (Ends (..), HasDual (..), In (..), Out (..))
 import Circuit.Layer (run)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically)

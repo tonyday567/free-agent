@@ -20,7 +20,7 @@ import Circuit.Agent.Tensor
     raceShard,
     silentShard,
   )
-import Circuit.Category (Category (id, (.)))
+import Circuit.Category (Category (id, (.)), K (..))
 import Circuit.Channel (Strength (..), Traced (..))
 import Circuit.ChannelPoly (iterateSystem, runSystem)
 import Circuit.Diagram (SDiagram (..))
@@ -28,7 +28,6 @@ import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), P
 import Circuit.Ends (endsK)
 import Circuit.Layer ((:~>))
 import Circuit.Poly (Mono, System, monoDir, system)
-import Circuit.Category (K (..))
 import Circuit.Process (delay, register, scan)
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (async, cancel)

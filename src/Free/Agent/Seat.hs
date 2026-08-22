@@ -36,8 +36,8 @@ import Circuit.Agent.Tensor
     raceShard,
     silentShard,
   )
-import Circuit.Ends (composeEnds0)
 import Circuit.Category (K (..))
+import Circuit.Ends (composeEnds0)
 import Circuit.Poly (System, monoDir, system)
 import Control.Concurrent.STM (STM, atomically)
 import Data.Text (Text)
