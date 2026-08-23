@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 -- | Small helpers over 'Circuit.Parser.Json.Json' for the free-agent wire
 -- codecs.  These are the shapes that 'Free.Agent.Acp', 'Free.Agent.Gateway',
 -- and 'Free.Agent.BusStats' need; they are not a general JSON utility library.

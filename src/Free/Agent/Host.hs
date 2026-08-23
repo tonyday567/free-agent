@@ -89,14 +89,14 @@ bodyArgs BodyWhole = (: [])
 -- carry no thread edge.  Callers that need provenance should thread by id
 -- outside the host.
 hostShard :: Host -> AgentShard [Post Text] [Post Text]
-hostShard h = ioShard $ \xs ->
-  concat
-    <$> traverse
-      ( \p -> do
-          outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
-          pure [mkPost (hostName h) [from p] o | o <- outs]
-      )
-      xs
+hostShard h =
+  ioShard $
+    fmap concat
+      . traverse
+        ( \p -> do
+            outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
+            pure [mkPost (hostName h) [from p] o | o <- outs]
+        )
 
 -- | A host backed by an external process.
 --

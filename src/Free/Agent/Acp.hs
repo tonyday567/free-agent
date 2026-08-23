@@ -63,10 +63,10 @@ import Circuit.Agent.StdPorts
     openStdPorts,
   )
 import Circuit.Category (K (..))
-import Circuit.Poles (In (..), Out (..), Poles (..), HasDual (..))
 import Circuit.Layer (run)
-import Circuit.Syntax (eval)
 import Circuit.Parser.Json (Json (..), decodeJson)
+import Circuit.Poles (HasDual (..), In (..), Out (..), Poles (..))
+import Circuit.Syntax (eval)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
 import Data.Foldable (foldr)

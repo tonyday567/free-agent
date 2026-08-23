@@ -36,8 +36,8 @@ where
 
 import Circuit.Agent (Agent, Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Query (synthesisPosts)
-import Circuit.System qualified as System
 import Circuit.Poly (System, monoDir, monoIn, runSystem, system)
+import Circuit.System qualified as System
 import Data.List (inits, intersect)
 import Data.Text (Text)
 import Data.Text qualified as T

@@ -16,11 +16,13 @@ description:
   processHost shards (multi-post emit), and FreeSeat composition into
   Shard (StateT [Post] IO) via composeEnds. Package role ABOVE — depends on
   circuits-agent; does not replace Post/Agent/Shard.
+
 build-type: Simple
 tested-with:
   ghc ==9.10.1
   ghc ==9.12.2
   ghc ==9.14.1
+
 extra-doc-files:
   ChangeLog.md
   readme.md
