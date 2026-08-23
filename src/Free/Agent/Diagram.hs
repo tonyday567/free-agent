@@ -39,10 +39,10 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.Poly (Mono, System)
+import Circuit.Poly (Mono)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
 import Circuit.Process (Process (..), register)
-import Circuit.System (runSystemMono, systemAsLens)
+import Circuit.System (System, runSystemMono, systemAsLens)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 

@@ -34,7 +34,8 @@ module Free.Agent.Hyper
   )
 where
 
-import Circuit.Poly (Mono, System, runSystem, system)
+import Circuit.Poly (Mono)
+import Circuit.System (System, runSystem, system)
 
 -- | Fork: duplicate a stream.
 copyP :: [a] -> ([a], [a])

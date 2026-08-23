@@ -38,7 +38,7 @@ import Circuit.Agent.Tensor
   )
 import Circuit.Category (K (..))
 import Circuit.Poles (compose0)
-import Circuit.Poly (System, monoDir, system)
+import Circuit.System (System, monoDir, system)
 import Control.Concurrent.STM (STM, atomically)
 import Data.Text (Text)
 import Free.Agent.Host (Host, hostShard)
