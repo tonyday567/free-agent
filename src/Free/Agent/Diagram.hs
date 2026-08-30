@@ -2,8 +2,8 @@
 
 -- | Bridge: agents as string diagrams (stage 1 of endgame-path).
 --
--- A monomial 'System' is a lens from its state interface
--- (@systemAsLens@: @System s p ≅ Poly(S y^S, p)@), and 'box' lifts such a
+-- A monomial 'Moore (,)' is a lens from its state interface
+-- (@mooreAsLens@: @Moore (,) s p ≅ Poly(S y^S, p)@), and 'box' lifts such a
 -- lens into the string-diagram DSL.  The result runs one Moore step per
 -- 'runDiagram' call: the forward wire carries state → output, the backward
 -- wire carries input-direction → next state.
@@ -42,31 +42,31 @@ import Circuit.Agent (Post (..))
 import Circuit.Poly (Mono)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
 import Circuit.Process (Process (..), register)
-import Circuit.System (System, runSystemMono, systemAsLens)
+import Circuit.Moore (Moore (..), runMooreMono, mooreAsLens)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 
 -- | A monomial system as a one-box diagram.
 --
--- @box . systemAsLens@: forward wire @s → o@ (state to output), backward
+-- @box . mooreAsLens@: forward wire @s → o@ (state to output), backward
 -- wire @i → s@ (input direction to next state).
-agentDiagram :: System (->) s (Mono i o) -> Diagram s s o i
-agentDiagram = box . systemAsLens
+agentDiagram :: Moore (,) (->) s (Mono i o) -> Diagram s s o i
+agentDiagram = box . mooreAsLens
 
 -- | One Moore step as a diagram run: @(next state, output at current
--- state)@.  Definitionally @(snd (runSystemMono sys s) i, fst (runSystemMono
+-- state)@.  Definitionally @(snd (runMooreMono sys s) i, fst (runMooreMono
 -- sys s))@ — the oracle pins exactly this.
-diagramStep :: System (->) s (Mono i o) -> s -> i -> (s, o)
+diagramStep :: Moore (,) (->) s (Mono i o) -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 
 -- | Iterate a system over inputs through the diagram, mirroring
--- 'iterateSystem' (which emits the output of the state /after/ each
+-- 'iterateMoore' (which emits the output of the state /after/ each
 -- transition).  Each step runs the diagram twice with the same input: once
 -- to consume (state transition), once to observe (output at the new
 -- state).  The backward pass is pure, so the second run is harmless — and
 -- both passes go through 'runDiagram', so the oracle exercises the bridge
 -- end to end.
-diagramSteps :: System (->) s (Mono i o) -> s -> [i] -> [o]
+diagramSteps :: Moore (,) (->) s (Mono i o) -> s -> [i] -> [o]
 diagramSteps _ _ [] = []
 diagramSteps sys s (i : is) =
   let (s', _) = diagramStep sys s i
@@ -79,18 +79,18 @@ liftProcess f = Process id (const id) f
 
 -- | The stateless body of a system as a 'Process': consume the input
 -- (state transition), then read the output of the new state, and emit the
--- new state on the feedback wire.  This matches 'iterateSystem' /
+-- new state on the feedback wire.  This matches 'iterateMoore' /
 -- 'systemAsProcess' semantics: the output is read /after/ consuming the
 -- input.
-mooreBody :: System (->) s (Mono i o) -> Process (i, s) (o, s)
-mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runSystemMono sys s) i in (fst (runSystemMono sys s'), s'))
+mooreBody :: Moore (,) (->) s (Mono i o) -> Process (i, s) (o, s)
+mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runMooreMono sys s) i in (fst (runMooreMono sys s'), s'))
 
 -- | A system as a 'Process': the stateless 'mooreBody' with its state wire
 -- bent back through a one-tick 'delay' — 'register' makes the delay
 -- explicit in the wiring rather than implicit in a lazy knot.
 --
--- Oracle-pinned: @scan (mooreProcess sys s0) is == iterateSystem sys s0 is@.
-mooreProcess :: System (->) s (Mono i o) -> s -> Process i o
+-- Oracle-pinned: @scan (mooreProcess sys s0) is == iterateMoore sys s0 is@.
+mooreProcess :: Moore (,) (->) s (Mono i o) -> s -> Process i o
 mooreProcess sys s0 = register s0 (mooreBody sys)
 
 -- | The drawing skeleton of a conversation: each post is a box labelled by

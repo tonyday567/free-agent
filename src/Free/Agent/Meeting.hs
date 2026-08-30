@@ -36,8 +36,8 @@ where
 
 import Circuit.Agent (Agent, Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Query (synthesisPosts)
-import Circuit.System (System, monoDir, monoIn, runSystem, system)
-import Circuit.System qualified as System
+import Circuit.Moore (Moore (..), monoDir, monoIn, mooreMorphism, moore)
+import Circuit.Moore qualified as Moore
 import Data.List (inits, intersect)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -51,20 +51,20 @@ data AgentBox where
   AgentBox :: s -> Agent (->) s ([Post Text], [PostId]) [Post Text] -> AgentBox
 
 -- | One batch step: absorb the input and its ids, emit the answer
--- ('iterateSystem' semantics — output is read from the post-input state).
+-- ('iterateMoore' semantics — output is read from the post-input state).
 runAgentBox :: AgentBox -> [Post Text] -> [PostId] -> ([Post Text], AgentBox)
 runAgentBox (AgentBox s ag) ins ids =
-  let s' = snd (System.runSystemMono ag s) (ins, ids)
-      (outs, _) = System.runSystemMono ag s'
+  let s' = snd (Moore.runMooreMono ag s) (ins, ids)
+      (outs, _) = Moore.runMooreMono ag s'
    in (outs, AgentBox s' ag)
 
 -- | Lift an agent that ignores ids into one that accepts the boxed
 -- @(posts, ids)@ input.  This is the minimal adapter for existing agents
 -- that do not need provenance.
 withIds :: Agent (->) s [Post Text] [Post Text] -> Agent (->) s ([Post Text], [PostId]) [Post Text]
-withIds ag = system $ \(s, d) ->
+withIds ag = moore $ \(s, d) ->
   let (ins, _ids) = monoDir d
-   in runSystem ag (s, monoIn ins)
+   in mooreMorphism ag (s, monoIn ins)
 
 -- | A deterministic oracle agent: answers each batch with one honest
 -- synthesis post ('synthesisPosts') whose body quotes what it saw.  @tag@
@@ -74,7 +74,7 @@ withIds ag = system $ \(s, d) ->
 -- the state carries the last batch and its ids seen, and the emit answers
 -- it.
 quoter :: Name -> Text -> Agent (->) ([Post Text], [PostId], [Post Text], [PostId]) ([Post Text], [PostId]) [Post Text]
-quoter who tag = system $ \((hist, histIds, batch, batchIds), d) ->
+quoter who tag = moore $ \((hist, histIds, batch, batchIds), d) ->
   let (ins, insIds) = monoDir d
       out = case batch of
         [] -> []

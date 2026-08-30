@@ -102,7 +102,7 @@ hostShard h =
 --
 -- The command receives the fixed @args@ followed by the prepared post body
 -- (one argument when 'BodyWhole', whitespace-split words by default).  Output
--- lines become reply posts.  Uses 'System.Process.readProcess'.
+-- lines become reply posts.  Uses 'Moore.Process.readProcess'.
 processHost ::
   -- | Host name.
   Text ->
