@@ -50,13 +50,13 @@ import Data.Text qualified as T
 --
 -- @box . mooreAsLens@: forward wire @s → o@ (state to output), backward
 -- wire @i → s@ (input direction to next state).
-agentDiagram :: Moore (,) (->) s (Mono i o) -> Diagram s s o i
+agentDiagram :: Moore (,) s (->) (Mono i o) -> Diagram s s o i
 agentDiagram = box . mooreAsLens
 
 -- | One Moore step as a diagram run: @(next state, output at current
 -- state)@.  Definitionally @(snd (runMooreMono sys s) i, fst (runMooreMono
 -- sys s))@ — the oracle pins exactly this.
-diagramStep :: Moore (,) (->) s (Mono i o) -> s -> i -> (s, o)
+diagramStep :: Moore (,) s (->) (Mono i o) -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 
 -- | Iterate a system over inputs through the diagram, mirroring
@@ -66,7 +66,7 @@ diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 -- state).  The backward pass is pure, so the second run is harmless — and
 -- both passes go through 'runDiagram', so the oracle exercises the bridge
 -- end to end.
-diagramSteps :: Moore (,) (->) s (Mono i o) -> s -> [i] -> [o]
+diagramSteps :: Moore (,) s (->) (Mono i o) -> s -> [i] -> [o]
 diagramSteps _ _ [] = []
 diagramSteps sys s (i : is) =
   let (s', _) = diagramStep sys s i
@@ -82,7 +82,7 @@ liftProcess f = Process id (const id) f
 -- new state on the feedback wire.  This matches 'iterateMoore' /
 -- 'systemAsProcess' semantics: the output is read /after/ consuming the
 -- input.
-mooreBody :: Moore (,) (->) s (Mono i o) -> Process (i, s) (o, s)
+mooreBody :: Moore (,) s (->) (Mono i o) -> Process (i, s) (o, s)
 mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runMooreMono sys s) i in (fst (runMooreMono sys s'), s'))
 
 -- | A system as a 'Process': the stateless 'mooreBody' with its state wire
@@ -90,7 +90,7 @@ mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runMooreMono sys s) i in (
 -- explicit in the wiring rather than implicit in a lazy knot.
 --
 -- Oracle-pinned: @scan (mooreProcess sys s0) is == iterateMoore sys s0 is@.
-mooreProcess :: Moore (,) (->) s (Mono i o) -> s -> Process i o
+mooreProcess :: Moore (,) s (->) (Mono i o) -> s -> Process i o
 mooreProcess sys s0 = register s0 (mooreBody sys)
 
 -- | The drawing skeleton of a conversation: each post is a box labelled by

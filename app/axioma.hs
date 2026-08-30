@@ -866,7 +866,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "diagram bridge"
   do
-    let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) (->) Int (Mono Int Int)
+    let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) Int (->) (Mono Int Int)
     assert "diagram step is mooreMorphism's (put, get)" $
       diagramStep sysN 5 3 == (snd (runMooreMono sysN 5) 3, fst (runMooreMono sysN 5))
     assert "diagram steps mirror iterateMoore" $
@@ -903,7 +903,7 @@ main = do
       scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 2, 3, 4]
 
   do
-    let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) (->) Int (Mono Int Int)
+    let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) Int (->) (Mono Int Int)
     assert "register body with delay mirrors iterateMoore" $
       scan (mooreProcess sysN 0) [1 .. 5] == iterateMoore sysN 0 [1 .. 5]
 

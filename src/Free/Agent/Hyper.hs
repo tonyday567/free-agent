@@ -59,7 +59,7 @@ braidP :: ((a, b), (c, d)) -> ((a, c), (b, d))
 braidP ((a, b), (c, d)) = ((a, c), (b, d))
 
 -- | The silent agent: emits nothing.  Additive zero for 'both'.
-silent :: Moore (,) (->) () (Mono a [b])
+silent :: Moore (,) () (->) (Mono a [b])
 silent = moore (\((), _) -> ((), ([], ())))
 
 -- | Merge two bundle-output agents: both see the same input, outputs are
@@ -69,9 +69,9 @@ silent = moore (\((), _) -> ((), ([], ())))
 -- on either side; /not/ idempotent — @both a a@ double-posts (bag at the
 -- wire).
 both ::
-  Moore (,) (->) s1 (Mono a [b]) ->
-  Moore (,) (->) s2 (Mono a [b]) ->
-  Moore (,) (->) (s1, s2) (Mono a [b])
+  Moore (,) s1 (->) (Mono a [b]) ->
+  Moore (,) s2 (->) (Mono a [b]) ->
+  Moore (,) (s1, s2) (->) (Mono a [b])
 both x y = moore $ \((s1, s2), d) ->
   let (s1', (o1, ())) = mooreMorphism x (s1, d)
       (s2', (o2, ())) = mooreMorphism y (s2, d)
