@@ -37,8 +37,8 @@ import Circuit.Agent.Tensor
     silentShard,
   )
 import Circuit.Category (K (..))
-import Circuit.Poles (compose0)
 import Circuit.Moore (Moore (..), monoDir, moore)
+import Circuit.Poles (compose0)
 import Control.Concurrent.STM (STM, atomically)
 import Data.Text (Text)
 import Free.Agent.Host (Host, hostShard)

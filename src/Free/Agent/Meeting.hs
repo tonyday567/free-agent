@@ -36,7 +36,7 @@ where
 
 import Circuit.Agent (Agent, Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Query (synthesisPosts)
-import Circuit.Moore (Moore (..), monoDir, monoIn, mooreMorphism, moore)
+import Circuit.Moore (Moore (..), monoDir, monoIn, moore, mooreMorphism)
 import Circuit.Moore qualified as Moore
 import Data.List (inits, intersect)
 import Data.Text (Text)

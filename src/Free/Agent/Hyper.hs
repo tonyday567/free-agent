@@ -34,8 +34,8 @@ module Free.Agent.Hyper
   )
 where
 
+import Circuit.Moore (Moore (..), moore, mooreMorphism)
 import Circuit.Poly (Mono)
-import Circuit.Moore (Moore (..), mooreMorphism, moore)
 
 -- | Fork: duplicate a stream.
 copyP :: [a] -> ([a], [a])
