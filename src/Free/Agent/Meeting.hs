@@ -36,8 +36,9 @@ where
 
 import Circuit.Agent (Agent, Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Query (synthesisPosts)
-import Circuit.Moore (Moore (..), monoDir, monoIn, moore, mooreMorphism)
+import Circuit.Moore (Moore (..), monoDir, monoIn, moore, mooreMorphism, toEvalMoore)
 import Circuit.Moore qualified as Moore
+import Circuit.Poly (Eval (..), Mono)
 import Data.List (inits, intersect)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -54,8 +55,10 @@ data AgentBox where
 -- (post-input timing — output is read from the state after consuming the input).
 runAgentBox :: AgentBox -> [Post Text] -> [PostId] -> ([Post Text], AgentBox)
 runAgentBox (AgentBox s ag) ins ids =
-  let s' = snd (Moore.runMooreMono ag s) (ins, ids)
-      (outs, _) = Moore.runMooreMono ag s'
+  let runMono :: Moore (,) s (->) (Mono i o) -> s -> (o, i -> s)
+      runMono sys st = case toEvalMoore sys st of EP (EK o, EE f) -> (o, f)
+      s' = snd (runMono ag s) (ins, ids)
+      (outs, _) = runMono ag s'
    in (outs, AgentBox s' ag)
 
 -- | Lift an agent that ignores ids into one that accepts the boxed

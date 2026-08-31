@@ -2,11 +2,11 @@
 
 -- | Bridge: agents as string diagrams (stage 1 of endgame-path).
 --
--- A monomial 'Moore (,)' is a lens from its state interface
--- (@mooreAsLens@: @Moore (,) s p ≅ Poly(S y^S, p)@), and 'box' lifts such a
--- lens into the string-diagram DSL.  The result runs one Moore step per
--- 'runDiagram' call: the forward wire carries state → output, the backward
--- wire carries input-direction → next state.
+-- A monomial 'Moore (,)' converts to a pointed process and then to a lens
+-- (@pprocessAsLens@), and 'box' lifts such a lens into the string-diagram
+-- DSL.  The result runs one Moore step per 'runDiagram' call: the forward
+-- wire carries state → output, the backward wire carries input-direction →
+-- next state.
 --
 -- Stage 1b: the bend, at the 'Process' layer.  A stateful agent decomposes
 -- as a stateless body plus cross-tick feedback: 'register' closes the
@@ -39,23 +39,28 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.Moore (Moore (..), mooreAsLens, runMooreMono)
-import Circuit.Poly (Mono)
+import Circuit.Moore (Moore (..), toEvalMoore)
+import Circuit.Optic (pprocessAsLens)
+import Circuit.Poly (Eval (..), Mono)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
-import Circuit.Process (Process (..), register)
+import Circuit.Process (Process (..), asPProcess, register)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 
 -- | A monomial system as a one-box diagram.
 --
--- @box . mooreAsLens@: forward wire @s → o@ (state to output), backward
--- wire @i → s@ (input direction to next state).
+-- @box . pprocessAsLens . asPProcess sys@: forward wire @s → o@ (state to
+-- output), backward wire @i → s@ (input direction to next state).  The lens
+-- ignores the seed, so the pointed-process wrapper is a formality.
 agentDiagram :: Moore (,) s (->) (Mono i o) -> Diagram s s o i
-agentDiagram = box . mooreAsLens
+agentDiagram sys = box . pprocessAsLens . asPProcess sys $ error "seed unused by lens"
+
+runMono :: Moore (,) s (->) (Mono i o) -> s -> (o, i -> s)
+runMono sys s = case toEvalMoore sys s of EP (EK o, EE f) -> (o, f)
 
 -- | One Moore step as a diagram run: @(next state, output at current
--- state)@.  Definitionally @(snd (runMooreMono sys s) i, fst (runMooreMono
--- sys s))@ — the oracle pins exactly this.
+-- state)@.  Definitionally @(snd (runMono sys s) i, fst (runMono sys s))@
+-- — the oracle pins exactly this.
 diagramStep :: Moore (,) s (->) (Mono i o) -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 
@@ -83,7 +88,7 @@ liftProcess f = Process id (const id) f
 -- 'scanPProcess' / 'systemAsProcess': the output is read /after/ consuming
 -- the input.
 mooreBody :: Moore (,) s (->) (Mono i o) -> Process (i, s) (o, s)
-mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runMooreMono sys s) i in (fst (runMooreMono sys s'), s'))
+mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runMono sys s) i in (fst (runMono sys s'), s'))
 
 -- | A system as a 'Process': the stateless 'mooreBody' with its state wire
 -- bent back through a one-tick 'delay' — 'register' makes the delay

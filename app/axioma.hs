@@ -24,10 +24,11 @@ import Circuit.Category (Category (id, (.)), K (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
 import Circuit.Layer ((:~>))
-import Circuit.Moore (Moore (..), asPProcess, monoDir, moore, runMooreMono)
+import Circuit.Moore (Moore (..), monoDir, moore, toEvalMoore)
+import Circuit.Optic (pprocessAsLens)
 import Circuit.Poles (polesK)
-import Circuit.Poly (Mono)
-import Circuit.Process (delay, register, scan, scanPProcess)
+import Circuit.Poly (Eval (..), Mono)
+import Circuit.Process (asPProcess, delay, register, scan, scanPProcess)
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (async, cancel)
@@ -104,6 +105,10 @@ assert msg ok =
 -- | Replacement for the removed 'iterateAgent' runner.
 iterateAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> [o]
 iterateAgent sys s0 = scanPProcess (asPProcess sys s0)
+
+-- | Local monomial evaluation helper.
+runMono :: Moore (,) s (->) (Mono i o) -> s -> (o, i -> s)
+runMono sys s = case toEvalMoore sys s of EP (EK o, EE f) -> (o, f)
 
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a ds []
@@ -872,7 +877,7 @@ main = do
   do
     let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) Int (->) (Mono Int Int)
     assert "diagram step is mooreMorphism's (put, get)" $
-      diagramStep sysN 5 3 == (snd (runMooreMono sysN 5) 3, fst (runMooreMono sysN 5))
+      diagramStep sysN 5 3 == (snd (runMono sysN 5) 3, fst (runMono sysN 5))
     assert "diagram steps mirror iterateAgent" $
       diagramSteps sysN 0 [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
 
@@ -888,7 +893,7 @@ main = do
           ]
     assert "tape agent: diagram step is mooreMorphism's (put, get)" $
       diagramStep echo [] p0
-        == (snd (runMooreMono echo []) p0, fst (runMooreMono echo []))
+        == (snd (runMono echo []) p0, fst (runMono echo []))
     assert "tape agent: diagram steps mirror iterateAgent" $
       diagramSteps echo [] ins == iterateAgent echo [] ins
 
