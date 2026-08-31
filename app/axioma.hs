@@ -24,10 +24,10 @@ import Circuit.Category (Category (id, (.)), K (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
 import Circuit.Layer ((:~>))
-import Circuit.Moore (Moore (..), iterateMoore, monoDir, moore, runMooreMono)
+import Circuit.Moore (Moore (..), asPProcess, monoDir, moore, runMooreMono)
 import Circuit.Poles (polesK)
 import Circuit.Poly (Mono)
-import Circuit.Process (delay, register, scan)
+import Circuit.Process (delay, register, scan, scanPProcess)
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (async, cancel)
@@ -100,6 +100,10 @@ assert msg ok =
     else do
       putStrLn ("  FAIL " ++ msg)
       exitFailure
+
+-- | Replacement for the removed 'iterateAgent' runner.
+iterateAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> [o]
+iterateAgent sys s0 = scanPProcess (asPProcess sys s0)
 
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a ds []
@@ -869,8 +873,8 @@ main = do
     let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) Int (->) (Mono Int Int)
     assert "diagram step is mooreMorphism's (put, get)" $
       diagramStep sysN 5 3 == (snd (runMooreMono sysN 5) 3, fst (runMooreMono sysN 5))
-    assert "diagram steps mirror iterateMoore" $
-      diagramSteps sysN 0 [1 .. 5] == iterateMoore sysN 0 [1 .. 5]
+    assert "diagram steps mirror iterateAgent" $
+      diagramSteps sysN 0 [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
 
   do
     let echo =
@@ -885,8 +889,8 @@ main = do
     assert "tape agent: diagram step is mooreMorphism's (put, get)" $
       diagramStep echo [] p0
         == (snd (runMooreMono echo []) p0, fst (runMooreMono echo []))
-    assert "tape agent: diagram steps mirror iterateMoore" $
-      diagramSteps echo [] ins == iterateMoore echo [] ins
+    assert "tape agent: diagram steps mirror iterateAgent" $
+      diagramSteps echo [] ins == iterateAgent echo [] ins
 
   -------------------------------------------------------------------------
   -- Bend with delay (endgame stage 1b): a stateful agent decomposes as a
@@ -904,16 +908,16 @@ main = do
 
   do
     let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) Int (->) (Mono Int Int)
-    assert "register body with delay mirrors iterateMoore" $
-      scan (mooreProcess sysN 0) [1 .. 5] == iterateMoore sysN 0 [1 .. 5]
+    assert "register body with delay mirrors iterateAgent" $
+      scan (mooreProcess sysN 0) [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
 
   do
     let echo =
           tape (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
             Agent (->) [Post Text] (Post Text) [Post Text]
         ins = [mkPost "human" ["bot"] "one", mkPost "human" ["bot"] "two"]
-    assert "tape agent: register body with delay mirrors iterateMoore" $
-      scan (mooreProcess echo []) ins == iterateMoore echo [] ins
+    assert "tape agent: register body with delay mirrors iterateAgent" $
+      scan (mooreProcess echo []) ins == iterateAgent echo [] ins
 
   -- The bend-and-delay identity from Circuit.Process: for bodies whose
   -- fixed point is independent of the initial feedback value, register's
@@ -1025,19 +1029,19 @@ main = do
     let agA = tape (\hist -> [mkPost "a" [] ("a:" <> T.pack (show (length hist)))]) :: Agent (->) [Post Text] (Post Text) [Post Text]
         agB = tape (\hist -> [mkPost "b" [] ("b:" <> T.pack (show (length hist)))]) :: Agent (->) [Post Text] (Post Text) [Post Text]
         ins = [mkPost "human" ["x"] "one", mkPost "human" ["x"] "two"]
-        outsAB = concat (iterateMoore (both agA agB) ([], []) ins)
-        outsBA = concat (iterateMoore (both agB agA) ([], []) ins)
+        outsAB = concat (iterateAgent (both agA agB) ([], []) ins)
+        outsBA = concat (iterateAgent (both agB agA) ([], []) ins)
     assert "both commutes as a bag of outputs" $
       toBag outsAB == toBag outsBA
     assert "both emits left then right per step" $
       map from outsAB == ["a", "b", "a", "b"]
     assert "silent is a left zero for both" $
-      iterateMoore (both silent agA) ((), []) ins == iterateMoore agA [] ins
+      iterateAgent (both silent agA) ((), []) ins == iterateAgent agA [] ins
     assert "silent is a right zero for both" $
-      iterateMoore (both agA silent) ([], ()) ins == iterateMoore agA [] ins
+      iterateAgent (both agA silent) ([], ()) ins == iterateAgent agA [] ins
     assert "both is not idempotent: bag at the wire (double-post)" $
-      length (concat (iterateMoore (both agA agA) ([], []) ins))
-        == 2 * length (concat (iterateMoore agA [] ins))
+      length (concat (iterateAgent (both agA agA) ([], []) ins))
+        == 2 * length (concat (iterateAgent agA [] ins))
 
   -- Replay (endgame stage 5): swap one box, re-derive the meeting.
   -- Deterministic quoters stand in for models; the tag is the "model".

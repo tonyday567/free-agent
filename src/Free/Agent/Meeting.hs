@@ -51,7 +51,7 @@ data AgentBox where
   AgentBox :: s -> Agent (->) s ([Post Text], [PostId]) [Post Text] -> AgentBox
 
 -- | One batch step: absorb the input and its ids, emit the answer
--- ('iterateMoore' semantics — output is read from the post-input state).
+-- (post-input timing — output is read from the state after consuming the input).
 runAgentBox :: AgentBox -> [Post Text] -> [PostId] -> ([Post Text], AgentBox)
 runAgentBox (AgentBox s ag) ins ids =
   let s' = snd (Moore.runMooreMono ag s) (ins, ids)

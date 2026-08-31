@@ -59,10 +59,10 @@ agentDiagram = box . mooreAsLens
 diagramStep :: Moore (,) s (->) (Mono i o) -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 
--- | Iterate a system over inputs through the diagram, mirroring
--- 'iterateMoore' (which emits the output of the state /after/ each
--- transition).  Each step runs the diagram twice with the same input: once
--- to consume (state transition), once to observe (output at the new
+-- | Iterate a system over inputs through the diagram, mirroring the
+-- post-input timing of 'scanPProcess' (output is read from the state /after/
+-- each transition).  Each step runs the diagram twice with the same input:
+-- once to consume (state transition), once to observe (output at the new
 -- state).  The backward pass is pure, so the second run is harmless — and
 -- both passes go through 'runDiagram', so the oracle exercises the bridge
 -- end to end.
@@ -79,9 +79,9 @@ liftProcess f = Process id (const id) f
 
 -- | The stateless body of a system as a 'Process': consume the input
 -- (state transition), then read the output of the new state, and emit the
--- new state on the feedback wire.  This matches 'iterateMoore' /
--- 'systemAsProcess' semantics: the output is read /after/ consuming the
--- input.
+-- new state on the feedback wire.  This matches the post-input timing of
+-- 'scanPProcess' / 'systemAsProcess': the output is read /after/ consuming
+-- the input.
 mooreBody :: Moore (,) s (->) (Mono i o) -> Process (i, s) (o, s)
 mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runMooreMono sys s) i in (fst (runMooreMono sys s'), s'))
 
@@ -89,7 +89,7 @@ mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runMooreMono sys s) i in (
 -- bent back through a one-tick 'delay' — 'register' makes the delay
 -- explicit in the wiring rather than implicit in a lazy knot.
 --
--- Oracle-pinned: @scan (mooreProcess sys s0) is == iterateMoore sys s0 is@.
+-- Oracle-pinned: @scan (mooreProcess sys s0) is == scanPProcess (asPProcess sys s0) is@.
 mooreProcess :: Moore (,) s (->) (Mono i o) -> s -> Process i o
 mooreProcess sys s0 = register s0 (mooreBody sys)
 
