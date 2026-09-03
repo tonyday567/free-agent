@@ -39,6 +39,7 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
+import Circuit.Equip (Cell (..))
 import Circuit.Moore (Moore (..), toEvalMoore)
 import Circuit.Optic (pprocessAsLens)
 import Circuit.Poly (Eval (..), Mono)
@@ -53,7 +54,7 @@ import Data.Text qualified as T
 -- output), backward wire @i → s@ (input direction to next state).  The lens
 -- ignores the seed, so the pointed-process wrapper is a formality.
 agentDiagram :: Moore (,) s (->) (Mono i o) -> Diagram s s o i
-agentDiagram sys = box . pprocessAsLens . asPProcess sys $ error "seed unused by lens"
+agentDiagram sys = box . pprocessAsLens . asPProcess sys $ Cell (error "seed unused by lens")
 
 runMono :: Moore (,) s (->) (Mono i o) -> s -> (o, i -> s)
 runMono sys s = case toEvalMoore sys s of EP (EK o, EE f) -> (o, f)
@@ -96,7 +97,7 @@ mooreBody sys = liftProcess (\(i, s) -> let s' = snd (runMono sys s) i in (fst (
 --
 -- Oracle-pinned: @scan (mooreProcess sys s0) is == scanPProcess (asPProcess sys s0) is@.
 mooreProcess :: Moore (,) s (->) (Mono i o) -> s -> Process i o
-mooreProcess sys s0 = register s0 (mooreBody sys)
+mooreProcess sys s0 = register (Cell s0) (mooreBody sys)
 
 -- | The drawing skeleton of a conversation: each post is a box labelled by
 -- its sender, wired by its 'thread' ancestry — "the log is the diagram of

@@ -23,7 +23,7 @@ import Circuit.Agent.Tensor
 import Circuit.Category (Category (id, (.)), K (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
-import Circuit.Equip (polesK)
+import Circuit.Equip (Cell (..), polesK)
 import Circuit.Layer ((:~>))
 import Circuit.Moore (Moore (..), monoDir, moore, toEvalMoore)
 import Circuit.Optic (pprocessAsLens)
@@ -104,7 +104,7 @@ assert msg ok =
 
 -- | Replacement for the removed 'iterateAgent' runner.
 iterateAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> [o]
-iterateAgent sys s0 = scanPProcess (asPProcess sys s0)
+iterateAgent sys s0 = scanPProcess (asPProcess sys (Cell s0))
 
 -- | Local monomial evaluation helper.
 runMono :: Moore (,) s (->) (Mono i o) -> s -> (o, i -> s)
@@ -909,7 +909,7 @@ main = do
     -- (Inside register, where the feedback wire carries the body's own
     -- state output, this is exactly "observable one tick late".)
     assert "delay emits initial value, then the tail one tick late" $
-      scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 2, 3, 4]
+      scan (delay (Cell 0)) [1, 2, 3, 4 :: Int] == [0, 2, 3, 4]
 
   do
     let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) Int (->) (Mono Int Int)
@@ -931,8 +931,8 @@ main = do
     let body = liftProcess (\(i, _s) -> (i * 2, 0 :: Int))
         swapP = liftProcess (\(a, b) -> (b, a))
         ins = [1, 2, 3, 4 :: Int]
-        viaRegister = scan (register 99 body) ins
-        viaTrace = scan (yank (swapP . (body . strength (delay 99)) . swapP)) ins
+        viaRegister = scan (register (Cell 99) body) ins
+        viaTrace = scan (yank (swapP . (body . strength (delay (Cell 99))) . swapP)) ins
     assert "register ≡ trace with delay on the feedback wire" $
       viaRegister == viaTrace && viaRegister == [2, 4, 6, 8]
 
