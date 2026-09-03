@@ -39,7 +39,7 @@ import Circuit.Agent.StdPorts
     openProc,
   )
 import Circuit.Category (K (..))
-import Circuit.Equip (HasDual (..), In (..), Out (..), Poles (..))
+import Circuit.Equip (Poles (..))
 import Circuit.Layer (run)
 import Circuit.Syntax (eval)
 import Control.Concurrent (threadDelay)
@@ -191,22 +191,18 @@ stampedPost name asker askId bodyText =
   (mkPost name [asker] bodyText) {thread = [askId]}
 
 -- | Commit one 'Text' token through an 'Poles' conjoint.
-commitText :: Poles (K IO) Text b -> Text -> IO ()
-commitText e t = runK (commit (conjoint e) outU) t
-  where
-    Poles _ outU = open
+commitText :: Poles () () (K IO) Text b -> Text -> IO ()
+commitText e t = runK (conjoint e) t
 
 -- | Emit one 'Text' frame from an 'Poles' companion.  Blocks until a
 -- complete frame arrives.
-emitText :: Poles (K IO) a Text -> IO Text
-emitText e = runK (emit (companion e) inU) ()
-  where
-    Poles inU _ = open
+emitText :: Poles () () (K IO) a Text -> IO Text
+emitText e = runK (companion e) ()
 
 -- | Drain pending stderr lines, bounded: returns after ~100ms of quiet.
 -- Stderr is diagnostics, not dialogue — a bounded drain, not a blocking
 -- read, so a silent stderr cannot stall the turn.
-drainStderr :: Poles (K IO) a Text -> IO Text
+drainStderr :: Poles () () (K IO) a Text -> IO Text
 drainStderr e = go []
   where
     go acc = do

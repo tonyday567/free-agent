@@ -63,7 +63,7 @@ import Circuit.Agent.StdPorts
     openStdPorts,
   )
 import Circuit.Category (K (..))
-import Circuit.Equip (HasDual (..), In (..), Out (..), Poles (..))
+import Circuit.Equip (companion, conjoint)
 import Circuit.Layer (run)
 import Circuit.Parser.Json (Json (..), decodeJson)
 import Circuit.Syntax (eval)
@@ -242,18 +242,13 @@ acpSendValue :: AcpClient -> Json -> IO ()
 acpSendValue c v = do
   let line = encodeJsonText v
   logFrame c "send" line
-  runK
-    (commit (stdIn (acpPorts c)) (companion (open :: Poles (K IO) () ())))
-    line
+  runK (conjoint (stdIn (acpPorts c))) line
 
 -- | Read the next stdout line, blocking until a complete line frame
 -- arrives, logging raw frames.
 acpReadLine :: AcpClient -> IO Text
 acpReadLine c = do
-  t <-
-    runK
-      (emit (stdOut (acpPorts c)) (conjoint (open :: Poles (K IO) () ())))
-      ()
+  t <- runK (companion (stdOut (acpPorts c))) ()
   logFrame c "recv" t
   pure t
 
@@ -528,11 +523,7 @@ acpReadStderr :: AcpClient -> IO Text
 acpReadStderr c = go []
   where
     go acc = do
-      m <-
-        timeout 100_000 $
-          runK
-            (emit (stdErr (acpPorts c)) (conjoint (open :: Poles (K IO) () ())))
-            ()
+      m <- timeout 100_000 $ runK (companion (stdErr (acpPorts c))) ()
       case m of
         Nothing -> pure (T.unlines (reverse acc))
         Just l -> go (l : acc)

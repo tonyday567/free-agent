@@ -94,7 +94,7 @@ runPipeline (Compose g f) = runPipeline g . runPipeline f
 --
 -- The state holds the pending input batch.  Commit replaces it; emit applies
 -- the pipeline and clears the buffer.
-pipelineShard :: Pipeline a b -> Poles (Body (,) [a] (K IO)) [a] [b]
+pipelineShard :: Pipeline a b -> Poles () () (Body (,) [a] (K IO)) [a] [b]
 pipelineShard p = poles0 writeBatch readBatch
   where
     writeBatch = Body $ K $ \(_, xs) -> pure (xs, ())
