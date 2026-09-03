@@ -39,8 +39,8 @@ import Circuit.Agent.StdPorts
     openProc,
   )
 import Circuit.Category (K (..))
+import Circuit.Equip (HasDual (..), In (..), Out (..), Poles (..))
 import Circuit.Layer (run)
-import Circuit.Poles (HasDual (..), In (..), Out (..), Poles (..))
 import Circuit.Syntax (eval)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically)

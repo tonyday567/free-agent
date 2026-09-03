@@ -63,9 +63,9 @@ import Circuit.Agent.StdPorts
     openStdPorts,
   )
 import Circuit.Category (K (..))
+import Circuit.Equip (HasDual (..), In (..), Out (..), Poles (..))
 import Circuit.Layer (run)
 import Circuit.Parser.Json (Json (..), decodeJson)
-import Circuit.Poles (HasDual (..), In (..), Out (..), Poles (..))
 import Circuit.Syntax (eval)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_)

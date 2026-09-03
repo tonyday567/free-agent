@@ -26,7 +26,7 @@ where
 import Circuit (Body (..))
 import Circuit.Agent (Name, Post (..), deliversTo)
 import Circuit.Category (Category (..), K (..))
-import Circuit.Poles (Poles (..), poles0)
+import Circuit.Equip (Poles (..), poles0)
 import Data.Text (Text)
 import Prelude hiding (id, (.))
 
