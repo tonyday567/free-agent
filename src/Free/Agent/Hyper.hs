@@ -34,7 +34,7 @@ module Free.Agent.Hyper
   )
 where
 
-import Circuit.Moore (Moore (..), moore, mooreMorphism)
+import Circuit.Moore (MachineP (..), machineMorphismP, machineP)
 import Circuit.Poly (Mono)
 
 -- | Fork: duplicate a stream.
@@ -59,8 +59,8 @@ braidP :: ((a, b), (c, d)) -> ((a, c), (b, d))
 braidP ((a, b), (c, d)) = ((a, c), (b, d))
 
 -- | The silent agent: emits nothing.  Additive zero for 'both'.
-silent :: Moore (,) () (->) (Mono a [b])
-silent = moore (\((), _) -> ((), ([], ())))
+silent :: MachineP (,) () (->) (Mono a [b])
+silent = machineP (\((), _) -> ((), ([], ())))
 
 -- | Merge two bundle-output agents: both see the same input, outputs are
 -- appended in left-then-right order.  The state is the pair.
@@ -69,10 +69,10 @@ silent = moore (\((), _) -> ((), ([], ())))
 -- on either side; /not/ idempotent — @both a a@ double-posts (bag at the
 -- wire).
 both ::
-  Moore (,) s1 (->) (Mono a [b]) ->
-  Moore (,) s2 (->) (Mono a [b]) ->
-  Moore (,) (s1, s2) (->) (Mono a [b])
-both x y = moore $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = mooreMorphism x (s1, d)
-      (s2', (o2, ())) = mooreMorphism y (s2, d)
+  MachineP (,) s1 (->) (Mono a [b]) ->
+  MachineP (,) s2 (->) (Mono a [b]) ->
+  MachineP (,) (s1, s2) (->) (Mono a [b])
+both x y = machineP $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = machineMorphismP x (s1, d)
+      (s2', (o2, ())) = machineMorphismP y (s2, d)
    in ((s1', s2'), (o1 ++ o2, ()))

@@ -23,12 +23,12 @@ import Circuit.Agent.Tensor
 import Circuit.Category (Category (id, (.)), K (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
-import Circuit.Equip (Cell (..), polesK)
+import Circuit.Equip (polesK)
 import Circuit.Layer ((:~>))
-import Circuit.Moore (Moore (..), monoDir, moore, toEvalMoore)
-import Circuit.Optic (pprocessAsLens)
+import Circuit.Moore (MachineP (..), machineP, monoDir, toEvalMachineP)
+import Circuit.Optic (processAsLensP)
 import Circuit.Poly (Eval (..), Mono)
-import Circuit.Process (asPProcess, delay, register, scan, scanPProcess)
+import Circuit.Process (asProcessP, delay, register, scan, scanProcessP)
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (async, cancel)
@@ -49,7 +49,7 @@ import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Sta
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
 import Free.Agent.Connector (ConnectorConfig (..), TurnResult (..), defaultConnectorConfig, runTurn)
 import Free.Agent.Derivation (chaseLog, dParents, derivation, valid)
-import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, meetingSkeleton, mooreProcess, skeletonLabels)
+import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, machineProcess, meetingSkeleton, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, hostShard, mkHost, processHost)
 import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
@@ -103,12 +103,12 @@ assert msg ok =
       exitFailure
 
 -- | Replacement for the removed 'iterateAgent' runner.
-iterateAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> [o]
-iterateAgent sys s0 = scanPProcess (asPProcess sys (Cell s0))
+iterateAgent :: MachineP (,) s (->) (Mono i o) -> s -> [i] -> [o]
+iterateAgent sys s0 = scanProcessP (asProcessP sys s0)
 
 -- | Local monomial evaluation helper.
-runMono :: Moore (,) s (->) (Mono i o) -> s -> (o, i -> s)
-runMono sys s = case toEvalMoore sys s of EP (EK o, EE f) -> (o, f)
+runMono :: MachineP (,) s (->) (Mono i o) -> s -> (o, i -> s)
+runMono sys s = case toEvalMachineP sys s of EP (EK o, EE f) -> (o, f)
 
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a ds []
@@ -870,13 +870,13 @@ main = do
 
   -------------------------------------------------------------------------
   -- Diagram bridge (endgame stage 1): an agent is a box; one diagram run
-  -- is one Moore step.  Feedback wiring (bend + delay) is not yet
+  -- is one MachineP step.  Feedback wiring (bend + delay) is not yet
   -- expressible in the string-diagram surface — see Free.Agent.Diagram.
   -------------------------------------------------------------------------
   putStrLn "diagram bridge"
   do
-    let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) Int (->) (Mono Int Int)
-    assert "diagram step is mooreMorphism's (put, get)" $
+    let sysN = machineP (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: MachineP (,) Int (->) (Mono Int Int)
+    assert "diagram step is machineMorphismP's (put, get)" $
       diagramStep sysN 5 3 == (snd (runMono sysN 5) 3, fst (runMono sysN 5))
     assert "diagram steps mirror iterateAgent" $
       diagramSteps sysN 0 [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
@@ -891,7 +891,7 @@ main = do
             mkPost "human" ["bot"] "two",
             mkPost "human" ["bot"] "three"
           ]
-    assert "tape agent: diagram step is mooreMorphism's (put, get)" $
+    assert "tape agent: diagram step is machineMorphismP's (put, get)" $
       diagramStep echo [] p0
         == (snd (runMono echo []) p0, fst (runMono echo []))
     assert "tape agent: diagram steps mirror iterateAgent" $
@@ -909,12 +909,12 @@ main = do
     -- (Inside register, where the feedback wire carries the body's own
     -- state output, this is exactly "observable one tick late".)
     assert "delay emits initial value, then the tail one tick late" $
-      scan (delay (Cell 0)) [1, 2, 3, 4 :: Int] == [0, 2, 3, 4]
+      scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 2, 3, 4]
 
   do
-    let sysN = moore (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Moore (,) Int (->) (Mono Int Int)
+    let sysN = machineP (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: MachineP (,) Int (->) (Mono Int Int)
     assert "register body with delay mirrors iterateAgent" $
-      scan (mooreProcess sysN 0) [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
+      scan (machineProcess sysN 0) [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
 
   do
     let echo =
@@ -922,7 +922,7 @@ main = do
             Agent (->) [Post Text] (Post Text) [Post Text]
         ins = [mkPost "human" ["bot"] "one", mkPost "human" ["bot"] "two"]
     assert "tape agent: register body with delay mirrors iterateAgent" $
-      scan (mooreProcess echo []) ins == iterateAgent echo [] ins
+      scan (machineProcess echo []) ins == iterateAgent echo [] ins
 
   -- The bend-and-delay identity from Circuit.Process: for bodies whose
   -- fixed point is independent of the initial feedback value, register's
@@ -931,8 +931,8 @@ main = do
     let body = liftProcess (\(i, _s) -> (i * 2, 0 :: Int))
         swapP = liftProcess (\(a, b) -> (b, a))
         ins = [1, 2, 3, 4 :: Int]
-        viaRegister = scan (register (Cell 99) body) ins
-        viaTrace = scan (yank (swapP . (body . strength (delay (Cell 99))) . swapP)) ins
+        viaRegister = scan (register 99 body) ins
+        viaTrace = scan (yank (swapP . (body . strength (delay 99)) . swapP)) ins
     assert "register ≡ trace with delay on the feedback wire" $
       viaRegister == viaTrace && viaRegister == [2, 4, 6, 8]
 
