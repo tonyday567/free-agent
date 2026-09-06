@@ -8,7 +8,7 @@
 -- wire carries state → output, the backward wire carries input-direction →
 -- next state.
 --
--- Stage 1b: the bend, at the 'Mealy' layer.  A stateful agent decomposes
+-- Stage 1b: the bend, at the 'Moore' layer.  A stateful agent decomposes
 -- as a stateless body plus cross-tick feedback: 'register' closes the
 -- state wire with 'delay' making the one-tick lag observable (sound for
 -- strict state, where the lazy cartesian knot would diverge).  So:
@@ -19,7 +19,7 @@
 --
 -- What is still missing is the same wiring inside the
 -- 'Circuit.Poly.StringDiagram' surface itself (a delay box and a trace
--- combinator over a 'Mealy' base); the oracles pin the semantics the
+-- combinator over a 'Moore' base); the oracles pin the semantics the
 -- surface will need to reproduce.
 --
 -- Stage 2: 'meetingSkeleton' reads a conversation back as a drawing —
@@ -42,7 +42,7 @@ import Circuit.Agent (Post (..))
 import Circuit.Machine (MachineObs, toEvalMachine)
 import Circuit.Poly (Eval (..), Mono)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
-import Circuit.Process (Mealy (..), asProcess, processAsLens, register)
+import Circuit.Process (Moore (..), asProcess, processAsLens, register)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 
@@ -77,24 +77,24 @@ diagramSteps sys s (i : is) =
       (_, o) = diagramStep sys s' i
    in o : diagramSteps sys s' is
 
--- | Lift a pure function to a stateless 'Mealy' (the box a bend closes).
-liftProcess :: (a -> b) -> Mealy a b
-liftProcess f = Mealy id (const id) f
+-- | Lift a pure function to a stateless 'Moore' (the box a bend closes).
+liftProcess :: (a -> b) -> Moore a b
+liftProcess f = Moore id (const id) f
 
--- | The stateless body of a system as a 'Mealy': consume the input
+-- | The stateless body of a system as a 'Moore': consume the input
 -- (state transition), then read the output of the new state, and emit the
 -- new state on the feedback wire.  This matches the post-input timing of
 -- 'scanProcess' / 'systemAsProcess': the output is read /after/ consuming
 -- the input.
-machineBody :: MachineObs s (Mono i o) -> Mealy (i, s) (o, s)
+machineBody :: MachineObs s (Mono i o) -> Moore (i, s) (o, s)
 machineBody sys = liftProcess (\(i, s) -> let s' = snd (runMono sys s) i in (fst (runMono sys s'), s'))
 
--- | A system as a 'Mealy': the stateless 'machineBody' with its state wire
+-- | A system as a 'Moore': the stateless 'machineBody' with its state wire
 -- bent back through a one-tick 'delay' — 'register' makes the delay
 -- explicit in the wiring rather than implicit in a lazy knot.
 --
 -- Oracle-pinned: @scan (machineProcess sys s0) is == scanProcess (asProcess sys s0) is@.
-machineProcess :: MachineObs s (Mono i o) -> s -> Mealy i o
+machineProcess :: MachineObs s (Mono i o) -> s -> Moore i o
 machineProcess sys s0 = register s0 (machineBody sys)
 
 -- | The drawing skeleton of a conversation: each post is a box labelled by
