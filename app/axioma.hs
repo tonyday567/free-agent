@@ -909,12 +909,12 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "bend with delay"
   do
-    -- scan's inject consumes the first input as state initialisation, so a
-    -- standalone delay emits the initial value, then echoes the tail.
+    -- a standalone delay emits the initial value, then each input one
+    -- tick late.
     -- (Inside register, where the feedback wire carries the body's own
     -- state output, this is exactly "observable one tick late".)
-    assert "delay emits initial value, then the tail one tick late" $
-      scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 2, 3, 4]
+    assert "delay emits initial value, then each input one tick late" $
+      scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 1, 2, 3]
 
   do
     let sysN = machine (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Machine (,) Int (->) (Mono Int Int)
