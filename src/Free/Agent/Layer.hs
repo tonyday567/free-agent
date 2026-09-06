@@ -15,7 +15,7 @@ module Free.Agent.Layer
 where
 
 import Circuit.Category (Category (..))
-import Circuit.Layer (Layer (..), (:~>))
+import Circuit.Syntax (Layer (..), (:~>))
 import Data.Kind (Type)
 import Free.Agent.Syntax (FreeAgent (..))
 import Prelude hiding (id, (.))

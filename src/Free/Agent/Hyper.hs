@@ -30,11 +30,13 @@ module Free.Agent.Hyper
     merge2,
     braidP,
     silent,
+    silentObs,
     both,
+    bothObs,
   )
 where
 
-import Circuit.Moore (MachineP (..), machineMorphismP, machineP)
+import Circuit.Machine (Machine (..), MachineObs (..), machine, machineMorphism, machineObsWith)
 import Circuit.Poly (Mono)
 
 -- | Fork: duplicate a stream.
@@ -59,8 +61,8 @@ braidP :: ((a, b), (c, d)) -> ((a, c), (b, d))
 braidP ((a, b), (c, d)) = ((a, c), (b, d))
 
 -- | The silent agent: emits nothing.  Additive zero for 'both'.
-silent :: MachineP (,) () (->) (Mono a [b])
-silent = machineP (\((), _) -> ((), ([], ())))
+silent :: Machine (,) () (->) (Mono a [b])
+silent = machine (\((), _) -> ((), ([], ())))
 
 -- | Merge two bundle-output agents: both see the same input, outputs are
 -- appended in left-then-right order.  The state is the pair.
@@ -69,10 +71,27 @@ silent = machineP (\((), _) -> ((), ([], ())))
 -- on either side; /not/ idempotent — @both a a@ double-posts (bag at the
 -- wire).
 both ::
-  MachineP (,) s1 (->) (Mono a [b]) ->
-  MachineP (,) s2 (->) (Mono a [b]) ->
-  MachineP (,) (s1, s2) (->) (Mono a [b])
-both x y = machineP $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = machineMorphismP x (s1, d)
-      (s2', (o2, ())) = machineMorphismP y (s2, d)
+  Machine (,) s1 (->) (Mono a [b]) ->
+  Machine (,) s2 (->) (Mono a [b]) ->
+  Machine (,) (s1, s2) (->) (Mono a [b])
+both x y = machine $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = machineMorphism x (s1, d)
+      (s2', (o2, ())) = machineMorphism y (s2, d)
    in ((s1', s2'), (o1 ++ o2, ()))
+
+-- | Certified observation for 'silent'.
+silentObs :: MachineObs () (Mono a [b])
+silentObs = machineObsWith (\() -> ([], ())) silent
+
+-- | Certified observation for 'both': the merged observation of the two
+-- component states.
+bothObs ::
+  MachineObs s1 (Mono a [b]) ->
+  MachineObs s2 (Mono a [b]) ->
+  MachineObs (s1, s2) (Mono a [b])
+bothObs x y = machineObsWith obs (both (moMachine x) (moMachine y))
+  where
+    obs (s1, s2) =
+      let (o1, ()) = moObserve x s1
+          (o2, ()) = moObserve y s2
+       in (o1 ++ o2, ())

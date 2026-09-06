@@ -64,7 +64,7 @@ import Circuit.Agent.StdPorts
   )
 import Circuit.Category (K (..))
 import Circuit.Equip (companion, conjoint)
-import Circuit.Layer (run)
+import Circuit.Syntax (run)
 import Circuit.Parser.Json (Json (..), decodeJson)
 import Circuit.Syntax (eval)
 import Control.Exception (SomeException, try)

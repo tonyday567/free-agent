@@ -2,13 +2,13 @@
 
 -- | Bridge: agents as string diagrams (stage 1 of endgame-path).
 --
--- A monomial 'MachineP (,)' converts to a pointed process and then to a lens
--- (@processAsLensP@), and 'box' lifts such a lens into the string-diagram
--- DSL.  The result runs one MachineP step per 'runDiagram' call: the forward
+-- A monomial 'Machine' converts to a pointed process and then to a lens
+-- (@processAsLens@), and 'box' lifts such a lens into the string-diagram
+-- DSL.  The result runs one machine step per 'runDiagram' call: the forward
 -- wire carries state → output, the backward wire carries input-direction →
 -- next state.
 --
--- Stage 1b: the bend, at the 'Process' layer.  A stateful agent decomposes
+-- Stage 1b: the bend, at the 'Mealy' layer.  A stateful agent decomposes
 -- as a stateless body plus cross-tick feedback: 'register' closes the
 -- state wire with 'delay' making the one-tick lag observable (sound for
 -- strict state, where the lazy cartesian knot would diverge).  So:
@@ -19,7 +19,7 @@
 --
 -- What is still missing is the same wiring inside the
 -- 'Circuit.Poly.StringDiagram' surface itself (a delay box and a trace
--- combinator over a 'Process' base); the oracles pin the semantics the
+-- combinator over a 'Mealy' base); the oracles pin the semantics the
 -- surface will need to reproduce.
 --
 -- Stage 2: 'meetingSkeleton' reads a conversation back as a drawing —
@@ -39,63 +39,62 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.Moore (MachineP (..), toEvalMachineP)
-import Circuit.Optic (processAsLensP)
+import Circuit.Machine (MachineObs, toEvalMachine)
 import Circuit.Poly (Eval (..), Mono)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
-import Circuit.Process (Process (..), asProcessP, register)
+import Circuit.Process (Mealy (..), asProcess, processAsLens, register)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 
 -- | A monomial system as a one-box diagram.
 --
--- @box . processAsLensP . asProcessP sys@: forward wire @s → o@ (state to
+-- @box . processAsLens . asProcess sys@: forward wire @s → o@ (state to
 -- output), backward wire @i → s@ (input direction to next state).  The lens
 -- ignores the seed, so the pointed-process wrapper is a formality.
-agentDiagram :: MachineP (,) s (->) (Mono i o) -> Diagram s s o i
-agentDiagram sys = box . processAsLensP . asProcessP sys $ error "seed unused by lens"
+agentDiagram :: MachineObs s (Mono i o) -> Diagram s s o i
+agentDiagram sys = box . processAsLens . asProcess sys $ error "seed unused by lens"
 
-runMono :: MachineP (,) s (->) (Mono i o) -> s -> (o, i -> s)
-runMono sys s = case toEvalMachineP sys s of EP (EK o, EE f) -> (o, f)
+runMono :: MachineObs s (Mono i o) -> s -> (o, i -> s)
+runMono sys s = case toEvalMachine sys s of EP (EK o, EE f) -> (o, f)
 
--- | One MachineP step as a diagram run: @(next state, output at current
+-- | One machine step as a diagram run: @(next state, output at current
 -- state)@.  Definitionally @(snd (runMono sys s) i, fst (runMono sys s))@
 -- — the oracle pins exactly this.
-diagramStep :: MachineP (,) s (->) (Mono i o) -> s -> i -> (s, o)
+diagramStep :: MachineObs s (Mono i o) -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 
 -- | Iterate a system over inputs through the diagram, mirroring the
--- post-input timing of 'scanProcessP' (output is read from the state /after/
+-- post-input timing of 'scanProcess' (output is read from the state /after/
 -- each transition).  Each step runs the diagram twice with the same input:
 -- once to consume (state transition), once to observe (output at the new
 -- state).  The backward pass is pure, so the second run is harmless — and
 -- both passes go through 'runDiagram', so the oracle exercises the bridge
 -- end to end.
-diagramSteps :: MachineP (,) s (->) (Mono i o) -> s -> [i] -> [o]
+diagramSteps :: MachineObs s (Mono i o) -> s -> [i] -> [o]
 diagramSteps _ _ [] = []
 diagramSteps sys s (i : is) =
   let (s', _) = diagramStep sys s i
       (_, o) = diagramStep sys s' i
    in o : diagramSteps sys s' is
 
--- | Lift a pure function to a stateless 'Process' (the box a bend closes).
-liftProcess :: (a -> b) -> Process a b
-liftProcess f = Process id (const id) f
+-- | Lift a pure function to a stateless 'Mealy' (the box a bend closes).
+liftProcess :: (a -> b) -> Mealy a b
+liftProcess f = Mealy id (const id) f
 
--- | The stateless body of a system as a 'Process': consume the input
+-- | The stateless body of a system as a 'Mealy': consume the input
 -- (state transition), then read the output of the new state, and emit the
 -- new state on the feedback wire.  This matches the post-input timing of
--- 'scanProcessP' / 'systemAsProcess': the output is read /after/ consuming
+-- 'scanProcess' / 'systemAsProcess': the output is read /after/ consuming
 -- the input.
-machineBody :: MachineP (,) s (->) (Mono i o) -> Process (i, s) (o, s)
+machineBody :: MachineObs s (Mono i o) -> Mealy (i, s) (o, s)
 machineBody sys = liftProcess (\(i, s) -> let s' = snd (runMono sys s) i in (fst (runMono sys s'), s'))
 
--- | A system as a 'Process': the stateless 'machineBody' with its state wire
+-- | A system as a 'Mealy': the stateless 'machineBody' with its state wire
 -- bent back through a one-tick 'delay' — 'register' makes the delay
 -- explicit in the wiring rather than implicit in a lazy knot.
 --
--- Oracle-pinned: @scan (machineProcess sys s0) is == scanProcessP (asProcessP sys s0) is@.
-machineProcess :: MachineP (,) s (->) (Mono i o) -> s -> Process i o
+-- Oracle-pinned: @scan (machineProcess sys s0) is == scanProcess (asProcess sys s0) is@.
+machineProcess :: MachineObs s (Mono i o) -> s -> Mealy i o
 machineProcess sys s0 = register s0 (machineBody sys)
 
 -- | The drawing skeleton of a conversation: each post is a box labelled by
