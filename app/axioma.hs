@@ -21,11 +21,10 @@ import Circuit.Agent.Tensor
     silentShard,
   )
 import Circuit.Category (Category (id, (.)), K (..))
-import Circuit.Cell (Cell (..), processFromSeed, scanProcess)
+import Circuit.Cell (Cell (..), delay, processFromSeed, register, scan, scanProcess)
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
 import Circuit.Equip (polesK)
-import Circuit.Process (delay, register, scan)
 import Circuit.Syntax ((:~>))
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
@@ -924,7 +923,7 @@ main = do
     assert "tape agent: register body with delay mirrors iterateAgent" $
       scan (machineProcess echoObs []) ins == iterateAgent echoObs [] ins
 
-  -- The bend-and-delay identity from Circuit.Process: for bodies whose
+  -- The bend-and-delay identity from Circuit.Cell: for bodies whose
   -- fixed point is independent of the initial feedback value, register's
   -- wiring equals the cartesian trace with delay on the feedback wire.
   do

@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 
 -- | Bridge: agents as string diagrams (stage 1 of endgame-path).
@@ -39,10 +40,9 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.Cell (Cell (..))
+import Circuit.Cell (Cell (..), Moore, register, pattern Moore)
 import Circuit.Poly (Lens, lens)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
-import Circuit.Process (Moore (..), register)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 
