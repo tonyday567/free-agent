@@ -6,7 +6,7 @@
 module Main (main) where
 
 import Circuit (Poles (..))
-import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), Shard, awaitA, branchesByIndex, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
+import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), Shard, awaitA, branchesByIndex, cellToAgent, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
 import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, markGlyph, markOf)
@@ -21,12 +21,11 @@ import Circuit.Agent.Tensor
     silentShard,
   )
 import Circuit.Category (Category (id, (.)), K (..))
+import Circuit.Cell (Cell (..), processFromSeed, scanProcess)
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
 import Circuit.Equip (polesK)
-import Circuit.Machine (Machine (..), MachineObs (..), machine, machineObsWith, monoDir, toEvalMachine)
-import Circuit.Poly (Eval (..), Mono)
-import Circuit.Process (asProcess, delay, register, scan, scanProcess)
+import Circuit.Process (delay, register, scan)
 import Circuit.Syntax ((:~>))
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
@@ -50,9 +49,9 @@ import Free.Agent.Connector (ConnectorConfig (..), TurnResult (..), defaultConne
 import Free.Agent.Derivation (chaseLog, dParents, derivation, valid)
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, machineProcess, meetingSkeleton, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, hostShard, mkHost, processHost)
-import Free.Agent.Hyper (bothObs, braidP, copy2, copyP, merge2, mergeP, silentObs)
+import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
-import Free.Agent.Meeting (AgentBox (..), meetLog, quoterObs, unchanged)
+import Free.Agent.Meeting (AgentBox (..), meetLog, quoter, unchanged)
 import Free.Agent.Pipeline
   ( Pipeline,
     broadcast,
@@ -101,18 +100,15 @@ assert msg ok =
       putStrLn ("  FAIL " ++ msg)
       exitFailure
 
--- | Replacement for the removed 'iterateAgent' runner.
-iterateAgent :: MachineObs s (Mono i o) -> s -> [i] -> [o]
-iterateAgent sys s0 = scanProcess (asProcess sys s0)
+-- | The list runner: 'scanProcess' over a seeded cell (post-step
+-- convention — output read from the state after each input).
+iterateAgent :: Cell (,) s (->) i o -> s -> [i] -> [o]
+iterateAgent sys s0 = scanProcess (processFromSeed s0 sys)
 
--- | Local monomial evaluation helper.
-runMono :: MachineObs s (Mono i o) -> s -> (o, i -> s)
-runMono sys s = case toEvalMachine sys s of EP (EK o, EE f) -> (o, f)
-
--- | Certified observation for a 'tape'-shaped agent: the position is @f@
--- of the state.
-tapeObs :: ([i] -> o) -> MachineObs [i] (Mono i o)
-tapeObs f = machineObsWith (\s -> (f s, ())) (tape f)
+-- | The Eval-shaped reading of a cell state: observe, and the step
+-- function as an input-indexed state update.
+runMono :: Cell (,) s (->) i o -> s -> (o, i -> s)
+runMono sys s = (observe sys s, \i -> step sys (s, i))
 
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a ds []
@@ -671,7 +667,7 @@ main = do
         posts = [mkPost "human" [] "one"]
         (outsPure, _) =
           runAgentShard
-            (raceA (tape (const [p])) (tape (const [q])))
+            (raceA (cellToAgent (tape (const [p]))) (cellToAgent (tape (const [q]))))
             (AgentSeat ([], []) [])
             posts
     (outsFree, _) <- closeShardIO (interpretSeat (raceSeat a b)) posts []
@@ -879,17 +875,16 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "diagram bridge"
   do
-    let sysN = machine (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Machine (,) Int (->) (Mono Int Int)
-        sysNObs = machineObsWith (\s -> (s + 1, ())) sysN
+    let sysN = Cell (\s -> s + 1) (\(s, i) -> s + i) :: Cell (,) Int (->) Int Int
     assert "diagram step is the machine body's (put, get)" $
-      diagramStep sysNObs 5 3 == (snd (runMono sysNObs 5) 3, fst (runMono sysNObs 5))
+      diagramStep sysN 5 3 == (snd (runMono sysN 5) 3, fst (runMono sysN 5))
     assert "diagram steps mirror iterateAgent" $
-      diagramSteps sysNObs 0 [1 .. 5] == iterateAgent sysNObs 0 [1 .. 5]
+      diagramSteps sysN 0 [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
 
   do
     let echoObs =
-          tapeObs (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
-            MachineObs [Post Text] (Mono (Post Text) [Post Text])
+          tape (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
+            Cell (,) [Post Text] (->) (Post Text) [Post Text]
         p0 = mkPost "human" ["bot"] "one"
         ins =
           [ p0,
@@ -917,15 +912,14 @@ main = do
       scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 1, 2, 3]
 
   do
-    let sysN = machine (\(s, d) -> (s + monoDir d, (s + 1, ()))) :: Machine (,) Int (->) (Mono Int Int)
-        sysNObs = machineObsWith (\s -> (s + 1, ())) sysN
+    let sysN = Cell (\s -> s + 1) (\(s, i) -> s + i) :: Cell (,) Int (->) Int Int
     assert "register body with delay mirrors iterateAgent" $
-      scan (machineProcess sysNObs 0) [1 .. 5] == iterateAgent sysNObs 0 [1 .. 5]
+      scan (machineProcess sysN 0) [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
 
   do
     let echoObs =
-          tapeObs (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
-            MachineObs [Post Text] (Mono (Post Text) [Post Text])
+          tape (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
+            Cell (,) [Post Text] (->) (Post Text) [Post Text]
         ins = [mkPost "human" ["bot"] "one", mkPost "human" ["bot"] "two"]
     assert "tape agent: register body with delay mirrors iterateAgent" $
       scan (machineProcess echoObs []) ins == iterateAgent echoObs [] ins
@@ -1038,31 +1032,31 @@ main = do
 
   do
     let obsA =
-          tapeObs (\hist -> [mkPost "a" [] ("a:" <> T.pack (show (length hist)))]) ::
-            MachineObs [Post Text] (Mono (Post Text) [Post Text])
+          tape (\hist -> [mkPost "a" [] ("a:" <> T.pack (show (length hist)))]) ::
+            Cell (,) [Post Text] (->) (Post Text) [Post Text]
         obsB =
-          tapeObs (\hist -> [mkPost "b" [] ("b:" <> T.pack (show (length hist)))]) ::
-            MachineObs [Post Text] (Mono (Post Text) [Post Text])
+          tape (\hist -> [mkPost "b" [] ("b:" <> T.pack (show (length hist)))]) ::
+            Cell (,) [Post Text] (->) (Post Text) [Post Text]
         ins = [mkPost "human" ["x"] "one", mkPost "human" ["x"] "two"]
-        outsAB = concat (iterateAgent (bothObs obsA obsB) ([], []) ins)
-        outsBA = concat (iterateAgent (bothObs obsB obsA) ([], []) ins)
+        outsAB = concat (iterateAgent (both obsA obsB) ([], []) ins)
+        outsBA = concat (iterateAgent (both obsB obsA) ([], []) ins)
     assert "both commutes as a bag of outputs" $
       toBag outsAB == toBag outsBA
     assert "both emits left then right per step" $
       map from outsAB == ["a", "b", "a", "b"]
     assert "silent is a left zero for both" $
-      iterateAgent (bothObs silentObs obsA) ((), []) ins == iterateAgent obsA [] ins
+      iterateAgent (both silent obsA) ((), []) ins == iterateAgent obsA [] ins
     assert "silent is a right zero for both" $
-      iterateAgent (bothObs obsA silentObs) ([], ()) ins == iterateAgent obsA [] ins
+      iterateAgent (both obsA silent) ([], ()) ins == iterateAgent obsA [] ins
     assert "both is not idempotent: bag at the wire (double-post)" $
-      length (concat (iterateAgent (bothObs obsA obsA) ([], []) ins))
+      length (concat (iterateAgent (both obsA obsA) ([], []) ins))
         == 2 * length (concat (iterateAgent obsA [] ins))
 
   -- Replay (endgame stage 5): swap one box, re-derive the meeting.
   -- Deterministic quoters stand in for models; the tag is the "model".
   putStrLn "replay"
   do
-    let box who tg = AgentBox ([], [], [], []) (quoterObs who tg)
+    let box who tg = AgentBox ([], [], [], []) (quoter who tg)
         roster tg = [box "a" "A", box "b" tg, box "c" "C"]
         seed = [mkPost "human" ["panel"] "Q"]
         log1 = meetLog 2 (roster "B") seed
@@ -1084,7 +1078,7 @@ main = do
   -- from the log; pasting is roster merge (horizontal) and time (vertical).
   putStrLn "derivations as 2-cells"
   do
-    let box who tg = AgentBox ([], [], [], []) (quoterObs who tg)
+    let box who tg = AgentBox ([], [], [], []) (quoter who tg)
         seed = [mkPost "human" ["panel"] "Q"]
         log3 = meetLog 2 [box "a" "A", box "b" "B", box "c" "C"] seed
     assert "every square in a meeting log is valid" $
@@ -1100,9 +1094,9 @@ main = do
            in map from (dParents (derivation prior p))
                 == map (\i -> from (prior !! fromIntegral i)) (thread p)
         _ -> False
-    let boxA = AgentBox ([], [], [], []) (quoterObs "a" "A")
-        boxB = AgentBox ([], [], [], []) (quoterObs "b" "B")
-        merged = AgentBox (([], [], [], []), ([], [], [], [])) (bothObs (quoterObs "a" "A") (quoterObs "b" "B"))
+    let boxA = AgentBox ([], [], [], []) (quoter "a" "A")
+        boxB = AgentBox ([], [], [], []) (quoter "b" "B")
+        merged = AgentBox (([], [], [], []), ([], [], [], [])) (both (quoter "a" "A") (quoter "b" "B"))
     assert "horizontal pasting: loop [both a b] ≡ loop [a, b]" $
       meetLog 2 [merged] seed == meetLog 2 [boxA, boxB] seed
 

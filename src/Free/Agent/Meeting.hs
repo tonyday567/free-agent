@@ -26,7 +26,6 @@
 module Free.Agent.Meeting
   ( AgentBox (..),
     quoter,
-    quoterObs,
     runAgentBox,
     withIds,
     meet,
@@ -35,10 +34,9 @@ module Free.Agent.Meeting
   )
 where
 
-import Circuit.Agent (Agent, Name, Post (..), PostId, coneByIndex)
+import Circuit.Agent (Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Query (synthesisPosts)
-import Circuit.Machine (MachineObs (..), machine, machineMorphism, machineObsWith, monoDir, monoIn, toEvalMachine)
-import Circuit.Poly (Eval (..), Mono)
+import Circuit.Cell (Cell (..))
 import Data.List (inits, intersect)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -48,26 +46,26 @@ import Data.Text qualified as T
 -- The agent input is a pair: the batch of posts and the positional ids the
 -- driver assigned to that batch.  This lets agents thread replies/syntheses
 -- by exact reference without inventing ids.
+--
+-- The box carries a 'Cell': the observe leg /is/ the certified
+-- observation — output is read from the state after consuming the input
+-- (post-input timing), so there is no separate observation certificate to
+-- keep in agreement with the step.
 data AgentBox where
-  AgentBox :: s -> MachineObs s (Mono ([Post Text], [PostId]) [Post Text]) -> AgentBox
+  AgentBox :: s -> Cell (,) s (->) ([Post Text], [PostId]) [Post Text] -> AgentBox
 
 -- | One batch step: absorb the input and its ids, emit the answer
 -- (post-input timing — output is read from the state after consuming the input).
 runAgentBox :: AgentBox -> [Post Text] -> [PostId] -> ([Post Text], AgentBox)
 runAgentBox (AgentBox s ag) ins ids =
-  let runMono :: MachineObs s' (Mono i o) -> s' -> (o, i -> s')
-      runMono sys st = case toEvalMachine sys st of EP (EK o, EE f) -> (o, f)
-      s' = snd (runMono ag s) (ins, ids)
-      (outs, _) = runMono ag s'
-   in (outs, AgentBox s' ag)
+  let s' = step ag (s, (ins, ids))
+   in (observe ag s', AgentBox s' ag)
 
 -- | Lift an agent that ignores ids into one that accepts the boxed
 -- @(posts, ids)@ input.  This is the minimal adapter for existing agents
 -- that do not need provenance.
-withIds :: Agent (->) s [Post Text] [Post Text] -> Agent (->) s ([Post Text], [PostId]) [Post Text]
-withIds ag = machine $ \(s, d) ->
-  let (ins, _ids) = monoDir d
-   in machineMorphism ag (s, monoIn ins)
+withIds :: Cell (,) s (->) [Post Text] [Post Text] -> Cell (,) s (->) ([Post Text], [PostId]) [Post Text]
+withIds (Cell o k) = Cell o (\(s, (ins, _ids)) -> k (s, ins))
 
 -- | The quoter's output at a state: one honest synthesis post per non-empty
 -- batch, quoting what it saw.
@@ -80,19 +78,16 @@ quoterOut who tag batch batchIds = case batch of
 -- synthesis post ('synthesisPosts') whose body quotes what it saw.  @tag@
 -- marks the "model" — swapping the box is swapping the tag.
 --
--- Output depends only on the pre-input state (the Machine idiom of 'tape'):
--- the state carries the last batch and its ids seen, and the emit answers
--- it.
-quoter :: Name -> Text -> Agent (->) ([Post Text], [PostId], [Post Text], [PostId]) ([Post Text], [PostId]) [Post Text]
-quoter who tag = machine $ \((hist, histIds, batch, batchIds), d) ->
-  let (ins, insIds) = monoDir d
-      out = quoterOut who tag batch batchIds
-   in ((reverse ins ++ hist, reverse insIds ++ histIds, ins, insIds), (out, ()))
-
--- | Certified observation for a 'quoter': the position is 'quoterOut' of
--- the batch recorded in the state.
-quoterObs :: Name -> Text -> MachineObs ([Post Text], [PostId], [Post Text], [PostId]) (Mono ([Post Text], [PostId]) [Post Text])
-quoterObs who tag = machineObsWith (\(_, _, batch, batchIds) -> (quoterOut who tag batch batchIds, ())) (quoter who tag)
+-- Output depends only on the state (the observe leg reads the recorded
+-- batch): the state carries the last batch and its ids seen, and the
+-- observe answers it.
+quoter :: Name -> Text -> Cell (,) ([Post Text], [PostId], [Post Text], [PostId]) (->) ([Post Text], [PostId]) [Post Text]
+quoter who tag =
+  Cell
+    (\(_, _, batch, batchIds) -> quoterOut who tag batch batchIds)
+    ( \((hist, histIds, _batch, _batchIds), (ins, insIds)) ->
+        (reverse ins ++ hist, reverse insIds ++ histIds, ins, insIds)
+    )
 
 -- | Run @n@ rounds over a roster.  Every box sees the previous round's
 -- concatenated outputs (round 1 sees the seed).  Returns the rounds.

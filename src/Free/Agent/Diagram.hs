@@ -2,11 +2,11 @@
 
 -- | Bridge: agents as string diagrams (stage 1 of endgame-path).
 --
--- A monomial 'Machine' converts to a pointed process and then to a lens
+-- A monomial 'Cell' converts to a seeded process and then to a lens
 -- (@processAsLens@), and 'box' lifts such a lens into the string-diagram
--- DSL.  The result runs one machine step per 'runDiagram' call: the forward
--- wire carries state → output, the backward wire carries input-direction →
--- next state.
+-- DSL.  The result runs one cell step per 'runDiagram' call: the forward
+-- wire carries state → output, the backward wire carries input → next
+-- state.
 --
 -- Stage 1b: the bend, at the 'Moore' layer.  A stateful agent decomposes
 -- as a stateless body plus cross-tick feedback: 'register' closes the
@@ -39,28 +39,29 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.Machine (MachineObs, toEvalMachine)
-import Circuit.Poly (Eval (..), Mono)
+import Circuit.Cell (Cell (..))
+import Circuit.Poly (Lens, lens)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
-import Circuit.Process (Moore (..), asProcess, processAsLens, register)
+import Circuit.Process (Moore (..), register)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 
--- | A monomial system as a one-box diagram.
+-- | A monomial cell as a one-box diagram.
 --
--- @box . processAsLens . asProcess sys@: forward wire @s → o@ (state to
--- output), backward wire @i → s@ (input direction to next state).  The lens
--- ignores the seed, so the pointed-process wrapper is a formality.
-agentDiagram :: MachineObs s (Mono i o) -> Diagram s s o i
-agentDiagram sys = box . processAsLens . asProcess sys $ error "seed unused by lens"
+-- 'cellAsLens': forward wire @s → o@ (state to output), backward wire
+-- @i → s@ (input to next state).
+agentDiagram :: Cell (,) s (->) i o -> Diagram s s o i
+agentDiagram sys = box (cellAsLens sys)
 
-runMono :: MachineObs s (Mono i o) -> s -> (o, i -> s)
-runMono sys s = case toEvalMachine sys s of EP (EK o, EE f) -> (o, f)
+-- | The cell's two legs as a lens: observe is the get, step curried on
+-- the state is the put.
+cellAsLens :: Cell (,) s (->) i o -> Lens s s o i
+cellAsLens (Cell o k) = lens o (curry k)
 
--- | One machine step as a diagram run: @(next state, output at current
--- state)@.  Definitionally @(snd (runMono sys s) i, fst (runMono sys s))@
--- — the oracle pins exactly this.
-diagramStep :: MachineObs s (Mono i o) -> s -> i -> (s, o)
+-- | One cell step as a diagram run: @(next state, output at current
+-- state)@.  Definitionally @(step sys (s, i), observe sys s)@ — the
+-- oracle pins exactly this.
+diagramStep :: Cell (,) s (->) i o -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 
 -- | Iterate a system over inputs through the diagram, mirroring the
@@ -70,7 +71,7 @@ diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 -- state).  The backward pass is pure, so the second run is harmless — and
 -- both passes go through 'runDiagram', so the oracle exercises the bridge
 -- end to end.
-diagramSteps :: MachineObs s (Mono i o) -> s -> [i] -> [o]
+diagramSteps :: Cell (,) s (->) i o -> s -> [i] -> [o]
 diagramSteps _ _ [] = []
 diagramSteps sys s (i : is) =
   let (s', _) = diagramStep sys s i
@@ -86,15 +87,15 @@ liftProcess f = Moore id (const id) f
 -- new state on the feedback wire.  This matches the post-input timing of
 -- 'scanProcess' / 'systemAsProcess': the output is read /after/ consuming
 -- the input.
-machineBody :: MachineObs s (Mono i o) -> Moore (i, s) (o, s)
-machineBody sys = liftProcess (\(i, s) -> let s' = snd (runMono sys s) i in (fst (runMono sys s'), s'))
+machineBody :: Cell (,) s (->) i o -> Moore (i, s) (o, s)
+machineBody sys = liftProcess (\(i, s) -> let s' = step sys (s, i) in (observe sys s', s'))
 
 -- | A system as a 'Moore': the stateless 'machineBody' with its state wire
 -- bent back through a one-tick 'delay' — 'register' makes the delay
 -- explicit in the wiring rather than implicit in a lazy knot.
 --
--- Oracle-pinned: @scan (machineProcess sys s0) is == scanProcess (asProcess sys s0) is@.
-machineProcess :: MachineObs s (Mono i o) -> s -> Moore i o
+-- Oracle-pinned: @scan (machineProcess sys s0) is == iterateAgent sys s0 is@.
+machineProcess :: Cell (,) s (->) i o -> s -> Moore i o
 machineProcess sys s0 = register s0 (machineBody sys)
 
 -- | The drawing skeleton of a conversation: each post is a box labelled by

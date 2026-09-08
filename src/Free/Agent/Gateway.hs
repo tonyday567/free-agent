@@ -35,8 +35,8 @@ module Free.Agent.Gateway
   )
 where
 
-import Circuit.Agent (run1)
 import Circuit.Agent.StdPorts (frameAgent, sseMarks)
+import Circuit.Cell (Cell (..))
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Control.Exception (throwIO)
 import Data.ByteString qualified as BS
@@ -53,6 +53,11 @@ import Network.HTTP.Client
 import Network.HTTP.Types (RequestHeaders, statusCode)
 import System.Environment (lookupEnv)
 import Prelude
+
+-- | Run one tick of a cell: step the state, read the output at the new
+-- state (post-step convention, matching 'scanProcess').
+runCell :: Cell (,) s (->) a b -> s -> a -> (b, s)
+runCell (Cell o k) s i = let s' = k (s, i) in (o s', s')
 
 -- ---------------------------------------------------------------------------
 -- Configuration
@@ -146,7 +151,7 @@ gatewayChat c msg = do
     go body st (deltas, completed) = do
       chunk <- brRead body
       let input = if BS.null chunk then Nothing else Just chunk
-          (frames, st') = run1 sys st input
+          (frames, st') = runCell sys st input
           evs = mapMaybe parseSseFrame frames
           (deltas', completed') = foldl' step (deltas, completed) evs
       if any ((== "done") . fst) evs || BS.null chunk

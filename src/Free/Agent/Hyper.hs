@@ -30,14 +30,11 @@ module Free.Agent.Hyper
     merge2,
     braidP,
     silent,
-    silentObs,
     both,
-    bothObs,
   )
 where
 
-import Circuit.Machine (Machine (..), MachineObs (..), machine, machineMorphism, machineObsWith)
-import Circuit.Poly (Mono)
+import Circuit.Cell (Cell (..))
 
 -- | Fork: duplicate a stream.
 copyP :: [a] -> ([a], [a])
@@ -61,8 +58,12 @@ braidP :: ((a, b), (c, d)) -> ((a, c), (b, d))
 braidP ((a, b), (c, d)) = ((a, c), (b, d))
 
 -- | The silent agent: emits nothing.  Additive zero for 'both'.
-silent :: Machine (,) () (->) (Mono a [b])
-silent = machine (\((), _) -> ((), ([], ())))
+--
+-- The 'Cell' spelling is its own certified observation: the observe leg
+-- reads the state directly, so there is no separate certificate to keep
+-- in agreement with the step.
+silent :: Cell (,) () (->) a [b]
+silent = Cell (\() -> []) (\((), _) -> ())
 
 -- | Merge two bundle-output agents: both see the same input, outputs are
 -- appended in left-then-right order.  The state is the pair.
@@ -71,27 +72,10 @@ silent = machine (\((), _) -> ((), ([], ())))
 -- on either side; /not/ idempotent — @both a a@ double-posts (bag at the
 -- wire).
 both ::
-  Machine (,) s1 (->) (Mono a [b]) ->
-  Machine (,) s2 (->) (Mono a [b]) ->
-  Machine (,) (s1, s2) (->) (Mono a [b])
-both x y = machine $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = machineMorphism x (s1, d)
-      (s2', (o2, ())) = machineMorphism y (s2, d)
-   in ((s1', s2'), (o1 ++ o2, ()))
-
--- | Certified observation for 'silent'.
-silentObs :: MachineObs () (Mono a [b])
-silentObs = machineObsWith (\() -> ([], ())) silent
-
--- | Certified observation for 'both': the merged observation of the two
--- component states.
-bothObs ::
-  MachineObs s1 (Mono a [b]) ->
-  MachineObs s2 (Mono a [b]) ->
-  MachineObs (s1, s2) (Mono a [b])
-bothObs x y = machineObsWith obs (both (moMachine x) (moMachine y))
-  where
-    obs (s1, s2) =
-      let (o1, ()) = moObserve x s1
-          (o2, ()) = moObserve y s2
-       in (o1 ++ o2, ())
+  Cell (,) s1 (->) a [b] ->
+  Cell (,) s2 (->) a [b] ->
+  Cell (,) (s1, s2) (->) a [b]
+both (Cell o1 k1) (Cell o2 k2) =
+  Cell
+    (\(s1, s2) -> o1 s1 ++ o2 s2)
+    (\((s1, s2), i) -> (k1 (s1, i), k2 (s2, i)))
