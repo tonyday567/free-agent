@@ -36,7 +36,7 @@ module Free.Agent.Gateway
 where
 
 import Circuit.Agent.StdPorts (frameAgent, sseMarks)
-import Circuit.Cell (Cell (..))
+import Circuit.GMachine (Cell (..))
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Control.Exception (throwIO)
 import Data.ByteString qualified as BS
@@ -57,7 +57,7 @@ import Prelude
 -- | Run one tick of a cell: step the state, read the output at the new
 -- state (post-step convention, matching 'scanProcess').
 runCell :: Cell (,) s (->) a b -> s -> a -> (b, s)
-runCell (Cell o k) s i = let s' = k (s, i) in (o s', s')
+runCell Cell {absorb = k, observe = o} s i = let s' = k (s, i) in (o s', s')
 
 -- ---------------------------------------------------------------------------
 -- Configuration

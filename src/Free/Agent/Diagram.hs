@@ -40,7 +40,7 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.Cell (Cell (..), Moore, register, pattern Moore)
+import Circuit.GMachine (Cell (..), Moore, register, pattern Moore)
 import Circuit.Poly (Lens, lens)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
@@ -53,13 +53,13 @@ import Data.Text qualified as T
 agentDiagram :: Cell (,) s (->) i o -> Diagram s s o i
 agentDiagram sys = box (cellAsLens sys)
 
--- | The cell's two legs as a lens: observe is the get, step curried on
+-- | The cell's two legs as a lens: observe is the get, absorb curried on
 -- the state is the put.
 cellAsLens :: Cell (,) s (->) i o -> Lens s s o i
-cellAsLens (Cell o k) = lens o (curry k)
+cellAsLens Cell {absorb = k, observe = o} = lens o (curry k)
 
 -- | One cell step as a diagram run: @(next state, output at current
--- state)@.  Definitionally @(step sys (s, i), observe sys s)@ — the
+-- state)@.  Definitionally @(absorb sys (s, i), observe sys s)@ — the
 -- oracle pins exactly this.
 diagramStep :: Cell (,) s (->) i o -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
@@ -88,7 +88,7 @@ liftProcess f = Moore id (const id) f
 -- 'scanProcess' / 'systemAsProcess': the output is read /after/ consuming
 -- the input.
 machineBody :: Cell (,) s (->) i o -> Moore (i, s) (o, s)
-machineBody sys = liftProcess (\(i, s) -> let s' = step sys (s, i) in (observe sys s', s'))
+machineBody sys = liftProcess (\(i, s) -> let s' = absorb sys (s, i) in (observe sys s', s'))
 
 -- | A system as a 'Moore': the stateless 'machineBody' with its state wire
 -- bent back through a one-tick 'delay' — 'register' makes the delay

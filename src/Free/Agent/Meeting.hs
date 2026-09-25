@@ -36,7 +36,7 @@ where
 
 import Circuit.Agent (Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Query (synthesisPosts)
-import Circuit.Cell (Cell (..))
+import Circuit.GMachine (Cell (..))
 import Data.List (inits, intersect)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -58,14 +58,14 @@ data AgentBox where
 -- (post-input timing — output is read from the state after consuming the input).
 runAgentBox :: AgentBox -> [Post Text] -> [PostId] -> ([Post Text], AgentBox)
 runAgentBox (AgentBox s ag) ins ids =
-  let s' = step ag (s, (ins, ids))
+  let s' = absorb ag (s, (ins, ids))
    in (observe ag s', AgentBox s' ag)
 
 -- | Lift an agent that ignores ids into one that accepts the boxed
 -- @(posts, ids)@ input.  This is the minimal adapter for existing agents
 -- that do not need provenance.
 withIds :: Cell (,) s (->) [Post Text] [Post Text] -> Cell (,) s (->) ([Post Text], [PostId]) [Post Text]
-withIds (Cell o k) = Cell o (\(s, (ins, _ids)) -> k (s, ins))
+withIds Cell {absorb = k, observe = o} = Cell {absorb = \(s, (ins, _ids)) -> k (s, ins), observe = o}
 
 -- | The quoter's output at a state: one honest synthesis post per non-empty
 -- batch, quoting what it saw.
@@ -84,10 +84,11 @@ quoterOut who tag batch batchIds = case batch of
 quoter :: Name -> Text -> Cell (,) ([Post Text], [PostId], [Post Text], [PostId]) (->) ([Post Text], [PostId]) [Post Text]
 quoter who tag =
   Cell
-    (\(_, _, batch, batchIds) -> quoterOut who tag batch batchIds)
-    ( \((hist, histIds, _batch, _batchIds), (ins, insIds)) ->
-        (reverse ins ++ hist, reverse insIds ++ histIds, ins, insIds)
-    )
+    { absorb =
+        \((hist, histIds, _batch, _batchIds), (ins, insIds)) ->
+          (reverse ins ++ hist, reverse insIds ++ histIds, ins, insIds),
+      observe = \(_, _, batch, batchIds) -> quoterOut who tag batch batchIds
+    }
 
 -- | Run @n@ rounds over a roster.  Every box sees the previous round's
 -- concatenated outputs (round 1 sees the seed).  Returns the rounds.

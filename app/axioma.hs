@@ -1,3 +1,4 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -21,10 +22,10 @@ import Circuit.Agent.Tensor
     silentShard,
   )
 import Circuit.Category (Category (id, (.)), K (..))
-import Circuit.Cell (Cell (..), delay, processFromSeed, register, scan, scanProcess)
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
 import Circuit.Equip (polesK)
+import Circuit.GMachine (Cell (..), delay, processFromSeed, register, scan, scanProcess)
 import Circuit.Syntax ((:~>))
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
@@ -107,7 +108,7 @@ iterateAgent sys s0 = scanProcess (processFromSeed s0 sys)
 -- | The Eval-shaped reading of a cell state: observe, and the step
 -- function as an input-indexed state update.
 runMono :: Cell (,) s (->) i o -> s -> (o, i -> s)
-runMono sys s = (observe sys s, \i -> step sys (s, i))
+runMono sys s = (observe sys s, \i -> absorb sys (s, i))
 
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a ds []
@@ -874,7 +875,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "diagram bridge"
   do
-    let sysN = Cell (\s -> s + 1) (\(s, i) -> s + i) :: Cell (,) Int (->) Int Int
+    let sysN = Cell {absorb = \(s, i) -> s + i, observe = \s -> s + 1} :: Cell (,) Int (->) Int Int
     assert "diagram step is the machine body's (put, get)" $
       diagramStep sysN 5 3 == (snd (runMono sysN 5) 3, fst (runMono sysN 5))
     assert "diagram steps mirror iterateAgent" $
@@ -911,7 +912,7 @@ main = do
       scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 1, 2, 3]
 
   do
-    let sysN = Cell (\s -> s + 1) (\(s, i) -> s + i) :: Cell (,) Int (->) Int Int
+    let sysN = Cell {absorb = \(s, i) -> s + i, observe = \s -> s + 1} :: Cell (,) Int (->) Int Int
     assert "register body with delay mirrors iterateAgent" $
       scan (machineProcess sysN 0) [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
 
@@ -923,7 +924,7 @@ main = do
     assert "tape agent: register body with delay mirrors iterateAgent" $
       scan (machineProcess echoObs []) ins == iterateAgent echoObs [] ins
 
-  -- The bend-and-delay identity from Circuit.Cell: for bodies whose
+  -- The bend-and-delay identity from Circuit.GMachine: for bodies whose
   -- fixed point is independent of the initial feedback value, register's
   -- wiring equals the cartesian trace with delay on the feedback wire.
   do

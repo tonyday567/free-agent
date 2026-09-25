@@ -1,4 +1,5 @@
 packages:
   free-agent.cabal
+  ../circuits/circuits.cabal
 
 write-ghc-environment-files: always

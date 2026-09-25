@@ -36,8 +36,8 @@ import Circuit.Agent.Tensor
     silentShard,
   )
 import Circuit.Category (K (..))
-import Circuit.Cell (Body (..))
 import Circuit.Equip (compose0)
+import Circuit.GMachine (Stratum (..))
 import Circuit.Poly (monoDir)
 import Control.Concurrent.STM (STM, atomically)
 import Data.Text (Text)
@@ -121,7 +121,7 @@ bundleSeat = fanInSeat
 -- | Fold a free seat term into an agent shard by interpreting each generator
 -- and composing the resulting shards with 'composeEnds0'.
 --
--- The buffer state is carried by the base arrow ('Body (,) (K IO)
+-- The buffer state is carried by the base arrow ('Stratum (,) (K IO)
 -- [Post Text]') rather than a monad transformer.
 interpretSeat ::
   FreeSeat ->
@@ -189,12 +189,12 @@ data HAgentS where
 
 -- | Lift a pure pipeline into a batch STM agent.
 pipelineS :: Pipeline (Post Text) (Post Text) -> Agent (K STM) () [Post Text] [Post Text]
-pipelineS p = Body $ K $ \((), d) ->
+pipelineS p = Stratum $ K $ \((), d) ->
   pure ((), (runPipeline p (monoDir d), ()))
 
 -- | Silent STM agent: emits nothing, state unchanged.
 silentS :: Agent (K STM) () [Post Text] [Post Text]
-silentS = Body $ K $ \((), _) -> pure ((), ([], ()))
+silentS = Stratum $ K $ \((), _) -> pure ((), ([], ()))
 
 -- | Sequential composition in STM: outputs of @f@ on the whole batch are fed
 -- as the next batch to @g@.
@@ -202,7 +202,7 @@ composeS ::
   Agent (K STM) sg [Post Text] [Post Text] ->
   Agent (K STM) sf [Post Text] [Post Text] ->
   Agent (K STM) (sf, sg) [Post Text] [Post Text]
-composeS g f = Body $ K $ \((sf, sg), d) -> do
+composeS g f = Stratum $ K $ \((sf, sg), d) -> do
   (outs, sf') <- runAgentM f sf (monoDir d)
   (outs', sg') <- runAgentM g sg outs
   pure ((sf', sg'), (outs', ()))
@@ -213,7 +213,7 @@ awaitBatchS ::
   Agent (K STM) s1 [Post Text] [Post Text] ->
   Agent (K STM) s2 [Post Text] [Post Text] ->
   Agent (K STM) (s1, s2) [Post Text] [Post Text]
-awaitBatchS f g = Body $ K $ \((sf, sg), d) -> do
+awaitBatchS f g = Stratum $ K $ \((sf, sg), d) -> do
   (outsF, sf') <- runAgentM f sf (monoDir d)
   (outsG, sg') <- runAgentM g sg (monoDir d)
   pure ((sf', sg'), (outsF <> outsG, ()))
@@ -223,7 +223,7 @@ raceBatchS ::
   Agent (K STM) s1 [Post Text] [Post Text] ->
   Agent (K STM) s2 [Post Text] [Post Text] ->
   Agent (K STM) (s1, s2) [Post Text] [Post Text]
-raceBatchS f g = Body $ K $ \((sf, sg), d) -> do
+raceBatchS f g = Stratum $ K $ \((sf, sg), d) -> do
   (outsF, sf') <- runAgentM f sf (monoDir d)
   (outsG, sg') <- runAgentM g sg (monoDir d)
   let outs = if null outsF then outsG else outsF
@@ -232,7 +232,7 @@ raceBatchS f g = Body $ K $ \((sf, sg), d) -> do
 -- | Fan-out in STM: run every branch on the same input batch and concatenate
 -- the outputs. Branch states are kept in a heterogeneous list.
 fanOutS :: Agent (K STM) [HAgentS] [Post Text] [Post Text]
-fanOutS = Body $ K $ \(hs, d) -> do
+fanOutS = Stratum $ K $ \(hs, d) -> do
   let batch = monoDir d
   pairs <- mapM (\(HAgentS s a) -> do (os, s') <- runAgentM a s batch; pure (HAgentS s' a, os)) hs
   let hs' = map fst pairs
@@ -241,7 +241,7 @@ fanOutS = Body $ K $ \(hs, d) -> do
 -- | Fan-in in STM: run every branch on the same input batch, then collapse
 -- the branch outputs with the summary function.
 fanInS :: ([[Post Text]] -> [Post Text]) -> Agent (K STM) [HAgentS] [Post Text] [Post Text]
-fanInS summary = Body $ K $ \(hs, d) -> do
+fanInS summary = Stratum $ K $ \(hs, d) -> do
   let batch = monoDir d
   pairs <- mapM (\(HAgentS s a) -> do (os, s') <- runAgentM a s batch; pure (HAgentS s' a, os)) hs
   let hs' = map fst pairs

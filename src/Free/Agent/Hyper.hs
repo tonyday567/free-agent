@@ -34,7 +34,7 @@ module Free.Agent.Hyper
   )
 where
 
-import Circuit.Cell (Cell (..))
+import Circuit.GMachine (Cell (..))
 
 -- | Fork: duplicate a stream.
 copyP :: [a] -> ([a], [a])
@@ -63,7 +63,7 @@ braidP ((a, b), (c, d)) = ((a, c), (b, d))
 -- reads the state directly, so there is no separate certificate to keep
 -- in agreement with the step.
 silent :: Cell (,) () (->) a [b]
-silent = Cell (\() -> []) (\((), _) -> ())
+silent = Cell {absorb = \((), _) -> (), observe = \() -> []}
 
 -- | Merge two bundle-output agents: both see the same input, outputs are
 -- appended in left-then-right order.  The state is the pair.
@@ -75,7 +75,8 @@ both ::
   Cell (,) s1 (->) a [b] ->
   Cell (,) s2 (->) a [b] ->
   Cell (,) (s1, s2) (->) a [b]
-both (Cell o1 k1) (Cell o2 k2) =
+both Cell {absorb = k1, observe = o1} Cell {absorb = k2, observe = o2} =
   Cell
-    (\(s1, s2) -> o1 s1 ++ o2 s2)
-    (\((s1, s2), i) -> (k1 (s1, i), k2 (s2, i)))
+    { absorb = \((s1, s2), i) -> (k1 (s1, i), k2 (s2, i)),
+      observe = \(s1, s2) -> o1 s1 ++ o2 s2
+    }
