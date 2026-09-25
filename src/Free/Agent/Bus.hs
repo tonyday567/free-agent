@@ -40,7 +40,6 @@ module Free.Agent.Bus
   )
 where
 
-import Circuit (close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
 import Circuit.Agent.Framing
   ( Log (..),
@@ -57,6 +56,7 @@ import Circuit.Agent.Framing
   )
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Circuit.Agent.Tensor (closeShardIO)
+import Circuit.GMachine (close, commit, observe)
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.STM
   ( STM,

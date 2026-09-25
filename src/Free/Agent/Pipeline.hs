@@ -23,10 +23,9 @@ module Free.Agent.Pipeline
   )
 where
 
-import Circuit (Body (..))
 import Circuit.Agent (Name, Post (..), deliversTo)
 import Circuit.Category (Category (..), K (..))
-import Circuit.Equip (Poles (..), poles0)
+import Circuit.GMachine (Poles (..), Stratum (..), poles0)
 import Data.Text (Text)
 import Prelude hiding (id, (.))
 
@@ -94,8 +93,8 @@ runPipeline (Compose g f) = runPipeline g . runPipeline f
 --
 -- The state holds the pending input batch.  Commit replaces it; emit applies
 -- the pipeline and clears the buffer.
-pipelineShard :: Pipeline a b -> Poles () (Body (,) [a] (K IO)) [a] [b]
+pipelineShard :: Pipeline a b -> Poles () (Stratum (,) [a] (K IO)) [a] [b]
 pipelineShard p = poles0 writeBatch readBatch
   where
-    writeBatch = Body $ K $ \(_, xs) -> pure (xs, ())
-    readBatch = Body $ K $ \(s, ()) -> pure ([], runPipeline p s)
+    writeBatch = Stratum $ K $ \(_, xs) -> pure (xs, ())
+    readBatch = Stratum $ K $ \(s, ()) -> pure ([], runPipeline p s)

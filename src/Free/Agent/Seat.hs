@@ -36,8 +36,7 @@ import Circuit.Agent.Tensor
     silentShard,
   )
 import Circuit.Category (K (..))
-import Circuit.Equip (compose0)
-import Circuit.GMachine (Stratum (..))
+import Circuit.GMachine (Stratum (..), compose)
 import Circuit.Poly (monoDir)
 import Control.Concurrent.STM (STM, atomically)
 import Data.Text (Text)
@@ -119,7 +118,7 @@ bundleSeat :: ([[Post Text]] -> [Post Text]) -> [FreeSeat] -> FreeSeat
 bundleSeat = fanInSeat
 
 -- | Fold a free seat term into an agent shard by interpreting each generator
--- and composing the resulting shards with 'composeEnds0'.
+-- and composing the resulting shards with 'compose'.
 --
 -- The buffer state is carried by the base arrow ('Stratum (,) (K IO)
 -- [Post Text]') rather than a monad transformer.
@@ -130,7 +129,7 @@ interpretSeat (SeatPipeline p) = pipelineShard p
 interpretSeat (SeatHost h) = hostShard h
 interpretSeat SeatSilent = silentShard
 interpretSeat (SeatCompose g f) =
-  compose0 (interpretSeat f) (interpretSeat g)
+  compose (interpretSeat f) (interpretSeat g)
 interpretSeat (SeatFork f) = interpretSeat f
 interpretSeat (SeatAwait f g) =
   awaitShard (interpretSeat f) (interpretSeat g)
