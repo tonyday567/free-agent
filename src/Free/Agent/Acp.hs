@@ -81,7 +81,7 @@ import Free.Agent.Json
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
-import Prelude
+import Prelude hiding (read)
 
 -- ---------------------------------------------------------------------------
 -- Configuration
@@ -241,13 +241,13 @@ acpSendValue :: AcpClient -> Json -> IO ()
 acpSendValue c v = do
   let line = encodeJsonText v
   logFrame c "send" line
-  runK (commit (stdIn (acpPorts c))) line
+  runK (write (stdIn (acpPorts c))) line
 
 -- | Read the next stdout line, blocking until a complete line frame
 -- arrives, logging raw frames.
 acpReadLine :: AcpClient -> IO Text
 acpReadLine c = do
-  t <- runK (observe (stdOut (acpPorts c))) ()
+  t <- runK (read (stdOut (acpPorts c))) ()
   logFrame c "recv" t
   pure t
 
@@ -522,7 +522,7 @@ acpReadStderr :: AcpClient -> IO Text
 acpReadStderr c = go []
   where
     go acc = do
-      m <- timeout 100_000 $ runK (observe (stdErr (acpPorts c))) ()
+      m <- timeout 100_000 $ runK (read (stdErr (acpPorts c))) ()
       case m of
         Nothing -> pure (T.unlines (reverse acc))
         Just l -> go (l : acc)

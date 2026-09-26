@@ -52,7 +52,7 @@ import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Free.Agent.Bus (Bus, awaitSince, closeBus, openBus, scribeIO)
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
-import Prelude
+import Prelude hiding (read)
 
 data ConnectorConfig = ConnectorConfig
   { connName :: Name,
@@ -189,14 +189,14 @@ stampedPost :: Name -> Name -> PostId -> Text -> Post Text
 stampedPost name asker askId bodyText =
   (mkPost name [asker] bodyText) {thread = [askId]}
 
--- | Commit one 'Text' token through an 'Poles' commit leg.
+-- | Commit one 'Text' token through an 'Poles' write leg.
 commitText :: Poles () (K IO) Text b -> Text -> IO ()
-commitText e t = runK (commit e) t
+commitText e t = runK (write e) t
 
--- | Emit one 'Text' frame from an 'Poles' observe leg.  Blocks until a
+-- | Emit one 'Text' frame from an 'Poles' read leg.  Blocks until a
 -- complete frame arrives.
 emitText :: Poles () (K IO) a Text -> IO Text
-emitText e = runK (observe e) ()
+emitText e = runK (read e) ()
 
 -- | Drain pending stderr lines, bounded: returns after ~100ms of quiet.
 -- Stderr is diagnostics, not dialogue — a bounded drain, not a blocking

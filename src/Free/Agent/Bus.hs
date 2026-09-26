@@ -56,7 +56,7 @@ import Circuit.Agent.Framing
   )
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Circuit.Agent.Tensor (closeShardIO)
-import Circuit.GMachine (close, commit, observe)
+import Circuit.GMachine (close, read, write)
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.STM
   ( STM,
