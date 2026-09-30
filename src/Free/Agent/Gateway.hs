@@ -55,7 +55,7 @@ import System.Environment (lookupEnv)
 import Prelude
 
 -- | Run one tick of a cell: step the state, read the output at the new
--- state (post-step convention, matching 'scanProcess').
+-- state (post-step convention, matching 'scan').
 runCell :: Cell (,) s (->) a b -> s -> a -> (b, s)
 runCell Cell {absorb = k, observe = o} s i = let s' = k (s, i) in (o s', s')
 

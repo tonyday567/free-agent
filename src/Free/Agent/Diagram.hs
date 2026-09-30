@@ -65,7 +65,7 @@ diagramStep :: Cell (,) s (->) i o -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 
 -- | Iterate a system over inputs through the diagram, mirroring the
--- post-input timing of 'scanProcess' (output is read from the state /after/
+-- post-input timing of 'scan' (output is read from the state /after/
 -- each transition).  Each step runs the diagram twice with the same input:
 -- once to consume (state transition), once to observe (output at the new
 -- state).  The backward pass is pure, so the second run is harmless — and
@@ -85,7 +85,7 @@ liftProcess f = moore id (const id) f
 -- | The stateless body of a system as a 'Moore': consume the input
 -- (state transition), then read the output of the new state, and emit the
 -- new state on the feedback wire.  This matches the post-input timing of
--- 'scanProcess' / 'systemAsProcess': the output is read /after/ consuming
+-- 'scan' / 'systemAsProcess': the output is read /after/ consuming
 -- the input.
 machineBody :: Cell (,) s (->) i o -> Moore (i, s) (o, s)
 machineBody sys = liftProcess (\(i, s) -> let s' = absorb sys (s, i) in (observe sys s', s'))

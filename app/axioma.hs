@@ -24,7 +24,7 @@ import Circuit.Agent.Tensor
 import Circuit.Category (Category (id, (.)), K (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
-import Circuit.GMachine (Cell (..), delay, polesK, processFromSeed, register, scan, scanProcess)
+import Circuit.GMachine (Cell (..), delay, moore, polesK, register, scan)
 import Circuit.Syntax ((:~>))
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
@@ -99,10 +99,10 @@ assert msg ok =
       putStrLn ("  FAIL " ++ msg)
       exitFailure
 
--- | The list runner: 'scanProcess' over a seeded cell (post-step
+-- | The list runner: 'scan' over a seeded 'moore' (post-step
 -- convention — output read from the state after each input).
 iterateAgent :: Cell (,) s (->) i o -> s -> [i] -> [o]
-iterateAgent sys s0 = scanProcess (processFromSeed s0 sys)
+iterateAgent (Cell k o) s0 = scan (moore (\a -> k (s0, a)) (curry k) o)
 
 -- | The Eval-shaped reading of a cell state: observe, and the step
 -- function as an input-indexed state update.
