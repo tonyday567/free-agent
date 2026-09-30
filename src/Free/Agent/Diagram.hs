@@ -40,7 +40,7 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.GMachine (Cell (..), Moore, register, pattern Moore)
+import Circuit.GMachine (Cell (..), Moore, moore, register)
 import Circuit.Poly (Lens, lens)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
@@ -80,7 +80,7 @@ diagramSteps sys s (i : is) =
 
 -- | Lift a pure function to a stateless 'Moore' (the box a bend closes).
 liftProcess :: (a -> b) -> Moore a b
-liftProcess f = Moore id (const id) f
+liftProcess f = moore id (const id) f
 
 -- | The stateless body of a system as a 'Moore': consume the input
 -- (state transition), then read the output of the new state, and emit the
