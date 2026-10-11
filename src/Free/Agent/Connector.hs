@@ -39,7 +39,7 @@ import Circuit.Agent.StdPorts
     openProc,
   )
 import Circuit.Category (K (..))
-import Circuit.GMachine (Poles (..))
+import Circuit.Machine (Poles (..))
 import Circuit.Syntax (eval, run)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically)
@@ -189,14 +189,14 @@ stampedPost :: Name -> Name -> PostId -> Text -> Post Text
 stampedPost name asker askId bodyText =
   (mkPost name [asker] bodyText) {thread = [askId]}
 
--- | Commit one 'Text' token through an 'Poles' write leg.
+-- | Commit one 'Text' token through an 'Poles' commit leg.
 commitText :: Poles () (K IO) Text b -> Text -> IO ()
-commitText e t = runK (write e) t
+commitText e t = runK (commit e) t
 
--- | Emit one 'Text' frame from an 'Poles' read leg.  Blocks until a
+-- | Emit one 'Text' frame from an 'Poles' emit leg.  Blocks until a
 -- complete frame arrives.
 emitText :: Poles () (K IO) a Text -> IO Text
-emitText e = runK (read e) ()
+emitText e = runK (emit e) ()
 
 -- | Drain pending stderr lines, bounded: returns after ~100ms of quiet.
 -- Stderr is diagnostics, not dialogue — a bounded drain, not a blocking

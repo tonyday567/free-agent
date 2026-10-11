@@ -34,7 +34,8 @@ module Free.Agent.Hyper
   )
 where
 
-import Circuit.GMachine (Cell (..))
+import Circuit.Machine (Body (Body), Moore)
+import Circuit.Tensor (Const (..), unConst)
 
 -- | Fork: duplicate a stream.
 copyP :: [a] -> ([a], [a])
@@ -59,11 +60,11 @@ braidP ((a, b), (c, d)) = ((a, c), (b, d))
 
 -- | The silent agent: emits nothing.  Additive zero for 'both'.
 --
--- The 'Cell' spelling is its own certified observation: the observe leg
+-- The 'Body' spelling is its own certified observation: the emit leg
 -- reads the state directly, so there is no separate certificate to keep
 -- in agreement with the step.
-silent :: Cell (,) () (->) a [b]
-silent = Cell {absorb = \((), _) -> (), observe = \() -> []}
+silent :: Moore (,) () (->) a [b]
+silent = Body (\_ -> ()) (\((), _) -> ()) (Const . \() -> [])
 
 -- | Merge two bundle-output agents: both see the same input, outputs are
 -- appended in left-then-right order.  The state is the pair.
@@ -72,11 +73,11 @@ silent = Cell {absorb = \((), _) -> (), observe = \() -> []}
 -- on either side; /not/ idempotent — @both a a@ double-posts (bag at the
 -- wire).
 both ::
-  Cell (,) s1 (->) a [b] ->
-  Cell (,) s2 (->) a [b] ->
-  Cell (,) (s1, s2) (->) a [b]
-both Cell {absorb = k1, observe = o1} Cell {absorb = k2, observe = o2} =
-  Cell
-    { absorb = \((s1, s2), i) -> (k1 (s1, i), k2 (s2, i)),
-      observe = \(s1, s2) -> o1 s1 ++ o2 s2
-    }
+  Moore (,) s1 (->) a [b] ->
+  Moore (,) s2 (->) a [b] ->
+  Moore (,) (s1, s2) (->) a [b]
+both (Body j1 k1 o1) (Body j2 k2 o2) =
+  Body
+    (\i -> (j1 i, j2 i))
+    (\((s1, s2), i) -> (k1 (s1, i), k2 (s2, i)))
+    (Const . \(s1, s2) -> unConst (o1 s1) ++ unConst (o2 s2))

@@ -6,7 +6,7 @@
 
 module Main (main) where
 
-import Circuit (Poles (..))
+import Circuit (Poles (Poles, commit, emit))
 import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), Shard, awaitA, branchesByIndex, cellToAgent, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
 import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
@@ -24,8 +24,9 @@ import Circuit.Agent.Tensor
 import Circuit.Category (Category (id, (.)), K (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
-import Circuit.GMachine (Cell (..), delay, moore, polesK, register, scan)
+import Circuit.Machine (Body (Body), Moore, MooreT (..), delay, polesK, register, scan)
 import Circuit.Syntax ((:~>))
+import Circuit.Tensor (Const (..), unConst)
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (async, cancel)
@@ -99,15 +100,15 @@ assert msg ok =
       putStrLn ("  FAIL " ++ msg)
       exitFailure
 
--- | The list runner: 'scan' over a seeded 'moore' (post-step
+-- | The list runner: 'scan' over a seeded 'MooreT' (post-step
 -- convention — output read from the state after each input).
-iterateAgent :: Cell (,) s (->) i o -> s -> [i] -> [o]
-iterateAgent (Cell k o) s0 = scan (moore (\a -> k (s0, a)) (curry k) o)
+iterateAgent :: Moore (,) s (->) i o -> s -> [i] -> [o]
+iterateAgent (Body _ k o) s0 = scan (MooreT (Body (\i -> k (s0, i)) k o))
 
--- | The Eval-shaped reading of a cell state: observe, and the step
+-- | The Eval-shaped reading of a body state: emit, and the step
 -- function as an input-indexed state update.
-runMono :: Cell (,) s (->) i o -> s -> (o, i -> s)
-runMono sys s = (observe sys s, \i -> absorb sys (s, i))
+runMono :: Moore (,) s (->) i o -> s -> (o, i -> s)
+runMono (Body _ k o) s = (unConst (o s), \i -> k (s, i))
 
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a ds []
@@ -874,7 +875,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "diagram bridge"
   do
-    let sysN = Cell {absorb = \(s, i) -> s + i, observe = \s -> s + 1} :: Cell (,) Int (->) Int Int
+    let sysN = Body (\i -> i) (\(s, i) -> s + i) (Const . (+ 1)) :: Moore (,) Int (->) Int Int
     assert "diagram step is the machine body's (put, get)" $
       diagramStep sysN 5 3 == (snd (runMono sysN 5) 3, fst (runMono sysN 5))
     assert "diagram steps mirror iterateAgent" $
@@ -883,7 +884,7 @@ main = do
   do
     let echoObs =
           tape (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
-            Cell (,) [Post Text] (->) (Post Text) [Post Text]
+            Moore (,) [Post Text] (->) (Post Text) [Post Text]
         p0 = mkPost "human" ["bot"] "one"
         ins =
           [ p0,
@@ -911,19 +912,19 @@ main = do
       scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 1, 2, 3]
 
   do
-    let sysN = Cell {absorb = \(s, i) -> s + i, observe = \s -> s + 1} :: Cell (,) Int (->) Int Int
+    let sysN = Body (\i -> i) (\(s, i) -> s + i) (Const . (+ 1)) :: Moore (,) Int (->) Int Int
     assert "register body with delay mirrors iterateAgent" $
       scan (machineProcess sysN 0) [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
 
   do
     let echoObs =
           tape (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
-            Cell (,) [Post Text] (->) (Post Text) [Post Text]
+            Moore (,) [Post Text] (->) (Post Text) [Post Text]
         ins = [mkPost "human" ["bot"] "one", mkPost "human" ["bot"] "two"]
     assert "tape agent: register body with delay mirrors iterateAgent" $
       scan (machineProcess echoObs []) ins == iterateAgent echoObs [] ins
 
-  -- The bend-and-delay identity from Circuit.GMachine: for bodies whose
+  -- The bend-and-delay identity from Circuit.Machine: for bodies whose
   -- fixed point is independent of the initial feedback value, register's
   -- wiring equals the cartesian trace with delay on the feedback wire.
   do
@@ -1032,10 +1033,10 @@ main = do
   do
     let obsA =
           tape (\hist -> [mkPost "a" [] ("a:" <> T.pack (show (length hist)))]) ::
-            Cell (,) [Post Text] (->) (Post Text) [Post Text]
+            Moore (,) [Post Text] (->) (Post Text) [Post Text]
         obsB =
           tape (\hist -> [mkPost "b" [] ("b:" <> T.pack (show (length hist)))]) ::
-            Cell (,) [Post Text] (->) (Post Text) [Post Text]
+            Moore (,) [Post Text] (->) (Post Text) [Post Text]
         ins = [mkPost "human" ["x"] "one", mkPost "human" ["x"] "two"]
         outsAB = concat (iterateAgent (both obsA obsB) ([], []) ins)
         outsBA = concat (iterateAgent (both obsB obsA) ([], []) ins)

@@ -36,8 +36,9 @@ module Free.Agent.Gateway
 where
 
 import Circuit.Agent.StdPorts (frameAgent, sseMarks)
-import Circuit.GMachine (Cell (..))
+import Circuit.Machine (Body (Body), Moore)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
+import Circuit.Tensor (unConst)
 import Control.Exception (throwIO)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
@@ -54,10 +55,10 @@ import Network.HTTP.Types (RequestHeaders, statusCode)
 import System.Environment (lookupEnv)
 import Prelude
 
--- | Run one tick of a cell: step the state, read the output at the new
+-- | Run one tick of a body: step the state, read the output at the new
 -- state (post-step convention, matching 'scan').
-runCell :: Cell (,) s (->) a b -> s -> a -> (b, s)
-runCell Cell {absorb = k, observe = o} s i = let s' = k (s, i) in (o s', s')
+runCell :: Moore (,) s (->) a b -> s -> a -> (b, s)
+runCell (Body _ k o) s i = let s' = k (s, i) in (unConst (o s'), s')
 
 -- ---------------------------------------------------------------------------
 -- Configuration

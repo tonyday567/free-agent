@@ -25,7 +25,7 @@ where
 
 import Circuit.Agent (Name, Post (..), deliversTo)
 import Circuit.Category (Category (..), K (..))
-import Circuit.GMachine (Poles (..), Stratum (..))
+import Circuit.Machine (Poles (..), Step (..))
 import Data.Text (Text)
 import Prelude hiding (id, (.))
 
@@ -93,8 +93,8 @@ runPipeline (Compose g f) = runPipeline g . runPipeline f
 --
 -- The state holds the pending input batch.  Commit replaces it; emit applies
 -- the pipeline and clears the buffer.
-pipelineShard :: Pipeline a b -> Poles () (Stratum (,) [a] (K IO)) [a] [b]
-pipelineShard p = Poles writeBatch readBatch
+pipelineShard :: Pipeline a b -> Poles () (Step (,) (,) [a] [a] (K IO)) [a] [b]
+pipelineShard p = Poles writeBatch writeBatch readBatch
   where
-    writeBatch = Stratum $ K $ \(_, xs) -> pure (xs, ())
-    readBatch = Stratum $ K $ \(s, ()) -> pure ([], runPipeline p s)
+    writeBatch = Step $ K $ \(_, xs) -> pure (xs, ())
+    readBatch = Step $ K $ \(s, ()) -> pure ([], runPipeline p s)

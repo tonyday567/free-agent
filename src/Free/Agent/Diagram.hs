@@ -1,15 +1,14 @@
-{-# LANGUAGE PatternSynonyms #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 
 -- | Bridge: agents as string diagrams (stage 1 of endgame-path).
 --
--- A monomial 'Cell' converts to a seeded process and then to a lens
+-- A monomial 'Body' converts to a seeded process and then to a lens
 -- (@processAsLens@), and 'box' lifts such a lens into the string-diagram
--- DSL.  The result runs one cell step per 'runDiagram' call: the forward
+-- DSL.  The result runs one body step per 'runDiagram' call: the forward
 -- wire carries state → output, the backward wire carries input → next
 -- state.
 --
--- Stage 1b: the bend, at the 'Moore' layer.  A stateful agent decomposes
+-- Stage 1b: the bend, at the 'MooreT' layer.  A stateful agent decomposes
 -- as a stateless body plus cross-tick feedback: 'register' closes the
 -- state wire with 'delay' making the one-tick lag observable (sound for
 -- strict state, where the lazy cartesian knot would diverge).  So:
@@ -20,7 +19,7 @@
 --
 -- What is still missing is the same wiring inside the
 -- 'Circuit.Poly.StringDiagram' surface itself (a delay box and a trace
--- combinator over a 'Moore' base); the oracles pin the semantics the
+-- combinator over a 'MooreT' base); the oracles pin the semantics the
 -- surface will need to reproduce.
 --
 -- Stage 2: 'meetingSkeleton' reads a conversation back as a drawing —
@@ -40,28 +39,29 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.GMachine (Cell (..), Moore, moore, register)
+import Circuit.Machine (Body (Body), Moore, MooreT, moore, register)
 import Circuit.Poly (Lens, lens)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
+import Circuit.Tensor (Const (..), unConst)
 import Data.List (delete, elemIndex, foldl', mapAccumL)
 import Data.Text qualified as T
 
--- | A monomial cell as a one-box diagram.
+-- | A monomial body as a one-box diagram.
 --
 -- 'cellAsLens': forward wire @s → o@ (state to output), backward wire
 -- @i → s@ (input to next state).
-agentDiagram :: Cell (,) s (->) i o -> Diagram s s o i
+agentDiagram :: Moore (,) s (->) i o -> Diagram s s o i
 agentDiagram sys = box (cellAsLens sys)
 
--- | The cell's two legs as a lens: observe is the get, absorb curried on
+-- | The body's two legs as a lens: emit is the get, commit curried on
 -- the state is the put.
-cellAsLens :: Cell (,) s (->) i o -> Lens s s o i
-cellAsLens Cell {absorb = k, observe = o} = lens o (curry k)
+cellAsLens :: Moore (,) s (->) i o -> Lens s s o i
+cellAsLens (Body _ k o) = lens (unConst . o) (curry k)
 
--- | One cell step as a diagram run: @(next state, output at current
--- state)@.  Definitionally @(absorb sys (s, i), observe sys s)@ — the
+-- | One body step as a diagram run: @(next state, output at current
+-- state)@.  Definitionally @(commit sys (s, i), emit-of sys s)@ — the
 -- oracle pins exactly this.
-diagramStep :: Cell (,) s (->) i o -> s -> i -> (s, o)
+diagramStep :: Moore (,) s (->) i o -> s -> i -> (s, o)
 diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 
 -- | Iterate a system over inputs through the diagram, mirroring the
@@ -71,31 +71,31 @@ diagramStep sys s i = runDiagram (agentDiagram sys) (s, i)
 -- state).  The backward pass is pure, so the second run is harmless — and
 -- both passes go through 'runDiagram', so the oracle exercises the bridge
 -- end to end.
-diagramSteps :: Cell (,) s (->) i o -> s -> [i] -> [o]
+diagramSteps :: Moore (,) s (->) i o -> s -> [i] -> [o]
 diagramSteps _ _ [] = []
 diagramSteps sys s (i : is) =
   let (s', _) = diagramStep sys s i
       (_, o) = diagramStep sys s' i
    in o : diagramSteps sys s' is
 
--- | Lift a pure function to a stateless 'Moore' (the box a bend closes).
-liftProcess :: (a -> b) -> Moore a b
+-- | Lift a pure function to a stateless 'MooreT' (the box a bend closes).
+liftProcess :: (a -> b) -> MooreT (,) (->) a b
 liftProcess f = moore id (const id) f
 
--- | The stateless body of a system as a 'Moore': consume the input
+-- | The stateless body of a system as a 'MooreT': consume the input
 -- (state transition), then read the output of the new state, and emit the
 -- new state on the feedback wire.  This matches the post-input timing of
 -- 'scan' / 'systemAsProcess': the output is read /after/ consuming
 -- the input.
-machineBody :: Cell (,) s (->) i o -> Moore (i, s) (o, s)
-machineBody sys = liftProcess (\(i, s) -> let s' = absorb sys (s, i) in (observe sys s', s'))
+machineBody :: Moore (,) s (->) i o -> MooreT (,) (->) (i, s) (o, s)
+machineBody (Body _ k o) = liftProcess (\(i, s) -> let s' = k (s, i) in (unConst (o s'), s'))
 
--- | A system as a 'Moore': the stateless 'machineBody' with its state wire
+-- | A system as a 'MooreT': the stateless 'machineBody' with its state wire
 -- bent back through a one-tick 'delay' — 'register' makes the delay
 -- explicit in the wiring rather than implicit in a lazy knot.
 --
 -- Oracle-pinned: @scan (machineProcess sys s0) is == iterateAgent sys s0 is@.
-machineProcess :: Cell (,) s (->) i o -> s -> Moore i o
+machineProcess :: Moore (,) s (->) i o -> s -> MooreT (,) (->) i o
 machineProcess sys s0 = register s0 (machineBody sys)
 
 -- | The drawing skeleton of a conversation: each post is a box labelled by

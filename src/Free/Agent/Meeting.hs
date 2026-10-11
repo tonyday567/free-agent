@@ -36,7 +36,8 @@ where
 
 import Circuit.Agent (Name, Post (..), PostId, coneByIndex)
 import Circuit.Agent.Query (synthesisPosts)
-import Circuit.GMachine (Cell (..))
+import Circuit.Machine (Body (Body), Moore)
+import Circuit.Tensor (Const (..), unConst)
 import Data.List (inits, intersect)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -47,25 +48,25 @@ import Data.Text qualified as T
 -- driver assigned to that batch.  This lets agents thread replies/syntheses
 -- by exact reference without inventing ids.
 --
--- The box carries a 'Cell': the observe leg /is/ the certified
+-- The box carries a 'Body': the emit leg /is/ the certified
 -- observation — output is read from the state after consuming the input
 -- (post-input timing), so there is no separate observation certificate to
 -- keep in agreement with the step.
 data AgentBox where
-  AgentBox :: s -> Cell (,) s (->) ([Post Text], [PostId]) [Post Text] -> AgentBox
+  AgentBox :: s -> Moore (,) s (->) ([Post Text], [PostId]) [Post Text] -> AgentBox
 
--- | One batch step: absorb the input and its ids, emit the answer
+-- | One batch step: commit the input and its ids, emit the answer
 -- (post-input timing — output is read from the state after consuming the input).
 runAgentBox :: AgentBox -> [Post Text] -> [PostId] -> ([Post Text], AgentBox)
-runAgentBox (AgentBox s ag) ins ids =
-  let s' = absorb ag (s, (ins, ids))
-   in (observe ag s', AgentBox s' ag)
+runAgentBox (AgentBox s (Body j k o)) ins ids =
+  let s' = k (s, (ins, ids))
+   in (unConst (o s'), AgentBox s' (Body j k o))
 
 -- | Lift an agent that ignores ids into one that accepts the boxed
 -- @(posts, ids)@ input.  This is the minimal adapter for existing agents
 -- that do not need provenance.
-withIds :: Cell (,) s (->) [Post Text] [Post Text] -> Cell (,) s (->) ([Post Text], [PostId]) [Post Text]
-withIds Cell {absorb = k, observe = o} = Cell {absorb = \(s, (ins, _ids)) -> k (s, ins), observe = o}
+withIds :: Moore (,) s (->) [Post Text] [Post Text] -> Moore (,) s (->) ([Post Text], [PostId]) [Post Text]
+withIds (Body j k o) = Body (\(ins, _ids) -> j ins) (\(s, (ins, _ids)) -> k (s, ins)) o
 
 -- | The quoter's output at a state: one honest synthesis post per non-empty
 -- batch, quoting what it saw.
@@ -78,17 +79,17 @@ quoterOut who tag batch batchIds = case batch of
 -- synthesis post ('synthesisPosts') whose body quotes what it saw.  @tag@
 -- marks the "model" — swapping the box is swapping the tag.
 --
--- Output depends only on the state (the observe leg reads the recorded
+-- Output depends only on the state (the emit leg reads the recorded
 -- batch): the state carries the last batch and its ids seen, and the
--- observe answers it.
-quoter :: Name -> Text -> Cell (,) ([Post Text], [PostId], [Post Text], [PostId]) (->) ([Post Text], [PostId]) [Post Text]
+-- emit answers it.
+quoter :: Name -> Text -> Moore (,) ([Post Text], [PostId], [Post Text], [PostId]) (->) ([Post Text], [PostId]) [Post Text]
 quoter who tag =
-  Cell
-    { absorb =
-        \((hist, histIds, _batch, _batchIds), (ins, insIds)) ->
-          (reverse ins ++ hist, reverse insIds ++ histIds, ins, insIds),
-      observe = \(_, _, batch, batchIds) -> quoterOut who tag batch batchIds
-    }
+  Body
+    (\(ins, insIds) -> (reverse ins, reverse insIds, ins, insIds))
+    ( \((hist, histIds, _batch, _batchIds), (ins, insIds)) ->
+        (reverse ins ++ hist, reverse insIds ++ histIds, ins, insIds)
+    )
+    (Const . \(_, _, batch, batchIds) -> quoterOut who tag batch batchIds)
 
 -- | Run @n@ rounds over a roster.  Every box sees the previous round's
 -- concatenated outputs (round 1 sees the seed).  Returns the rounds.
