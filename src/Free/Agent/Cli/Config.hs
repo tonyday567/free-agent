@@ -5,15 +5,18 @@ module Free.Agent.Cli.Config
   ( Backend (..),
     HermesConfig (..),
     KimiConfig (..),
+    DshConfig (..),
     LlmConfig (..),
     CommandConfig (..),
     GatewayCliConfig (..),
     defaultHermesConfig,
     defaultKimiConfig,
+    defaultDshConfig,
     defaultLlmConfig,
     defaultCommandConfig,
     parseHermesConfig,
     parseKimiConfig,
+    parseDshConfig,
     parseLlmConfig,
     parseCommandConfig,
     parseGatewayConfig,
@@ -41,6 +44,7 @@ import Options.Applicative
 data Backend
   = BackendHermes HermesConfig
   | BackendKimi KimiConfig
+  | BackendDsh DshConfig
   | BackendLlm LlmConfig
   | BackendCommand CommandConfig
   | BackendGateway GatewayCliConfig
@@ -72,6 +76,17 @@ data KimiConfig = KimiConfig
     kcProvider :: Maybe Text,
     kcQuiesce :: Maybe Int,
     kcPitboss :: Maybe Name
+  }
+  deriving (Show)
+
+data DshConfig = DshConfig
+  { dcRoot :: FilePath,
+    dcNames :: [Name],
+    dcPromptFile :: FilePath,
+    dcDshPatch :: FilePath,
+    dcDshModelPatch :: Maybe FilePath,
+    dcQuiesce :: Maybe Int,
+    dcPitboss :: Maybe Name
   }
   deriving (Show)
 
@@ -137,6 +152,18 @@ defaultKimiConfig =
       kcProvider = Nothing,
       kcQuiesce = Nothing,
       kcPitboss = Nothing
+    }
+
+defaultDshConfig :: DshConfig
+defaultDshConfig =
+  DshConfig
+    { dcRoot = ".",
+      dcNames = [],
+      dcPromptFile = "",
+      dcDshPatch = "",
+      dcDshModelPatch = Nothing,
+      dcQuiesce = Nothing,
+      dcPitboss = Nothing
     }
 
 defaultLlmConfig :: LlmConfig
@@ -298,6 +325,30 @@ parseKimiConfig =
     <*> providerOpt
     <*> quiesceOpt
     <*> pitbossOpt
+
+parseDshConfig :: Parser DshConfig
+parseDshConfig =
+  DshConfig
+    <$> rootOpt
+    <*> namesOpt
+    <*> promptOpt
+    <*> dshPatchOpt
+    <*> optional dshModelPatchOpt
+    <*> quiesceOpt
+    <*> pitbossOpt
+  where
+    dshPatchOpt =
+      strOption
+        ( long "dsh-patch"
+            <> metavar "PATCH.yml"
+            <> help "DSH base patch file"
+        )
+    dshModelPatchOpt =
+      strOption
+        ( long "dsh-model-patch"
+            <> metavar "MODEL.yml"
+            <> help "DSH model override patch file"
+        )
 
 parseLlmConfig :: Parser LlmConfig
 parseLlmConfig =

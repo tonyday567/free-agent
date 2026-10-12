@@ -18,6 +18,7 @@ module Free.Agent.Host
     hermesHostBatch,
     hermesCli,
     kimiHost,
+    dshHost,
     bareHost,
     defaultBareConfig,
   )
@@ -26,18 +27,24 @@ where
 import Circuit.Agent (Post (..), mkPost)
 import Circuit.Agent.Tensor (AgentShard, ioShard)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
+import Control.Monad (forM_)
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL
-import Data.IORef (IORef)
+import Data.IORef (IORef, readIORef)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Text.IO qualified as TIO
+import Data.Time (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Vector qualified as V
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, kimiCli, parseSessionId)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), TranscriptRecord (..), cleanCliOut, cliQuery, encodeTranscriptLine, kimiCli, parseSessionId)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
-import System.Process (readProcess)
+import System.Directory (createDirectoryIfMissing)
+import System.Exit (ExitCode (..))
+import System.FilePath (takeDirectory, (</>))
+import System.Process (proc, readCreateProcessWithExitCode, readProcess)
 
 -- $setup
 -- >>> :set -XOverloadedStrings
@@ -161,6 +168,64 @@ kimiHost ::
   Host
 kimiHost name model provider sessionFile mTranscript =
   cliHost name (kimiCli model provider sessionFile) {cliTranscript = mTranscript}
+
+-- | DSH host on the local deepseek-harness seat.
+--
+-- Runs @dsh --profile headless --patch BASE [--patch MODEL] --json -@ per body,
+-- passing the post body on stdin. The optional transcript sink records one
+-- JSONL line per invocation, preserving the merged stdout and stderr so the
+-- NDJSON event stream stays inspectable.
+dshHost ::
+  -- | Host name (used as the 'from' field of reply posts).
+  Text ->
+  -- | Base patch file (e.g. @~/dsh-ollama.patch.yml@).
+  FilePath ->
+  -- | Optional model-override patch file.
+  Maybe FilePath ->
+  -- | Optional transcript sink. The caller writes the post id to the 'IORef'
+  -- before each call.
+  Maybe (IORef Int, FilePath) ->
+  Host
+dshHost name basePatch mModelPatch mTranscript =
+  Host
+    { hostName = name,
+      hostBodyMode = BodyWhole,
+      hostRun = fmap concat . traverse runOne
+    }
+  where
+    runOne body = do
+      t0 <- getCurrentTime
+      let argv =
+            [ "--profile",
+              "headless",
+              "--patch",
+              basePatch,
+              "--json",
+              "-"
+            ]
+              <> maybe [] (\p -> ["--patch", p]) mModelPatch
+      (code, out, err) <- readCreateProcessWithExitCode (proc "dsh" argv) (T.unpack body)
+      t1 <- getCurrentTime
+      let elapsed = floor (realToFrac (diffUTCTime t1 t0) * (1000 :: Double))
+          raw = T.pack out <> T.pack err
+      forM_ mTranscript $ \(ref, path) -> do
+        pid <- readIORef ref
+        let rec =
+              TranscriptRecord
+                { trPostId = pid,
+                  trTimestamp = t0,
+                  trExitCode = case code of
+                    ExitSuccess -> 0
+                    ExitFailure n -> n,
+                  trElapsedMs = elapsed,
+                  trSessionId = Nothing,
+                  trRaw = raw
+                }
+        createDirectoryIfMissing True (takeDirectory path)
+        TIO.appendFile path (encodeTranscriptLine rec <> "\n")
+      case code of
+        ExitSuccess -> pure [T.pack out]
+        ExitFailure n -> pure ["🔴 dsh exited " <> T.pack (show n) <> ": " <> T.strip (T.pack err)]
 
 -- | Hermes host on the shared 'Cli' seat.
 --

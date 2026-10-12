@@ -19,7 +19,7 @@ import Circuit.Agent (Name, Post (..), mkPost, sortNub)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.Tensor (closeShardIO)
 import Control.Applicative ((<|>))
-import Control.Monad (unless)
+import Control.Monad (forM_, unless)
 import Data.Foldable (traverse_)
 import Data.IORef (IORef, newIORef, writeIORef)
 import Data.Maybe (fromMaybe)
@@ -33,11 +33,13 @@ import Free.Agent.Bus.File (QuiesceConfig (..), cursorPath)
 import Free.Agent.Cli.Config
   ( Backend (..),
     CommandConfig (..),
+    DshConfig (..),
     GatewayCliConfig (..),
     HermesConfig (..),
     KimiConfig (..),
     LlmConfig (..),
     parseCommandConfig,
+    parseDshConfig,
     parseHermesConfig,
     parseLlmConfig,
   )
@@ -48,7 +50,7 @@ import Free.Agent.Gateway
     gatewayHost,
     openGateway,
   )
-import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesHostBatch, kimiHost, processHost)
+import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, dshHost, hermesHostBatch, kimiHost, processHost)
 import Free.Agent.Seat (FreeSeat, hostSeat, interpretSeat)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesFileExist)
@@ -138,6 +140,7 @@ commandParser =
     ( command "bus" (info (BusCmd <$> busParser <**> helper) (progDesc "Bus subcommands"))
         <> command "llm" (info (AgentCmd . BackendLlm <$> parseLlmConfig <**> helper) (progDesc "Direct API seat (old bus-bare)"))
         <> command "cmd" (info (AgentCmd . BackendCommand <$> parseCommandConfig <**> helper) (progDesc "External-command seat"))
+        <> command "dsh" (info (AgentCmd . BackendDsh <$> parseDshConfig <**> helper) (progDesc "DSH / local ollama seat"))
         <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <**> helper) (progDesc "Bus log statistics"))
     )
     <|> defaultAgentParser
@@ -195,6 +198,7 @@ main = do
 runBackend :: Backend -> IO ()
 runBackend (BackendHermes cfg) = runHermes cfg
 runBackend (BackendKimi cfg) = runKimi cfg
+runBackend (BackendDsh cfg) = runDsh cfg
 runBackend (BackendLlm cfg) = runLlm cfg
 runBackend (BackendCommand cfg) = runCommand cfg
 runBackend (BackendGateway cfg) = runGateway cfg
@@ -317,6 +321,40 @@ runKimi cfg = do
         filter keepReplyHermes <$> runOneSeat seat stored
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
   runAgentLoop agentName names (kcRoot cfg) mQuiesce handle
+
+-- ---------------------------------------------------------------------------
+-- DSH / local ollama seat
+-- ---------------------------------------------------------------------------
+
+keepReplyDsh :: Post Text -> Bool
+keepReplyDsh p =
+  let b = T.strip (body p)
+   in not (T.null b) && b /= "(empty)"
+
+runDsh :: DshConfig -> IO ()
+runDsh cfg = do
+  validatePrompt (dcPromptFile cfg)
+  systemPrompt <- TIO.readFile (dcPromptFile cfg)
+  let names = dcNames cfg
+      agentName = agentNameOf names
+      transcriptPath = dcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
+  createDirectoryIfMissing True (takeDirectory transcriptPath)
+  transcriptRef <- newIORef 0
+  let host0 = dshHost agentName (dcDshPatch cfg) (dcDshModelPatch cfg) (Just (transcriptRef, transcriptPath))
+      host =
+        host0
+          { hostRun =
+              hostRun host0 . map (\b -> systemPrompt <> "\n\nUser message:\n" <> b)
+          }
+      seat = hostSeat host
+      mQuiesce = buildQuiesce (dcQuiesce cfg) (dcPitboss cfg)
+      handle stored = do
+        writeIORef transcriptRef (fromIntegral (snd (stamp stored)))
+        filter keepReplyDsh <$> runOneSeat seat stored
+  TIO.putStrLn $ "   patch: " <> T.pack (dcDshPatch cfg)
+  forM_ (dcDshModelPatch cfg) $ \p ->
+    TIO.putStrLn $ "   model patch: " <> T.pack p
+  runAgentLoop agentName names (dcRoot cfg) mQuiesce handle
 
 -- ---------------------------------------------------------------------------
 -- Direct API (llm)
