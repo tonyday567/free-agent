@@ -171,7 +171,7 @@ kimiHost name model provider sessionFile mTranscript =
 
 -- | DSH host on the local deepseek-harness seat.
 --
--- Runs @dsh --profile headless --patch BASE [--patch MODEL] --json -@ per body,
+-- Runs @dsh headless --patch BASE [--patch MODEL] --json -@ per body,
 -- passing the post body on stdin. The optional transcript sink records one
 -- JSONL line per invocation, preserving the merged stdout and stderr so the
 -- NDJSON event stream stays inspectable.
@@ -196,14 +196,10 @@ dshHost name basePatch mModelPatch mTranscript =
     runOne body = do
       t0 <- getCurrentTime
       let argv =
-            [ "--profile",
-              "headless",
-              "--patch",
-              basePatch,
-              "--json",
-              "-"
-            ]
+            ["headless"]
+              <> ["--patch", basePatch]
               <> maybe [] (\p -> ["--patch", p]) mModelPatch
+              <> ["--json", "-"]
       (code, out, err) <- readCreateProcessWithExitCode (proc "dsh" argv) (T.unpack body)
       t1 <- getCurrentTime
       let elapsed = floor (realToFrac (diffUTCTime t1 t0) * (1000 :: Double))
