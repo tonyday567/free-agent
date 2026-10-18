@@ -20,6 +20,7 @@ where
 import Circuit.Agent (Name, Post (..), PostId, deliversTo)
 import Circuit.Agent.Framing (Stamped, stamp, stamped, unframeStored)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM
   ( TMVar,
     atomically,
@@ -157,6 +158,7 @@ tailLog path names startCursor mQuiesce cb = do
   (off0, halted0) <- drainFrom 0 (filterStoredSince startCursor)
   offRef <- newIORef off0
   halted <- newTVarIO halted0
+  lock <- newMVar ()
   let logName = takeFileName path
       dir = takeDirectory path
   withManager $ \mgr -> do
@@ -166,22 +168,20 @@ tailLog path names startCursor mQuiesce cb = do
       already <- readTVarIO halted
       unless already $ do
         atomically $ writeTVar busy True
-        off <- readIORef offRef
-        (off', h) <- drainFrom off filterStored
-        writeIORef offRef off'
+        h <- drainLocked lock offRef filterStored
         atomically $ do
           when h (writeTVar halted True)
           writeTVar busy False
           _ <- tryPutTMVar signal ()
           pure ()
     case mQuiesce of
-      Nothing -> pollLoop offRef signal halted
+      Nothing -> pollLoop lock offRef signal halted
       Just (qc, onQuiesce) -> quiesceLoop qc signal busy halted 0 onQuiesce
   where
     -- \| No-quiesce poll loop: wait on fsnotify with a 1 s timeout, then
     -- manually re-drain.  FSEvents on macOS does not reliably fire on
     -- append, so the timeout fallback ensures delivery within ~1 s.
-    pollLoop offRef signal halted = do
+    pollLoop lock offRef signal halted = do
       h <- readTVarIO halted
       if h
         then pure ()
@@ -189,17 +189,22 @@ tailLog path names startCursor mQuiesce cb = do
           m <- timeout 1_000_000 (atomically (takeTMVar signal))
           case m of
             Just () -> do
-              off <- readIORef offRef
-              (off', h') <- drainFrom off filterStored
-              writeIORef offRef off'
+              h' <- drainLocked lock offRef filterStored
               when h' (atomically (writeTVar halted True))
             Nothing -> do
               -- timeout: poll the file manually
-              off <- readIORef offRef
-              (off', h') <- drainFrom off filterStored
-              writeIORef offRef off'
+              h' <- drainLocked lock offRef filterStored
               when h' (atomically (writeTVar halted True))
-          pollLoop offRef signal halted
+          pollLoop lock offRef signal halted
+    -- Deliveries are serialized: the offset is read, the log drained,
+    -- and the offset advanced under one lock, so the fsnotify watcher
+    -- and the poll fallback cannot both deliver a post when a callback
+    -- runs longer than the poll interval.
+    drainLocked lock offRef filt = withMVar lock $ \_ -> do
+      off <- readIORef offRef
+      (off', h) <- drainFrom off filt
+      writeIORef offRef off'
+      pure h
     drainFrom off filt = do
       (ls, off') <- readCompleteLines off
       halted <- deliver (mapMaybe filt ls)
