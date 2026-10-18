@@ -12,6 +12,7 @@ module Free.Agent.Cli
     hermesCli,
     kimiCli,
     grokCli,
+    dshCli,
     parseSessionId,
     cleanCliOut,
 
@@ -57,7 +58,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Char (chr, ord)
 import Data.Foldable (for_)
 import Data.IORef (IORef, readIORef)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -242,6 +243,64 @@ unescapeJson t = case T.uncons t of
     esc '\\' = Just '\\'
     esc '/' = Just '/'
     esc _ = Nothing
+
+-- | Recipe for the dsh CLI (the local ollama seat):
+-- @dsh headless --patch BASE [--patch MODEL] --json [--session-id \<sid\>] TASK@.
+--
+-- The task rides the argv — @CARD\n\nUser message:\n\<prompt\>@ on a fresh
+-- session, @User message:\n\<prompt\>@ on a resumed one: a resumed session
+-- already carries the card, and re-prepending would burn the 16k context
+-- window by duplication.  The "User message:" lead also keeps the task
+-- safely non-dash-leading for the CLI's own argument parser.
+--
+-- Output is NDJSON: the session id is scraped from the
+-- @{"type":"session",…}@ event; the reply is scrubbed to the final
+-- message's text — the raw stream stays in the transcript sink.
+dshCli :: Maybe Text -> FilePath -> Maybe FilePath -> FilePath -> Cli
+dshCli mCard basePatch mModelPatch sessionFile =
+  Cli
+    { cliCommand = "dsh",
+      cliArgv = \prompt mSid ->
+        ["headless", "--patch", basePatch, "--json"]
+          <> maybe [] (\p -> ["--patch", p]) mModelPatch
+          <> maybe [] (\sid -> ["--session-id", T.unpack sid]) mSid
+          <> [T.unpack (taskFor mSid prompt)],
+      cliStdin = const "",
+      cliSessionFile = sessionFile,
+      cliSessionId = dshSessionId,
+      cliStale = \_ out -> "does not exist; omit --session-id" `T.isInfixOf` out,
+      cliScrub = dshText,
+      cliStderr = StderrMerge,
+      cliStderrTee = Nothing,
+      cliTranscript = Nothing
+    }
+  where
+    taskFor mSid prompt = case (mCard, mSid) of
+      (Just card, Nothing) -> card <> "\n\nUser message:\n" <> prompt
+      _ -> "User message:\n" <> prompt
+
+-- | Scrape the session id from the NDJSON @session@ event.
+dshSessionId :: Text -> Maybe Text
+dshSessionId out =
+  case filter ("\"type\":\"session\"" `T.isInfixOf`) (T.lines out) of
+    (l : _) -> jsonField "sessionId" l
+    [] -> Nothing
+
+-- | The reply is the last NDJSON @final@ event's text, unescaped; if no
+-- final event exists (a crashed run), keep the whole stream visible.
+dshText :: Text -> Text
+dshText out =
+  maybe
+    (T.strip out)
+    unescapeJson
+    ( listToMaybe
+        ( reverse
+            ( mapMaybe
+                (jsonField "text")
+                (filter ("\"type\":\"final\"" `T.isInfixOf`) (T.lines out))
+            )
+        )
+    )
 
 -- | Scrape a @session_id:@ line from CLI output.
 parseSessionId :: Text -> Maybe Text

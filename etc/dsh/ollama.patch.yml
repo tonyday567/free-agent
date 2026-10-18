@@ -1,0 +1,55 @@
+# The local-seat provider patch: ollama on localhost, every installed
+# chat model declared (a model must be declared here before a pin can
+# reference it), the web/subagent tools disabled (they confabulate on
+# small models — the Oct-8 lesson), and the seat default pinned.
+#
+# Model choice is a four-line overlay (see ollama-gemma4.patch.yml) —
+# never fork this file. Requires OLLAMA_API_KEY set (any value; pi-ai
+# rejects keyless routes, ollama ignores the value).
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      ollama:
+        displayName: Ollama local
+        api: openai-completions
+        baseURL: http://localhost:11434/v1
+        apiKeyEnv: OLLAMA_API_KEY
+        defaultContextWindow: 16384
+        defaultMaxTokens: 4096
+        models:
+          - id: qwen2.5:14b
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: qwen2.5-coder:7b
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: llama3.1:8b
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: deepseek-r1:8b
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: gemma4:12b-it-qat
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: qwen3.8:27b
+            contextWindow: 16384
+            maxTokens: 4096
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: ollama
+    model: qwen2.5:14b
+- id: tool-web
+  name: "@deepseek-ai/dsh-tool-web"
+  disabled: true
+- id: tool-subagent
+  name: "@deepseek-ai/dsh-tool-subagent"
+  disabled: true
+- id: tool-subagent-fork
+  name: "@deepseek-ai/dsh-tool-subagent"
+  disabled: true
+- id: tool-subagent-control
+  name: "@deepseek-ai/dsh-tool-subagent-control"
+  disabled: true

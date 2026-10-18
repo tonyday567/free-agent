@@ -37,7 +37,7 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Vector qualified as V
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), TranscriptRecord (..), cleanCliOut, cliQuery, encodeTranscriptLine, kimiCli, parseSessionId)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), TranscriptRecord (..), cleanCliOut, cliQuery, dshCli, encodeTranscriptLine, kimiCli, parseSessionId)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -171,57 +171,30 @@ kimiHost name model provider sessionFile mTranscript =
 
 -- | DSH host on the local deepseek-harness seat.
 --
--- Runs @dsh headless --patch BASE [--patch MODEL] --json -@ per body,
--- passing the post body on stdin. The optional transcript sink records one
--- JSONL line per invocation, preserving the merged stdout and stderr so the
--- NDJSON event stream stays inspectable.
+-- Rides the shared 'Cli' recipe ('dshCli'): runs
+-- @dsh headless --patch BASE [--patch MODEL] --json [--session-id SID] TASK@
+-- per body, with session resume via the session file (a stale session
+-- falls back to fresh), the seat card as the fresh-session preamble, and
+-- the NDJSON stream scrubbed to the final text for the reply.  The
+-- transcript sink records one JSONL line per invocation, raw stream
+-- preserved.
 dshHost ::
   -- | Host name (used as the 'from' field of reply posts).
   Text ->
-  -- | Base patch file (e.g. @~/dsh-ollama.patch.yml@).
+  -- | Seat card: the fresh-session preamble, if any.
+  Maybe Text ->
+  -- | Base patch file (e.g. @etc/dsh/ollama.patch.yml@).
   FilePath ->
   -- | Optional model-override patch file.
   Maybe FilePath ->
+  -- | Session file for cross-call context.
+  FilePath ->
   -- | Optional transcript sink. The caller writes the post id to the 'IORef'
   -- before each call.
   Maybe (IORef Int, FilePath) ->
   Host
-dshHost name basePatch mModelPatch mTranscript =
-  Host
-    { hostName = name,
-      hostBodyMode = BodyWhole,
-      hostRun = fmap concat . traverse runOne
-    }
-  where
-    runOne body = do
-      t0 <- getCurrentTime
-      let argv =
-            ["headless"]
-              <> ["--patch", basePatch]
-              <> maybe [] (\p -> ["--patch", p]) mModelPatch
-              <> ["--json", "-"]
-      (code, out, err) <- readCreateProcessWithExitCode (proc "dsh" argv) (T.unpack body)
-      t1 <- getCurrentTime
-      let elapsed = floor (realToFrac (diffUTCTime t1 t0) * (1000 :: Double))
-          raw = T.pack out <> T.pack err
-      forM_ mTranscript $ \(ref, path) -> do
-        pid <- readIORef ref
-        let rec =
-              TranscriptRecord
-                { trPostId = pid,
-                  trTimestamp = t0,
-                  trExitCode = case code of
-                    ExitSuccess -> 0
-                    ExitFailure n -> n,
-                  trElapsedMs = elapsed,
-                  trSessionId = Nothing,
-                  trRaw = raw
-                }
-        createDirectoryIfMissing True (takeDirectory path)
-        TIO.appendFile path (encodeTranscriptLine rec <> "\n")
-      case code of
-        ExitSuccess -> pure [T.pack out]
-        ExitFailure n -> pure ["🔴 dsh exited " <> T.pack (show n) <> ": " <> T.strip (T.pack err)]
+dshHost name mCard basePatch mModelPatch sessionFile mTranscript =
+  cliHost name (dshCli mCard basePatch mModelPatch sessionFile) {cliTranscript = mTranscript}
 
 -- | Hermes host on the shared 'Cli' seat.
 --

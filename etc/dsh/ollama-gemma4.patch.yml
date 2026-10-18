@@ -1,0 +1,10 @@
+# Model overlay: re-pin the seat default to gemma4:12b-it-qat. Layer
+# after the base patch, e.g.
+#   dsh --profile headless --patch etc/dsh/ollama.patch.yml \
+#       --patch etc/dsh/ollama-gemma4.patch.yml --json "…"
+# The model must be declared in the base patch's models list.
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: ollama
+    model: gemma4:12b-it-qat

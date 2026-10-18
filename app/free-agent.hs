@@ -338,14 +338,17 @@ runDsh cfg = do
   let names = dcNames cfg
       agentName = agentNameOf names
       transcriptPath = dcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
+      sessionPath = dcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".sid"
   createDirectoryIfMissing True (takeDirectory transcriptPath)
   transcriptRef <- newIORef 0
-  let host0 = dshHost agentName (dcDshPatch cfg) (dcDshModelPatch cfg) (Just (transcriptRef, transcriptPath))
-      host =
-        host0
-          { hostRun =
-              hostRun host0 . map (\b -> systemPrompt <> "\n\nUser message:\n" <> b)
-          }
+  let host =
+        dshHost
+          agentName
+          (Just systemPrompt)
+          (dcDshPatch cfg)
+          (dcDshModelPatch cfg)
+          sessionPath
+          (Just (transcriptRef, transcriptPath))
       seat = hostSeat host
       mQuiesce = buildQuiesce (dcQuiesce cfg) (dcPitboss cfg)
       handle stored = do
