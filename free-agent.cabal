@@ -63,6 +63,13 @@ library
     Free.Agent.Connector
     Free.Agent.Derivation
     Free.Agent.Diagram
+    Free.Agent.Fare.Cli
+    Free.Agent.Fare.Config
+    Free.Agent.Fare.Exec
+    Free.Agent.Fare.Gate
+    Free.Agent.Fare.Read
+    Free.Agent.Fare.Search
+    Free.Agent.Fare.State
     Free.Agent.Gateway
     Free.Agent.Host
     Free.Agent.Hyper
@@ -144,3 +151,13 @@ executable bus-claim
     free-agent,
     optparse-applicative >=0.17 && <0.20,
     text >=1.2 && <3,
+
+executable fare
+  import: ghc-options-stanza
+  default-language: GHC2024
+  hs-source-dirs: app
+  main-is: fare.hs
+  build-depends:
+    base >=4.20 && <5,
+    free-agent,
+    optparse-applicative >=0.17 && <0.20,
