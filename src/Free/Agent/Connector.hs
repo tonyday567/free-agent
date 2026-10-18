@@ -3,9 +3,17 @@
 
 -- | Persistent REPL agent as a bus participant.
 --
--- 'runConnector' spawns a process (via 'openProc'), attaches to the
--- free-agent bus, and loops: await addressed posts → commit body to repl
--- stdin → block on the next stdout frame → scribe reply.
+-- 'runConnector' spawns a process (via 'openProc'), tails the bus log
+-- ('tailLog') for posts addressed to it, and loops: addressed post ->
+-- commit body to repl stdin -> block on the next stdout frame -> post the
+-- reply back via 'postLocal'.
+--
+-- The seat is file-truth end to end: it reads via 'tailLog' (fsnotify tail
+-- on @log.jsonl@) and replies via 'postLocal' (file lock), never through
+-- the in-memory 'TVar' bus.  A long-lived seat must observe posts from
+-- other processes, which only ever reach the file; waiting on the 'TVar'
+-- image deadlocks (the image goes stale the moment an external process
+-- posts).
 --
 -- Framing is port-side: the repl's prompt grammar ('procMarks') decides
 -- turn boundaries, and the emit end blocks until a complete frame arrives.
@@ -29,7 +37,7 @@ module Free.Agent.Connector
   )
 where
 
-import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost)
+import Circuit.Agent (Name, Post (..), PostId, mkPost)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.StdPorts
   ( ProcConfig (..),
@@ -41,15 +49,20 @@ import Circuit.Agent.StdPorts
 import Circuit.Category (K (..))
 import Circuit.Machine (Poles (..))
 import Circuit.Syntax (eval, run)
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.STM (atomically)
 import Control.Monad (unless, void)
 import Data.Foldable (traverse_)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
-import Free.Agent.Bus (Bus, awaitSince, closeBus, openBus, scribeIO)
+import Free.Agent.Bus (postLocal)
+import Free.Agent.Bus.File
+  ( Flow (..),
+    readCursor,
+    tailLog,
+    writeCursor,
+  )
+import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 import Prelude hiding (read)
@@ -87,9 +100,9 @@ defaultConnectorConfig name =
 runConnector :: ConnectorConfig -> IO ()
 runConnector cfg = do
   let name = connName cfg
-  bus <- openBus (connBusRoot cfg)
+      root = connBusRoot cfg
   repl <- runK (eval (openProc encodeUtf8 decodeUtf8 (connRepl cfg))) ()
-  void $ scribeIO bus (mkPost name [] ("starting repl: " <> T.pack (procCommand (connRepl cfg)) <> " " <> T.unwords (map T.pack (procArgs (connRepl cfg)))))
+  void $ postLocal root (mkPost name [] ("starting repl: " <> T.pack (procCommand (connRepl cfg)) <> " " <> T.unwords (map T.pack (procArgs (connRepl cfg)))))
 
   -- Drain the initial frame (up to the first prompt).
   mFirst <- timeout (connStartupTimeout cfg) (emitText (procStdio repl))
@@ -100,43 +113,40 @@ runConnector cfg = do
   unless (T.null err0) $
     hPutStrLn stderr ("connector stderr: " <> T.unpack (T.take 200 err0))
 
-  -- Main loop.
-  void $ scribeIO bus (mkPost name [] "repl ready")
-  loop bus repl name 0
-  closeBus bus
+  -- Main loop: tail the log for posts addressed to us.
+  void $ postLocal root (mkPost name [] ("repl ready" :: Text))
+  cursor <- readCursor root name
+  tailLog (root </> "log.jsonl") [name] cursor Nothing (handlePost cfg repl root)
   procClose repl
   where
     whenNothing m act = maybe act (const (pure ())) m
-    loop bus repl name lastId = do
-      ps <- atomically (awaitSince bus [name] lastId)
-      if null ps
-        then threadDelay 500_000 >> loop bus repl name lastId
-        else do
-          done <- processPosts cfg bus repl ps
-          let newId = maximum (map (snd . stamp) ps) + 1
-          unless done $ loop bus repl name newId
 
-processPosts ::
+-- | One delivered post: quit is control, anything else is an ask.
+handlePost ::
   ConnectorConfig ->
-  Bus Text ->
   ProcEnds Text Text Text ->
-  [Stamped Text] ->
-  IO Bool
-processPosts cfg bus repl = go
-  where
-    name = connName cfg
-    go [] = pure False
-    go (stored : rest) = do
-      if deliversTo (stamped stored) [name] || name `elem` to (stamped stored)
+  FilePath ->
+  Stamped Text ->
+  IO Flow
+handlePost cfg repl root stored = do
+  let name = connName cfg
+      ask = stamped stored
+  -- F2: never receive our own posts.
+  if from ask == name
+    then advance >> pure Continue
+    else
+      if body ask == "quit" || body ask == ":quit"
         then do
-          let cmd = body (stamped stored)
-          if cmd == "quit" || cmd == ":quit"
-            then scribeIO bus (mkPost name [] "closing") >> pure True
-            else do
-              replies <- runTurn cfg repl stored
-              traverse_ (scribeIO bus) replies
-              go rest
-        else go rest
+          _ <- postLocal root (mkPost name [] ("closing" :: Text))
+          advance
+          pure Halt
+        else do
+          replies <- runTurn cfg repl stored
+          traverse_ (postLocal root) replies
+          advance
+          pure Continue
+  where
+    advance = writeCursor root (connName cfg) (snd (stamp stored) + 1)
 
 -- | The result of one critical-section turn, before scribing.
 data TurnResult
