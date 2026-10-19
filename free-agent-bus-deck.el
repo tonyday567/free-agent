@@ -179,6 +179,8 @@ RECIPIENTS is a comma or space separated string of names, e.g.
                   ((string-empty-p trimmed) nil)              ; broadcast
                   ((string= trimmed "\"\"") '(""))           ; discard
                   (t (split-string trimmed "[ ,]+" t)))))
+  (setq mode-name (free-agent-bus--post-mode-name))
+  (force-mode-line-update)
   (message "Post recipients: %s"
            (or free-agent-bus-post-to "broadcast")))
 
