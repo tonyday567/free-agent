@@ -1,0 +1,40 @@
+# The deepseek-API provider patch: dsh riding api.deepseek.com — the
+# harness on the paid seat instead of the local ollama one. Same shape
+# as ollama.patch.yml (the Oct-8 lesson kept: web/subagent tools off);
+# a model choice is a four-line overlay, never a fork of this file.
+#
+# Requires DEEPSEEK_API_KEY set (sourced from the env file by the
+# launcher, per house practice). Proven 2026-10-19: deepseek-v4-pro
+# round-trips (subs.md journal, wave-2 probe 5).
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      deepseek:
+        displayName: DeepSeek API
+        api: openai-completions
+        baseURL: https://api.deepseek.com/v1
+        apiKeyEnv: DEEPSEEK_API_KEY
+        defaultContextWindow: 65536
+        defaultMaxTokens: 8192
+        models:
+          - id: deepseek-v4-pro
+            contextWindow: 65536
+            maxTokens: 8192
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek
+    model: deepseek-v4-pro
+- id: tool-web
+  name: "@deepseek-ai/dsh-tool-web"
+  disabled: true
+- id: tool-subagent
+  name: "@deepseek-ai/dsh-tool-subagent"
+  disabled: true
+- id: tool-subagent-fork
+  name: "@deepseek-ai/dsh-tool-subagent"
+  disabled: true
+- id: tool-subagent-control
+  name: "@deepseek-ai/dsh-tool-subagent-control"
+  disabled: true
