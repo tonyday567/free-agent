@@ -224,7 +224,7 @@ RECIPIENTS is a comma or space separated string of names, e.g.
   :type 'boolean
   :group 'free-agent-bus-deck)
 
-(defcustom free-agent-bus-log-filter-choices '("tony" "hermes" "kimi")
+(defcustom free-agent-bus-log-filter-choices '("tony" "kimi" "mucho" "singleton" "lungo" "oedipa")
   "Common directed-recipient filter choices for the log buffer.
 Broadcasts (`to: [\"all\"]') are always shown."
   :type '(repeat string)

@@ -261,8 +261,9 @@ dshCli mCard basePatch mModelPatch sessionFile =
   Cli
     { cliCommand = "dsh",
       cliArgv = \prompt mSid ->
-        ["headless", "--patch", basePatch, "--json"]
+        ["headless", "--patch", basePatch]
           <> maybe [] (\p -> ["--patch", p]) mModelPatch
+          <> ["--json"]
           <> maybe [] (\sid -> ["--session-id", T.unpack sid]) mSid
           <> [T.unpack (taskFor mSid prompt)],
       cliStdin = const "",
