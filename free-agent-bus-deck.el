@@ -260,17 +260,23 @@ nil (loom/deck-design.md §feedback)."
   :type 'boolean
   :group 'free-agent-bus-deck)
 
-(defcustom free-agent-bus-log-filter-choices '("tony" "kimi" "mucho" "singleton" "lungo" "oedipa")
-  "Common directed-recipient filter choices for the log buffer.
-Broadcasts (`to: [\"all\"]') are always shown."
+(defcustom free-agent-bus-log-filter-choices
+  '("runner" "k1" "k2" "k3" "mucho" "singleton" "lungo" "oedipa" "all")
+  "Common directed-recipient filter choices for the log buffer —
+the live roster plus the commons.  Broadcasts (`to: [\"all\"]') are
+always shown regardless of the filter."
   :type '(repeat string)
   :group 'free-agent-bus-deck)
 
 (defvar-local free-agent-bus-log-filter nil
-  "Current recipient filter for the log buffer.
-A list of names; a post is shown if it is a broadcast (`to: [\"all\"]') or
-if its `to' field contains any of them.  If nil, defaults to the user's
-name plus the legacy channel name.")
+  "Current recipient filter for the log buffer, buffer-local.
+A list of names; a post is shown if it is a broadcast (`to: [\"all\"]')
+or if its `to' field contains any of them.  If nil when
+`free-agent-bus-log-mode' starts, it is initialized to
+\(list free-agent-bus-name \"all\") — your mail plus the commons.
+A global setq does NOT reach an existing log buffer (k2, wave 4:
+the live buffer rode a stale c61158c-era filter and silently hid
+directed mail); set it buffer-locally or via \\[free-agent-bus-log-set-filter].")
 
 (defvar free-agent-bus-log--timer nil
   "Fallback timer for periodic log refresh.")
@@ -338,6 +344,10 @@ recipient filter. Coordination marks render bold."
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
   (setq-local org-startup-folded nil)
+  (unless free-agent-bus-log-filter
+    ;; Buffer-local: a global setq never reaches this buffer (k2, wave 4 —
+    ;; a stale global filter silently hid directed mail in the live deck).
+    (setq-local free-agent-bus-log-filter (list free-agent-bus-name "all")))
   (font-lock-add-keywords
    nil '(("[🟣🟡🟢🔴🔵🚩✓↩⟜⟝]" 0 'free-agent-bus-mark-face prepend)))
   (add-hook 'kill-buffer-hook #'free-agent-bus-log-stop-watch nil t))
@@ -392,8 +402,7 @@ lines (loom/deck-design.md §what is actually wrong, finding 3)."
                        (not (or (equal to [""]) (seq-empty-p to)))
                        (or (seq-find (lambda (c) (equal c "all")) to)
                            (let ((filter (or free-agent-bus-log-filter
-                                             (list free-agent-bus-name
-                                                   free-agent-bus-channel))))
+                                             (list free-agent-bus-name "all"))))
                              (seq-find (lambda (c) (member c filter)) to))))
               (list :id id :ts ts :from from
                     :to (append to nil) :thread (append thread nil)
@@ -565,8 +574,7 @@ contains one of the filter names. Common choices are offered via completion."
   (interactive
    (let* ((default (mapconcat #'identity
                               (or free-agent-bus-log-filter
-                                  (list free-agent-bus-name
-                                        free-agent-bus-channel))
+                                  (list free-agent-bus-name "all"))
                               ","))
           (choice (completing-read
                    (format-prompt "Log filter" default)
