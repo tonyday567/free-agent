@@ -2,6 +2,12 @@
 
 ## unreleased
 
+- **Reply ancestry (M1a).** `runAgentLoop` now cites the delivered post's
+  stamped id in every post it produces: handler replies prepend the parent
+  id to their thread (`runSeatBus` parity), and both 🔴 relays — the
+  handler-failure escalation and the incoming-escalation relay to the
+  pitboss — carry the edge to the ask they answer. Pinned by the M1a
+  oracles in `free-agent-axioma`.
 - **Watermark persister.** The scribe ack (a timeout-less `takeTMVar`
   handoff) is off the agent path: the persister is a seat over a
   `busDurable` watermark, `awaitDurable`/`awaitQuiescent` end by content

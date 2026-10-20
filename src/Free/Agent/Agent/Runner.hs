@@ -11,7 +11,7 @@ module Free.Agent.Agent.Runner
   )
 where
 
-import Circuit.Agent (Name, Post (..), mkPost)
+import Circuit.Agent (Name, Post (..), mkPost, sortNub)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Control.Exception (SomeException, displayException, try)
@@ -40,6 +40,10 @@ import System.Posix.Process (getProcessID)
 -- quiescence config, and a handler that turns one incoming 'Stamped Text' into
 -- zero or more reply posts. The handler is responsible for decoration,
 -- scrubbing, routing, and filtering; this function handles the bus plumbing.
+--
+-- Ancestry: every post produced in response to a delivery cites that
+-- delivery — the delivered post's stamped id is prepended to each reply's
+-- 'thread' (the same law 'runSeatBus' enforces), and the 🔴 relays do.
 --
 -- Decided quiet: a delivered post carrying a halt mark (🟢 or 🔵) stops the
 -- loop; an escalation mark (🔴) is relayed to the pitboss (when a quiescence
@@ -83,8 +87,12 @@ runAgentLoop agentName names root mQuiesce handlePost = do
           Just m
             | isHalt m -> pure (Just Halt)
             | isEscalate m -> do
-                forM_ mQuiesce $ \qc ->
-                  postLocal root (mkPost agentName [qcPitboss qc] (markGlyph Escalate <> " escalation received; standing down"))
+                let relay =
+                      (mkPost agentName [] (markGlyph Escalate <> " escalation received; standing down"))
+                        { thread = [snd (stamp stored)],
+                          to = maybe [] (pure . qcPitboss) mQuiesce
+                        }
+                forM_ mQuiesce $ \_ -> postLocal root relay
                 pure (Just Halt)
           _ -> pure Nothing
   cursor <- readCursor root agentName
@@ -116,7 +124,9 @@ runAgentLoop agentName names root mQuiesce handlePost = do
                     ++ T.unpack exc
                 _ <-
                   postLocal root $
-                    mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc)
+                    (mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc))
+                      { thread = [snd (stamp stored)]
+                      }
                 -- handler failure: cursor advanced, seat keeps listening
                 pure Continue
               Right replies -> do
@@ -124,7 +134,8 @@ runAgentLoop agentName names root mQuiesce handlePost = do
                       let b = T.strip (body p)
                        in not (T.null b) && b /= "(empty)"
                     nonEmpty = filter keep replies
-                traverse_ (postLocal root) nonEmpty
+                    cite p = p {thread = sortNub (snd (stamp stored) : thread p)}
+                traverse_ (postLocal root . cite) nonEmpty
                 -- Self-halt: the seat's own 🔵, judged at commit time.
                 pure $
                   if any ((== Just StandDown) . markOf) replies

@@ -41,9 +41,10 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
+import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (Bus, awaitDurable, awaitQuiescent, awaitSince, busImage, closeBus, openBus, postLocal, readSince, runSeatBus, scribeIO)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
-import Free.Agent.Bus.File (Decision (..), Flow (..), QEvent (..), quiesceAgent, tailLog)
+import Free.Agent.Bus.File (Decision (..), Flow (..), QEvent (..), QuiesceConfig (..), quiesceAgent, tailLog)
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
 import Free.Agent.Connector (ConnectorConfig (..), TurnResult (..), defaultConnectorConfig, runTurn)
@@ -1348,6 +1349,117 @@ main = do
       map (snd . stamp) parsed == [0, 1, 2, 3]
     assert "the halt mark got silence from every seat" $
       length (fromAlpha ++ fromBeta) == 2
+
+  -------------------------------------------------------------------------
+  -- Reply ancestry (M1a): every post produced in response to a delivery
+  -- cites that delivery. runAgentLoop posts handler replies as-is —
+  -- these oracles pin the thread edge on the production path.
+  -- Counterexample under the old code: thread == [].
+  -------------------------------------------------------------------------
+  putStrLn "reply ancestry (M1a)"
+
+  -- A handler reply cites the delivered ask. The seat starts first; the
+  -- asks are planted after (a cold-boot cursor would skip pre-planted
+  -- history — production seats do not answer the past).
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-m1a-ancestry"
+        path = root </> "log.jsonl"
+        plant = do
+          _ <- postLocal root (mkPost "human" ["m1a"] "ask")
+          postLocal root (mkPost "human" ["m1a"] (markGlyph Landed <> " done"))
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    done <- newEmptyMVar
+    _ <-
+      forkIO $
+        runAgentLoop
+          "m1a"
+          ["m1a"]
+          root
+          Nothing
+          ( \stored ->
+              pure [mkPost "m1a" [from (stamped stored)] ("ack: " <> body (stamped stored))]
+          )
+          >> putMVar done ()
+    _ <- plant
+    takeMVar done
+    content <- TIO.readFile path
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+        replies = [stamped s | s <- parsed, from (stamped s) == "m1a"]
+    assert "M1a a runAgentLoop reply cites the delivered ask's id" $
+      case replies of
+        [r] -> body r == "ack: ask" && thread r == [0]
+        _ -> False
+    removePathForcibly root
+
+  -- A handler exception produces a 🔴 citing the ask.
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-m1a-escalation"
+        path = root </> "log.jsonl"
+        plant = do
+          _ <- postLocal root (mkPost "human" ["m1x"] "boom-ask")
+          postLocal root (mkPost "human" ["m1x"] (markGlyph Landed <> " done"))
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    done <- newEmptyMVar
+    _ <-
+      forkIO $
+        runAgentLoop "m1x" ["m1x"] root Nothing (\_ -> error "handler exploded")
+          >> putMVar done ()
+    _ <- plant
+    takeMVar done
+    content <- TIO.readFile path
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+        escalations =
+          [ stamped s
+          | s <- parsed,
+            from (stamped s) == "m1x",
+            maybe False isEscalate (markOf (stamped s))
+          ]
+    assert "M1a a handler failure produces a 🔴 citing the ask" $
+      case escalations of
+        [e] -> thread e == [0] && "handler exploded" `T.isInfixOf` body e
+        _ -> False
+    removePathForcibly root
+
+  -- An incoming 🔴 relayed to the pitboss cites the escalation it answers.
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-m1a-relay"
+        path = root </> "log.jsonl"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    done <- newEmptyMVar
+    -- The 🔴 is control: the handler must never run (it would error and
+    -- post a second escalation, breaking the singleton assertion below).
+    _ <-
+      forkIO $
+        runAgentLoop
+          "m1r"
+          ["m1r"]
+          root
+          (Just (QuiesceConfig 3 "boss" 1_000_000))
+          ( \_ ->
+              error "handler should never run on an escalation mark"
+          )
+          >> putMVar done ()
+    _ <- postLocal root (mkPost "human" ["m1r"] (markGlyph Escalate <> " help"))
+    takeMVar done
+    content <- TIO.readFile path
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+        relays =
+          [ stamped s
+          | s <- parsed,
+            from (stamped s) == "m1r",
+            to (stamped s) == ["boss"]
+          ]
+    assert "M1a the escalation relay to the pitboss cites the ask" $
+      case relays of
+        [r] -> thread r == [0] && "escalation received" `T.isInfixOf` body r
+        _ -> False
+    removePathForcibly root
 
   -------------------------------------------------------------------------
   -- tailLog: offset draining, partial trailing line, halt mid-batch.
