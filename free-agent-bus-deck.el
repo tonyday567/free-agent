@@ -33,6 +33,16 @@
 ;; Unparseable log lines are never dropped silently and never dumped raw
 ;; as if they were content: they render as ⟝-marked rows and an
 ;; increasing count is announced in *Messages* (count-check doctrine).
+;;
+;; Render shape (loom/deck-design.md §shape that follows): the log buffer
+;; is org so folding is free.  A channel is a participant set — a directed
+;; post's channel is FROM∪TO sorted, so both directions of a pair share
+;; one foldable section; anything with "all" in TO is the commons
+;; section, one circle per seat, house palette.  A post is a card
+;; fragment: `from ⟜ body', replies nested one headline level under their
+;; parent when it is in the same section, else marked ↩ at section level.
+;; Channels fold on TAB; after each refresh every channel is folded
+;; except the one holding the newest post.
 
 ;;; Code:
 
@@ -274,6 +284,46 @@ When the count increases, `free-agent-bus-log-refresh' announces it in
 the echo area — a count-check event, never a silent drop
 (loom/deck-design.md §open questions; k2 post 365, gate point d).")
 
+;;; Faces and seat colors (house palette, stuff/house-style.md)
+
+(defface free-agent-bus-mark-face
+  '((t :weight bold))
+  "Face for coordination marks (🟣🟡🟢🔴🔵🚩✓↩⟜⟝) in log bodies."
+  :group 'free-agent-bus-deck)
+
+(defface free-agent-bus-meta-face
+  '((t :inherit shadow))
+  "Face for the trailing id@ts tag on a rendered post."
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-seat-colors
+  '(("all" . "#5b5ba0")                            ; indigo-hi — the commons
+    ("runner" . "#D98A3A") ("tony" . "#D98A3A")     ; amber — the human
+    ("k1" . "#e070a8") ("k2" . "#e070a8") ("k3" . "#e070a8") ; magenta-hi — kimis
+    ("mucho" . "#3fa47e")                           ; forest-hi
+    ("singleton" . "#6bb898")                       ; teal-hi
+    ("lungo" . "#E07A9E")                           ; rose
+    ("oedipa" . "#8FB83A"))                         ; chartreuse
+  "Seat name to circle color. Colors from stuff/house-style.md
+(dark-mode -hi values); unknown seats get
+`free-agent-bus-unknown-seat-color' rather than a guess."
+  :type '(alist :key-type string :value-type string)
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-unknown-seat-color "#777777"
+  "Circle color for seats with no `free-agent-bus-seat-colors' entry."
+  :type 'string
+  :group 'free-agent-bus-deck)
+
+(defun free-agent-bus--seat-color (name)
+  "Return the circle color for seat NAME."
+  (or (cdr (assoc name free-agent-bus-seat-colors))
+      free-agent-bus-unknown-seat-color))
+
+(defun free-agent-bus--circle (name)
+  "Return a propertized ● for seat NAME."
+  (propertize "●" 'face `(:foreground ,(free-agent-bus--seat-color name))))
+
 (defvar free-agent-bus-log-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "t") #'free-agent-bus-log-toggle-timestamps)
@@ -281,8 +331,15 @@ the echo area — a count-check event, never a silent drop
     map)
   "Keymap for `free-agent-bus-log-mode'.")
 
-(define-derived-mode free-agent-bus-log-mode text-mode "FreeAgentBus-Log"
-  "Major mode for viewing free-agent-bus logs."
+(define-derived-mode free-agent-bus-log-mode org-mode "FAB-Log"
+  "Major mode for viewing free-agent-bus logs: an org fold over the log.
+TAB folds channels and threads; `t' toggles timestamps, `f' sets the
+recipient filter. Coordination marks render bold."
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t)
+  (setq-local org-startup-folded nil)
+  (font-lock-add-keywords
+   nil '(("[🟣🟡🟢🔴🔵🚩✓↩⟜⟝]" 0 'free-agent-bus-mark-face prepend)))
   (add-hook 'kill-buffer-hook #'free-agent-bus-log-stop-watch nil t))
 
 (defun free-agent-bus-log--read-file ()
@@ -307,42 +364,146 @@ count-check honest: a torn tail is never counted as corruption."
         lines
       (seq-take lines (max 0 (1- (length lines)))))))
 
-(defun free-agent-bus-log--format-line (line)
-  "Format a raw log LINE for display.
-Accepts stamped JSONL (`id', `ts', `from', `to', `thread', `body').
-Lines not addressed to the current `free-agent-bus-channel' are ignored.
-Blank lines (separators, trailing newline) are skipped silently.
-Unparseable lines increment `free-agent-bus-log--parse-errors' and
-render as a visible ⟝-marked row — never returned raw as if they were
-content (loom/deck-design.md §what is actually wrong, finding 3)."
-  (let ((parsed (ignore-errors (json-read-from-string line))))
-    (cond
-     ((string-blank-p line) nil)
-     ((null parsed)
-      ;; Count-check event: visible row in the buffer, counted for *Messages*
-      ;; by `free-agent-bus-log-refresh'.  The raw line stays in the log file.
-      (setq free-agent-bus-log--parse-errors
-            (1+ free-agent-bus-log--parse-errors))
-      (format "⟝ UNPARSEABLE (raw line kept in %s): %.160s"
-              (free-agent-bus--log-file) line))
-     (t
-      (ignore-errors
-        (let* ((obj parsed)
-               (id (cdr (assoc 'id obj)))
-               (ts (cdr (assoc 'ts obj)))
-               (from (cdr (assoc 'from obj)))
-               (to (cdr (assoc 'to obj)))
-               (body (cdr (assoc 'body obj))))
-          (when (and id ts from body
-                     (not (or (equal to [""]) (seq-empty-p to)))
-                     (or (seq-find (lambda (c) (equal c "all")) to)
-                         (let ((filter (or free-agent-bus-log-filter
-                                           (list free-agent-bus-name
-                                                 free-agent-bus-channel))))
-                           (seq-find (lambda (c) (member c filter)) to))))
-            (if free-agent-bus-log-show-timestamps
-                (format "[%s@%s] %s: %s" id ts from body)
-              (format "%s: %s" from body)))))))))
+(defun free-agent-bus-log--parse-post (line)
+  "Parse one RAW log LINE into a plist (:id :ts :from :to :thread :body).
+Returns nil for blank or filtered-out lines; increments
+`free-agent-bus-log--parse-errors' and returns :unparseable for corrupt
+lines (loom/deck-design.md §what is actually wrong, finding 3)."
+  (cond
+   ((string-blank-p line) nil)
+   (t
+    (let ((parsed (ignore-errors (json-read-from-string line))))
+      (cond
+       ((null parsed)
+        ;; Count-check event: counted for *Messages* by
+        ;; `free-agent-bus-log-refresh'; the raw line stays in the log file.
+        (setq free-agent-bus-log--parse-errors
+              (1+ free-agent-bus-log--parse-errors))
+        :unparseable)
+       (t
+        (ignore-errors
+          (let* ((id (cdr (assoc 'id parsed)))
+                 (ts (cdr (assoc 'ts parsed)))
+                 (from (cdr (assoc 'from parsed)))
+                 (to (cdr (assoc 'to parsed)))
+                 (thread (cdr (assoc 'thread parsed)))
+                 (body (cdr (assoc 'body parsed))))
+            (when (and id ts from body
+                       (not (or (equal to [""]) (seq-empty-p to)))
+                       (or (seq-find (lambda (c) (equal c "all")) to)
+                           (let ((filter (or free-agent-bus-log-filter
+                                             (list free-agent-bus-name
+                                                   free-agent-bus-channel))))
+                             (seq-find (lambda (c) (member c filter)) to))))
+              (list :id id :ts ts :from from
+                    :to (append to nil) :thread (append thread nil)
+                    :body body))))))))))
+
+(defun free-agent-bus--channel-key (from to)
+  "Return the channel key for a post FROM directed at TO.
+The commons (any TO of \"all\") is the single channel \"all\"; otherwise
+the channel is the sorted participant set FROM∪TO, so both directions of
+a pairwise conversation share one foldable section."
+  (if (seq-find (lambda (c) (equal c "all")) to)
+      "all"
+    (mapconcat #'identity
+               (sort (seq-uniq (cons from (copy-sequence to))) #'string<)
+               ",")))
+
+(defun free-agent-bus-log--render (raw)
+  "Render RAW log text as org-shaped deck text.
+Returns (TEXT . NEWEST-CHANNEL): TEXT to insert, NEWEST-CHANNEL the
+1-based index of the channel section holding the newest post (nil when
+no posts render).  Channels are participant sets (see
+`free-agent-bus--channel-key'), emitted in first-seen order with one
+colored circle per seat.  A post renders as a card fragment
+`from ⟜ body' with a trailing id@ts tag; a reply nests one headline
+level under its parent when the parent rendered in the same section,
+else it carries a ↩ mark at section level."
+  (let ((posts nil)
+        (errors nil))
+    (dolist (line (free-agent-bus-log--complete-lines raw))
+      (let ((p (free-agent-bus-log--parse-post line)))
+        (cond ((eq p :unparseable)
+               (push (format "⟝ UNPARSEABLE (raw line kept in %s): %.160s"
+                             (free-agent-bus--log-file) line)
+                     errors))
+              (p (push p posts)))))
+    (setq posts (nreverse posts)
+          errors (nreverse errors))
+    (let ((channels nil)                       ; list of (key . posts), newest cell first
+          (order nil)                          ; keys in first-seen order
+          (id-loc (make-hash-table :test 'equal))) ; id -> (channel-key . depth)
+      (dolist (p posts)
+        (let* ((key (free-agent-bus--channel-key (plist-get p :from) (plist-get p :to)))
+               (cell (assoc key channels)))
+          (unless cell
+            (setq cell (cons key nil))
+            (push cell channels)
+            (push key order))
+          (push p (cdr cell))
+          (puthash (plist-get p :id) (cons key 1) id-loc)))
+      (let* ((out errors)                      ; parse-error rows lead, top level
+             (order-r (nreverse order))
+             (newest-key (and posts
+                              (free-agent-bus--channel-key
+                               (plist-get (car (last posts)) :from)
+                               (plist-get (car (last posts)) :to))))
+             (newest-idx (and newest-key
+                              (seq-position order-r newest-key #'equal)))
+             (newest-channel (and newest-idx (1+ newest-idx)))
+             (channel-index 0))
+        (dolist (cell channels)
+          (setf (cdr cell) (nreverse (cdr cell))))
+        (dolist (key order-r)
+          (setq channel-index (1+ channel-index))
+          (let* ((cell (assoc key channels))
+                 (members (if (equal key "all")
+                              '("all")
+                            (split-string key "," t)))
+                 (circles (mapconcat #'free-agent-bus--circle members " "))
+                 (header (format "* %s %s"
+                                 circles
+                                 (if (equal key "all") "commons" key))))
+            (push header out)
+            (dolist (p (cdr cell))
+              (let* ((id (plist-get p :id))
+                     (parent (car (last (plist-get p :thread))))
+                     (parent-loc (and parent (gethash parent id-loc)))
+                     (same-section (and parent-loc (equal (car parent-loc) key)))
+                     (depth (if same-section (1+ (cdr parent-loc)) 1))
+                     (orphan (and parent (not same-section)))
+                     (level (1+ (min depth 3)))
+                     (meta (if free-agent-bus-log-show-timestamps
+                               (propertize (format "  ⟪%s@%s⟫" id (plist-get p :ts))
+                                           'face 'free-agent-bus-meta-face)
+                             ""))
+                     (head (format "%s %s ⟜ %s%s%s"
+                                   (make-string level ?*)
+                                   (plist-get p :from)
+                                   (if orphan "↩ " "")
+                                   (plist-get p :body)
+                                   meta)))
+                (puthash id (cons key depth) id-loc)
+                (push head out)))))
+        (cons (mapconcat #'identity (nreverse out) "\n")
+              newest-channel)))))
+
+(defun free-agent-bus-log--apply-default-folds (newest-channel)
+  "Fold every channel section except NEWEST-CHANNEL (1-based, nil = all).
+Fresh renders are fully unfolded; this applies the deck's default view:
+current channel open, the rest one line each.  TAB re-folds manually."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((n 0))
+      (while (re-search-forward "^\\* " nil t)
+        (setq n (1+ n))
+        (goto-char (match-beginning 0))
+        (unless (and newest-channel (= n newest-channel))
+          (condition-case nil
+              (org-cycle nil)
+            (error nil)))
+        (end-of-line)))))
 
 (defun free-agent-bus-log-refresh (&optional force)
   "Refresh the log buffer from the file, preserving scroll position.
@@ -350,33 +511,33 @@ When FORCE is non-nil, re-render even if the file content appears
 unchanged. Keeps the tail in view for any window that was already at
 the end of the log.  Parse-error count-check: when the unparseable-line
 count increases versus the previous render, the increase is announced
-in the echo area (*Messages*)."
+in the echo area (*Messages*).  After a fresh render, applies the
+default view: every channel section folded except the newest one."
   (when-let ((buf (get-buffer free-agent-bus-log-buffer-name)))
     (with-current-buffer buf
       (let ((previous-errors free-agent-bus-log--parse-errors))
         (setq free-agent-bus-log--parse-errors 0)
         (let* ((inhibit-read-only t)
-             (raw (free-agent-bus-log--read-file))
-             (contents (mapconcat #'identity
-                                  (delq nil (mapcar #'free-agent-bus-log--format-line
-                                                    (free-agent-bus-log--complete-lines raw)))
-                                  "\n")))
+               (rendered (free-agent-bus-log--render (free-agent-bus-log--read-file)))
+               (contents (car rendered))
+               (newest-channel (cdr rendered)))
           (when (> free-agent-bus-log--parse-errors previous-errors)
             (message "free-agent-bus: %d unparseable log line(s), marked ⟝ — raw line(s) in %s"
                      free-agent-bus-log--parse-errors (free-agent-bus--log-file)))
           (when (or force (not (string= contents (buffer-string))))
-          (let ((window-states
-                 (mapcar (lambda (w)
-                           (let ((pt (window-point w)))
-                             (list w pt (= pt (point-max)))))
-                         (get-buffer-window-list buf nil t))))
-            (erase-buffer)
-            (insert contents)
-            (dolist (state window-states)
-              (let* ((w (nth 0 state))
-                     (old-pt (nth 1 state))
-                     (was-at-end (nth 2 state))
-                     (new-pt (if was-at-end (point-max) (min old-pt (point-max)))))
+            (let ((window-states
+                   (mapcar (lambda (w)
+                             (let ((pt (window-point w)))
+                               (list w pt (= pt (point-max)))))
+                           (get-buffer-window-list buf nil t))))
+              (erase-buffer)
+              (insert contents)
+              (free-agent-bus-log--apply-default-folds newest-channel)
+              (dolist (state window-states)
+                (let* ((w (nth 0 state))
+                       (old-pt (nth 1 state))
+                       (was-at-end (nth 2 state))
+                       (new-pt (if was-at-end (point-max) (min old-pt (point-max)))))
                   (set-window-point w new-pt))))))))))
 
 (defun free-agent-bus-log--refresh-soon ()
