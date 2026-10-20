@@ -2,6 +2,14 @@
 
 ## unreleased
 
+- **Quiescence rewrite.** `tailLog`'s quiesce path is now a pure Moore
+  machine (`quiesceAgent` over `QEvent`) with an IO pump: a silent bus
+  stands down (the `busy` gate is gone), chatter no longer starves the
+  counter, every wake re-drains so a missed FSEvent cannot strand an
+  addressed post, a post-registration drain closes the startup gap, and
+  the signal starts empty. Timeout stand-downs post ⌛ (`Timeout`), not 🔵 —
+  an inference from wall-clock silence, not a decided quiet. Pinned by the
+  Q1-Q5 oracles in `free-agent-axioma`.
 - **Seat self-halt (tail-chatter fix).** A seat whose own reply carries a
   🔵 stand-down mark now stops its loop — judged at commit time, since the
   F2 self-post skip means the seat never reads its own mark back. 🟢 stays

@@ -22,7 +22,8 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.File
-  ( Flow (..),
+  ( Decision (..),
+    Flow (..),
     QuiesceConfig (..),
     cursorPath,
     readCursor,
@@ -43,13 +44,16 @@ import System.Posix.Process (getProcessID)
 -- Decided quiet: a delivered post carrying a halt mark (🟢 or 🔵) stops the
 -- loop; an escalation mark (🔴) is relayed to the pitboss (when a quiescence
 -- config names one) and also stops the loop. The quiescence counter is the
--- observed-quiet bridge: after N empty cycles the seat posts 🔵 to the
--- pitboss and exits.
+-- observed-quiet bridge: after N empty cycles the seat posts the verdict
+-- body from 'quiesceAgent' — a ⌛ timeout mark, an inference from wall-clock
+-- silence, not a decided quiet — to the pitboss and exits.
 --
 -- Self-halt: a 🔵 reply is the seat deciding its own quiet — the loop stops
 -- after scribing it. The F2 self-post skip means the seat never reads its
 -- own mark back, so the halt is judged here, at commit time. 🟢 stays
--- exchange-level: a seat may land one exchange and host more.
+-- exchange-level: a seat may land one exchange and host more. The ⌛ timeout
+-- verdict never self-halts — the quiescence pump has already exited — and
+-- as a non-halt mark it stops no other seat.
 runAgentLoop ::
   -- | Agent name used for cursor and logging.
   Text ->
@@ -68,10 +72,9 @@ runAgentLoop agentName names root mQuiesce handlePost = do
   TIO.putStrLn $ "🟢 free-agent seat starting: " <> T.intercalate "," names <> " (pid=" <> T.pack (show pid) <> ")"
   TIO.putStrLn $ "   root: " <> T.pack root
   let path = root </> "log.jsonl"
-      onQuiesce = do
+      onQuiesce d = do
         let qc = fromMaybe (error "quiesce action without config") mQuiesce
-            p = mkPost agentName [qcPitboss qc] (markGlyph StandDown <> " standing down after " <> T.pack (show (qcCycles qc)) <> " empty cycles")
-        _ <- postLocal root p
+        _ <- postLocal root (mkPost agentName [qcPitboss qc] (decisionBody d))
         pure ()
       -- A mark is control, not content: halt and escalation marks are not
       -- handed to the seat handler. Silence follows the mark.
