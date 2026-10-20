@@ -293,6 +293,20 @@ the echo area — a count-check event, never a silent drop
     (decode-coding-region (point-min) (point-max) 'utf-8)
     (buffer-string)))
 
+(defun free-agent-bus-log--complete-lines (raw)
+  "Split RAW log text into newline-terminated lines only.
+A trailing line without its terminating newline is a possibly-torn
+in-progress append: hold it out of this render.  The log is append-only
+and the whole file is re-read on every refresh, so the completed line
+reaches the parser on the next pass — accumulation, one refresh deep,
+with no cross-refresh state to drift (k2, wave 2 target 1: chunk-split).
+Only complete lines can be parsed, which keeps the parse-error
+count-check honest: a torn tail is never counted as corruption."
+  (let ((lines (split-string raw "\n")))
+    (if (string-suffix-p "\n" raw)
+        lines
+      (seq-take lines (max 0 (1- (length lines)))))))
+
 (defun free-agent-bus-log--format-line (line)
   "Format a raw log LINE for display.
 Accepts stamped JSONL (`id', `ts', `from', `to', `thread', `body').
@@ -345,7 +359,7 @@ in the echo area (*Messages*)."
              (raw (free-agent-bus-log--read-file))
              (contents (mapconcat #'identity
                                   (delq nil (mapcar #'free-agent-bus-log--format-line
-                                                    (split-string raw "\n")))
+                                                    (free-agent-bus-log--complete-lines raw)))
                                   "\n")))
           (when (> free-agent-bus-log--parse-errors previous-errors)
             (message "free-agent-bus: %d unparseable log line(s), marked ⟝ — raw line(s) in %s"
