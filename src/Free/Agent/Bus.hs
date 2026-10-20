@@ -4,9 +4,18 @@
 -- | STM callback bus over a global JSONL log.
 --
 -- The live log image is held in a 'TVar'; subscribers block via STM 'retry'
--- until posts matching their names appear. A background thread persists new
--- posts to a single @log.jsonl@ file under a file lock, so the lock never
--- appears in the agent path.
+-- until posts matching their names appear /in the persisted prefix/ — a
+-- seat can never react to a post that is not on disk. A background thread
+-- (the persister, itself a seat) watches the watermark 'busDurable': ids
+-- below it are on disk. It appends the not-yet-durable delta to
+-- @log.jsonl@ under the file lock, so the lock never appears in the agent
+-- path, and pulls external growth (another process posting to the same
+-- root) into the image so ids stay file-positional.
+--
+-- Waiting is a predicate over monotone facts, never a handoff: durability
+-- is observed via 'awaitDurable' (durable or 'Failed', composable with
+-- 'orElse'), and persister death is content — any exit of the persist
+-- thread writes 'Failed' to 'busPersist'.
 --
 -- This is the in-process / single-runtime form of the bus. An out-of-process
 -- form can replace the 'TVar' with file-change events without changing the
@@ -18,6 +27,7 @@ module Free.Agent.Bus
   ( -- * Bus handle
     Bus,
     busLogPath,
+    busImage,
     openBus,
     closeBus,
     withBus,
@@ -30,6 +40,11 @@ module Free.Agent.Bus
     -- * Durable append
     appendStoredPosts,
     appendStoredPostsUnlocked,
+
+    -- * Durability
+    Persist (..),
+    awaitDurable,
+    awaitQuiescent,
 
     -- * Subscription
     readSince,
@@ -56,27 +71,19 @@ import Circuit.Agent.Framing
   )
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Circuit.Agent.Tensor (closeShardIO)
-import Control.Concurrent (ThreadId, forkIO, killThread)
+import Control.Concurrent (ThreadId, forkFinally, killThread)
 import Control.Concurrent.STM
   ( STM,
-    TMVar,
-    TQueue,
     TVar,
     atomically,
-    isEmptyTQueue,
-    newEmptyTMVar,
-    newTQueueIO,
+    check,
     newTVarIO,
-    putTMVar,
-    readTQueue,
     readTVar,
     retry,
-    takeTMVar,
-    writeTQueue,
     writeTVar,
   )
-import Control.Exception (SomeException, bracket, displayException, try)
-import Control.Monad (forever, unless)
+import Control.Exception (SomeException, bracket, displayException, toException, try)
+import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
 import Data.List (maximum)
@@ -93,25 +100,36 @@ import Text.Printf (printf)
 
 -- | Live bus handle, polymorphic in the post body type.
 data Bus a = Bus
-  { -- | In-memory log image, oldest first.
+  { -- | In-memory log image, oldest first. Includes the not-yet-durable
+    -- tail — subscribers never see it, the persister works from it.
     busLog :: TVar (Log a),
-    -- | Posts waiting to be persisted, each paired with an acknowledgement
-    -- 'TMVar' that is filled once the post is on disk.
-    busPending :: TQueue (Stamped a, TMVar ()),
+    -- | Durable watermark: posts with id below it are on disk.
+    busDurable :: TVar PostId,
+    -- | Persister health: 'Persisting', or 'Failed' with the exit reason.
+    busPersist :: TVar Persist,
     -- | Path to @log.jsonl@.
     busPath :: FilePath,
     -- | Background persistence thread.
     busThread :: ThreadId
   }
 
+-- | Persister health. Death is content: any exit of the persist thread
+-- writes 'Failed'.
+data Persist = Persisting | Failed SomeException
+
 -- | Path to the underlying @log.jsonl@.
 busLogPath :: Bus a -> FilePath
 busLogPath = busPath
 
+-- | The in-memory image, oldest first — including posts not yet durable.
+busImage :: Bus a -> STM (Log a)
+busImage = readTVar . busLog
+
 -- | Open or create a bus at the given root directory.
 --
 -- Loads any existing @log.jsonl@ into memory and starts the persistence
--- thread. The lock file lives at @root/log.jsonl.lock@.
+-- thread. The watermark starts past the loaded image: everything seen at
+-- open is already on disk. The lock file lives at @root/log.jsonl.lock@.
 openBus :: (PostBody a) => FilePath -> IO (Bus a)
 openBus root = do
   createDirectoryIfMissing True root
@@ -123,14 +141,18 @@ openBus root = do
     withFile path AppendMode (\_ -> pure ())
   initial <- if exists then readLogFile path else pure (Log [])
   tv <- newTVarIO initial
-  q <- newTQueueIO
-  tid <- forkIO (persistLoop path q)
-  pure (Bus tv q path tid)
+  dur <- newTVarIO (fromIntegral (length (unLog initial)))
+  st <- newTVarIO Persisting
+  tid <- forkFinally (persistLoop path tv dur) $ \r ->
+    atomically $ writeTVar st $ case r of
+      Left e -> Failed e
+      Right () -> Failed (toException (userError "Free.Agent.Bus: persist loop exited"))
+  pure (Bus tv dur st path tid)
 
 -- | Stop the persistence thread.
 --
 -- Does not flush pending posts; call this only when durability is not
--- required or after ensuring the log is quiescent.
+-- required or after ensuring the log is quiescent ('awaitQuiescent').
 closeBus :: Bus a -> IO ()
 closeBus = killThread . busThread
 
@@ -143,26 +165,51 @@ withBus root = bracket (openBus root) closeBus
 -- | Append a bare post to the live log inside one STM transaction.
 --
 -- The returned 'Stamped a' carries the absolute line id assigned by the
--- scribe. The caller must supply the timestamp. The returned 'TMVar' is
--- filled once the post has been persisted to disk.
-scribe :: Bus a -> UTCTime -> Post a -> STM (Stamped a, TMVar ())
+-- scribe. The caller must supply the timestamp. There is no ack: the post
+-- is durable when the watermark passes it — observe that with
+-- 'awaitDurable', a predicate, not a handoff.
+scribe :: Bus a -> UTCTime -> Post a -> STM (Stamped a)
 scribe bus ts p = do
   log0 <- readTVar (busLog bus)
   let pid = fromIntegral (length (unLog log0))
       stored = Stamped (ts, pid) p
-  ack <- newEmptyTMVar
   writeTVar (busLog bus) (snoc log0 stored)
-  writeTQueue (busPending bus) (stored, ack)
-  pure (stored, ack)
+  pure stored
 
--- | Synchronous scribe: assign the current timestamp, append, and wait for
--- the post to be persisted.
+-- | Synchronous scribe: assign the current timestamp and append to the
+-- live image. Returns immediately — persistence runs in the background;
+-- callers that need the post on disk await 'awaitDurable'.
 scribeIO :: Bus a -> Post a -> IO (Stamped a)
 scribeIO bus p = do
   ts <- getCurrentTime
-  (stored, ack) <- atomically (scribe bus ts p)
-  atomically (takeTMVar ack)
-  pure stored
+  atomically (scribe bus ts p)
+
+-- | Wait until the post id is durable, or the persister has failed.
+--
+-- Ends by content — durable or 'Failed', whichever the monotone facts
+-- reach first — so it composes with 'orElse' and can never hang: a dead
+-- persister answers 'Left'.
+awaitDurable :: Bus a -> PostId -> STM (Either SomeException ())
+awaitDurable bus pid = do
+  st <- readTVar (busPersist bus)
+  case st of
+    Failed e -> pure (Left e)
+    Persisting -> do
+      d <- readTVar (busDurable bus)
+      if d > pid then pure (Right ()) else retry
+
+-- | Wait until every post in the image is durable, or the persister has
+-- failed. The quiescence check behind a clean shutdown.
+awaitQuiescent :: Bus a -> STM (Either SomeException ())
+awaitQuiescent bus = do
+  img <- readTVar (busLog bus)
+  d <- readTVar (busDurable bus)
+  st <- readTVar (busPersist bus)
+  case st of
+    Failed e -> pure (Left e)
+    Persisting
+      | d >= fromIntegral (length (unLog img)) -> pure (Right ())
+      | otherwise -> retry
 
 -- | File-truth scribe: assign the id from the file itself, under the lock.
 --
@@ -204,17 +251,28 @@ appendStoredPostsUnlocked path posts =
   withFile path AppendMode $ \h ->
     traverse_ (TIO.hPutStrLn h . frameStored) posts
 
--- | Read all posts matching any of the names with id at or after the cursor.
+-- | Read all posts matching any of the names with id at or after the
+-- cursor, /in the persisted prefix/.
 --
 -- The cursor is the next unprocessed id, matching the file-cursor
 -- convention. Does not retry; returns an empty list if nothing matches.
+-- Durable visibility: a subscriber can never observe a post that is not
+-- on disk — the in-process bus is the same log as the file bus.
 readSince :: Bus a -> [Name] -> PostId -> STM [Stamped a]
 readSince bus names since = do
   log0 <- readTVar (busLog bus)
+  d <- readTVar (busDurable bus)
   let posts = unLog log0
-  pure [s | s <- posts, snd (stamp s) >= since, deliversTo (stamped s) names]
+  pure
+    [ s
+    | s <- posts,
+      let i = snd (stamp s),
+      i >= since && i < d,
+      deliversTo (stamped s) names
+    ]
 
--- | Wait until at least one matching post exists after the cursor.
+-- | Wait until at least one matching post exists in the persisted prefix
+-- after the cursor.
 awaitSince :: Bus a -> [Name] -> PostId -> STM [Stamped a]
 awaitSince bus names since = do
   found <- readSince bus names since
@@ -281,30 +339,67 @@ runSeatBus bus agentName names seat = loop 0
 -- Internal helpers
 -- ---------------------------------------------------------------------------
 
--- | Background persistence loop.
+-- | Background persistence: the persister is a seat and the watermark is
+-- its cursor.
 --
--- Batches all posts currently in the queue, appends them under a file lock,
--- writes per-agent ping files, then repeats. Empty queue blocks via
--- 'readTQueue'.
-persistLoop :: (PostBody a) => FilePath -> TQueue (Stamped a, TMVar ()) -> IO ()
-persistLoop path q = forever $ do
-  pairs <- atomically $ do
-    first <- readTQueue q
-    rest <- drainQueue
-    pure (first : rest)
-  let posts = map fst pairs
-  appendStoredPosts path posts
-  writePings path posts
-  atomically $ traverse_ (\(_, ack) -> putTMVar ack ()) pairs
+-- Blocks in STM on @length log > durable@, then appends the not-yet-durable
+-- delta under the file lock and advances the watermark. Batches for free:
+-- every post scribed while it works lands in the next delta.
+--
+-- External growth — the file longer than the watermark from another
+-- process on the same root — is reconciled, not collided with: the
+-- external posts are pulled into the image, and the not-yet-durable tail
+-- is renumbered past them (safe: readers only see the durable prefix, so
+-- the tail's ids are invisible until reassigned). Ids stay file-positional
+-- on every interleaving of 'scribeIO' and 'postLocal'. A file that shrank
+-- below the watermark is corruption: fail loudly with a named error.
+--
+-- Never returns; any exit (via 'forkFinally' in 'openBus') writes
+-- 'Failed' — death is content.
+persistLoop :: (PostBody a) => FilePath -> TVar (Log a) -> TVar PostId -> IO ()
+persistLoop path logVar durVar = loop
   where
-    drainQueue = do
-      empty <- isEmptyTQueue q
-      if empty
-        then pure []
-        else do
-          x <- readTQueue q
-          xs <- drainQueue
-          pure (x : xs)
+    lockPath = path <.> "lock"
+    loop = do
+      (d, image) <- atomically $ do
+        d <- readTVar durVar
+        image <- readTVar logVar
+        check (fromIntegral (length (unLog image)) > d)
+        pure (d, image)
+      withFileLock lockPath Exclusive $ \_lock -> do
+        m <- countLines path
+        case compare m d of
+          LT -> do
+            ioError
+              ( userError
+                  "Free.Agent.Bus: log.jsonl shrank below the durable watermark — external truncation?"
+              )
+          EQ -> do
+            let delta = drop (fromIntegral d) (unLog image)
+            appendStoredPostsUnlocked path delta
+            writePings path delta
+            atomically (writeTVar durVar (d + fromIntegral (length delta)))
+          GT -> do
+            full <- readLogFile path
+            let ext = drop (fromIntegral d) (unLog full)
+            renumbered <- atomically $ do
+              img <- unLog <$> readTVar logVar
+              let (kept, tailOld) = splitAt (fromIntegral d) img
+                  renum =
+                    [ Stamped (ts, m + fromIntegral i) p
+                    | (i, Stamped (ts, _) p) <- zip [0 :: Int ..] tailOld
+                    ]
+              writeTVar logVar (Log (kept ++ ext ++ renum))
+              writeTVar durVar m
+              pure renum
+            appendStoredPostsUnlocked path renumbered
+            writePings path renumbered
+            atomically (writeTVar durVar (m + fromIntegral (length renumbered)))
+      loop
+
+-- | Number of complete lines in the log file.
+countLines :: FilePath -> IO PostId
+countLines path = fromIntegral . BS.count 0x0A <$> BS.readFile path
 
 -- | Write a @.ping-NAME@ file for each named recipient of each post.
 --

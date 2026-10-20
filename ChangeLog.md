@@ -2,6 +2,15 @@
 
 ## unreleased
 
+- **Watermark persister.** The scribe ack (a timeout-less `takeTMVar`
+  handoff) is off the agent path: the persister is a seat over a
+  `busDurable` watermark, `awaitDurable`/`awaitQuiescent` end by content
+  (durable or `Failed`), and any persister exit writes `Failed` — death is
+  content. `readSince`/`awaitSince` see only the persisted prefix, so a
+  seat can never react to a post that isn't on disk; external growth on a
+  shared root is reconciled (pulled into the image, invisible tail
+  renumbered) so ids stay file-positional. Pinned by the B1-B3 oracles in
+  `free-agent-axioma`.
 - **Quiescence rewrite.** `tailLog`'s quiesce path is now a pure Moore
   machine (`quiesceAgent` over `QEvent`) with an IO pump: a silent bus
   stands down (the `busy` gate is gone), chatter no longer starves the

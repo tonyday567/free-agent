@@ -9,7 +9,7 @@ module Main (main) where
 import Circuit (Poles (Poles, commit, emit))
 import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), Shard, awaitA, branchesByIndex, cellToAgent, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
-import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
+import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unLog, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, markGlyph, markOf)
 import Circuit.Agent.StdPorts (ProcEnds (..))
 import Circuit.Agent.Tensor
@@ -30,8 +30,9 @@ import Circuit.Tensor (Const (..), unConst)
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (async, cancel)
-import Control.Concurrent.STM (atomically, newTQueueIO, readTQueue, writeTQueue)
+import Control.Concurrent.STM (atomically, newTQueueIO, orElse, readTQueue, writeTQueue)
 import Control.Monad (when)
+import Data.Either (isLeft, isRight)
 import Data.Foldable (traverse_)
 import Data.IORef (newIORef, writeIORef)
 import Data.List (inits, sort, sortOn)
@@ -40,7 +41,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
-import Free.Agent.Bus (closeBus, openBus, postLocal, runSeatBus)
+import Free.Agent.Bus (Bus, awaitDurable, awaitQuiescent, awaitSince, busImage, closeBus, openBus, postLocal, readSince, runSeatBus, scribeIO)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (Decision (..), Flow (..), QEvent (..), quiesceAgent, tailLog)
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
@@ -90,6 +91,7 @@ import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath (takeDirectory, (</>))
 import System.IO (Handle, IOMode (AppendMode), hFlush, withFile)
 import System.Process (readProcessWithExitCode)
+import System.Timeout (timeout)
 import Prelude hiding (id, (.))
 
 assert :: String -> Bool -> IO ()
@@ -109,6 +111,16 @@ iterateAgent (Body _ k o) s0 = scan (MooreT (Body (\i -> k (s0, i)) k o))
 -- function as an input-indexed state update.
 runMono :: Moore (,) s (->) i o -> s -> (o, i -> s)
 runMono (Body _ k o) s = (unConst (o s), \i -> k (s, i))
+
+-- | Close a bus through the watermark idiom: wait (by predicate, never
+-- handoff) until the image is on disk, assert the persister lived, stop
+-- the thread. Under the ack-less scribe this replaces the old
+-- "scribeIO blocked, so the file is complete by now" assumption.
+closeBusDurable :: Bus Text -> IO ()
+closeBusDurable bus = do
+  r <- atomically (awaitQuiescent bus)
+  closeBus bus
+  assert "persister alive at close" $ isRight r
 
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a ds []
@@ -1200,7 +1212,7 @@ main = do
     _ <- postLocal root (mkPost "human" ["echo"] "🟢 landed")
     bus <- openBus root
     runSeatBus bus "echo" ["echo"] (hostSeat (mkHost "echo" (pure . map ("echo:" <>))))
-    closeBus bus
+    closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
@@ -1233,7 +1245,7 @@ main = do
             then error "boom"
             else pure (map ("fragile:" <>) ws)
     runSeatBus bus "fragile" ["fragile"] (hostSeat fragileHost)
-    closeBus bus
+    closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromFragile = [stamped s | s <- parsed, from (stamped s) == "fragile"]
@@ -1280,7 +1292,7 @@ main = do
                   then [markGlyph StandDown <> " standing down"]
                   else map ("echo:" <>) ws
     runSeatBus bus "echo" ["echo"] (hostSeat host)
-    closeBus bus
+    closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
@@ -1319,7 +1331,7 @@ main = do
     _ <- forkIO $ runSeatBus bus "beta" [card] betaSeat >> putMVar doneBeta ()
     takeMVar doneAlpha
     takeMVar doneBeta
-    closeBus bus
+    closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromAlpha = [stamped s | s <- parsed, from (stamped s) == "alpha"]
@@ -1448,6 +1460,137 @@ main = do
       Nothing -> assert "Q5 a verdict was reached" False
 
   -------------------------------------------------------------------------
+  -- Watermark persister (B1-B3)
+  --
+  -- The ack is off the agent path: durability is a predicate over the
+  -- watermark and persister health, never a takeTMVar handoff. Death is
+  -- content — any persister exit writes Failed, and every wait answers
+  -- Left instead of hanging.
+  -------------------------------------------------------------------------
+  putStrLn "watermark persister"
+
+  -- B1: an injected append failure turns every wait Left; nothing hangs.
+  -- (Counterexample under the old code: the takeTMVar ack blocked
+  -- forever — these assertions could not even run.)
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-b1-failed"
+        path = root </> "log.jsonl"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    bus <- openBus root
+    _ <- scribeIO bus (mkPost "human" ["seat"] "healthy")
+    r0 <- atomically (awaitDurable bus 0)
+    assert "B1 happy path: post 0 durable before injection" $ isRight r0
+    -- orElse composition, escape half: a still-pending wait retries, so a
+    -- competing branch wins. (Catches a durable-check deleted: the first
+    -- branch would answer Left spuriously.)
+    rEsc <- atomically (awaitDurable bus 99 `orElse` pure (Right ()))
+    assert "B1 orElse: a pending wait retries, a competing branch wins" $ isRight rEsc
+    -- Inject an append failure: the log path becomes a directory.
+    removeFile path
+    createDirectoryIfMissing True path
+    _ <- scribeIO bus (mkPost "human" ["seat"] "doomed")
+    r1 <- atomically (awaitDurable bus 1)
+    rOld <- atomically (awaitDurable bus 0)
+    rq <- atomically (awaitQuiescent bus)
+    assert "B1 lost ack: the doomed post's wait answers Left" $ isLeft r1
+    assert "B1 lost ack: failure dominates even a durable id" $ isLeft rOld
+    assert "B1 lost ack: quiescence answers Left, never hangs" $ isLeft rq
+    -- orElse composition, answer half: failure answers Left instead of
+    -- retrying and falling through to the competing branch. (Catches a
+    -- Failed-case turned into retry: the second branch would yield Right.)
+    rAlt <- atomically (awaitDurable bus 1 `orElse` pure (Right ()))
+    assert "B1 orElse: failure answers Left instead of falling through" $ isLeft rAlt
+    closeBus bus
+    removePathForcibly root
+
+  -- B2: undurable delivery — no reader can react to a post the persister
+  -- never wrote. Deterministic half: readSince excludes the ghost.
+  -- Death-detection half: awaitSince cannot produce it within a bound.
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-b2-undurable"
+        path = root </> "log.jsonl"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    bus <- openBus root
+    _ <- scribeIO bus (mkPost "human" ["seat"] "durable")
+    _ <- atomically (awaitDurable bus 0)
+    removeFile path
+    createDirectoryIfMissing True path
+    _ <- scribeIO bus (mkPost "human" ["seat"] "ghost")
+    seen <- atomically (readSince bus ["seat"] 0)
+    assert "B2 undurable: readSince never surfaces the ghost" $
+      map (body . stamped) seen == ["durable"]
+    timedOut <- timeout 200_000 (atomically (awaitSince bus ["seat"] 1))
+    assert "B2 undurable: awaitSince cannot deliver the ghost" $
+      timedOut == Nothing
+    closeBus bus
+    removePathForcibly root
+    -- Positive half: after a successful persist, delivery flows.
+    let root2 = tmp </> "free-agent-b2-recovered"
+    removePathForcibly root2
+    createDirectoryIfMissing True root2
+    bus2 <- openBus root2
+    _ <- scribeIO bus2 (mkPost "human" ["seat"] "landed")
+    _ <- atomically (awaitDurable bus2 0)
+    got <- atomically (awaitSince bus2 ["seat"] 0)
+    assert "B2 after a successful persist, the post delivers" $
+      map (body . stamped) got == ["landed"]
+    closeBusDurable bus2
+    removePathForcibly root2
+
+  -- B3: id agreement — scribe ids (image length) and postLocal ids (file
+  -- line count) share one root without colliding. The persister
+  -- reconciles external growth: pulls the external posts into the image
+  -- and renumbers its invisible not-yet-durable tail past them, so ids
+  -- stay file-positional on every interleaving.
+  do
+    let positional ids =
+          let n = length ids
+           in ids == map fromIntegral ([0 .. n - 1] :: [Int])
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-b3-ids"
+        path = root </> "log.jsonl"
+        agree bus = do
+          rq <- atomically (awaitQuiescent bus)
+          assert "B3 persister alive" $ isRight rq
+          img <- atomically (busImage bus)
+          content <- TIO.readFile path
+          let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+              imgIds = map (snd . stamp) (unLog img)
+              fileIds = map (snd . stamp) parsed
+          assert "B3 image ids are file-positional and duplicate-free" $
+            positional imgIds
+          assert "B3 file ids equal image ids" $
+            fileIds == imgIds
+          assert "B3 image content equals file content" $
+            map stamped (unLog img) == map stamped parsed
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    _ <- postLocal root (mkPost "human" ["seat"] "seed")
+    bus <- openBus root
+    -- Deterministic reconcile: external growth lands while the
+    -- watermark is behind, then a scribe makes the persister look.
+    _ <- postLocal root (mkPost "cli" ["seat"] "external-1")
+    _ <- postLocal root (mkPost "cli" ["seat"] "external-2")
+    _ <- scribeIO bus (mkPost "seat" ["human"] "reply")
+    agree bus
+    -- Racing interleave burst: every postLocal id depends on whether the
+    -- persister flushed first; the contract holds on either order.
+    traverse_
+      ( \i -> do
+          _ <- scribeIO bus (mkPost "seat" ["human"] ("s" <> T.pack (show i)))
+          _ <- postLocal root (mkPost "cli" ["seat"] ("p" <> T.pack (show i)))
+          pure ()
+      )
+      [0 .. 9 :: Int]
+    agree bus
+    closeBus bus
+    removePathForcibly root
+
+  -------------------------------------------------------------------------
   -- bus post anti-pollution (B4)
   --
   -- FREE_AGENT_BUS_ROOT env var + refuse when no log.jsonl exists.
@@ -1544,7 +1687,7 @@ main = do
     let host = mkHost "echo" $ \ws ->
           pure [T.unwords ws]
     runSeatBus bus "echo" ["echo"] (hostSeat host)
-    closeBus bus
+    closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
@@ -1582,7 +1725,7 @@ main = do
             then pure [""]
             else pure []
     runSeatBus bus "silent" ["silent"] (hostSeat host)
-    closeBus bus
+    closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromSilent = [stamped s | s <- parsed, from (stamped s) == "silent"]
@@ -1624,7 +1767,7 @@ main = do
     let host = mkHost "hermes" $ \ws ->
           pure [cleanCliOut (if "ping" `elem` ws then "(empty)" else T.unwords ws)]
     runSeatBus bus "hermes" ["hermes"] (hostSeat host)
-    closeBus bus
+    closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         fromHermes = [stamped s | s <- parsed, from (stamped s) == "hermes"]
