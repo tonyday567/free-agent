@@ -29,43 +29,23 @@
 module Free.Agent.Connector
   ( ConnectorConfig (..),
     defaultConnectorConfig,
-    runConnector,
 
     -- * Turn handler (exported for oracles)
-    TurnResult (..),
     runTurn,
   )
 where
 
 import Circuit.Agent (Name, Post (..), PostId, mkPost)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
-import Circuit.Agent.StdPorts
-  ( Frame (..),
-    ProcConfig (..),
-    ProcEnds (..),
-    defaultProcConfig,
-    ghciMarks,
-    openProc,
-  )
+import Circuit.Agent.StdPorts (Frame (..), ProcConfig (..), ProcEnds (..), defaultProcConfig, ghciMarks)
 import Circuit.Category (K (..))
 import Circuit.Machine (Poles (..))
-import Circuit.Syntax (eval, run)
-import Control.Monad (unless, void)
+import Control.Monad (unless)
 import Data.Foldable (traverse_)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Free.Agent.Bus (postLocal)
-import Free.Agent.Bus.File
-  ( Flow (..),
-    readCursor,
-    tailLog,
-    writeCursor,
-  )
-import System.Exit (ExitCode (..), exitWith)
-import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
+import Free.Agent.Bus.File (Flow (..), writeCursor)
 import System.Timeout (timeout)
 import Prelude hiding (read)
 
@@ -99,33 +79,6 @@ defaultConnectorConfig name =
       connExtraFrameTimeout = 10_000
     }
 
-runConnector :: ConnectorConfig -> IO ()
-runConnector cfg = do
-  let name = connName cfg
-      root = connBusRoot cfg
-  repl <- runK (eval (openProc encodeUtf8 decodeUtf8 (connRepl cfg))) ()
-  void $ postLocal root (mkPost name [] ("starting repl: " <> T.pack (procCommand (connRepl cfg)) <> " " <> T.unwords (map T.pack (procArgs (connRepl cfg)))))
-
-  -- Drain the initial frame (up to the first prompt).  A dead repl is a
-  -- terminal frame, not a quiet stream: report and stop before tailing.
-  mFirst <- timeout (connStartupTimeout cfg) (emitText (procStdio repl))
-  case mFirst of
-    Nothing -> hPutStrLn stderr "connector: startup deadline expired before first prompt"
-    Just (Exited code) -> do
-      hPutStrLn stderr ("connector: repl exited during startup (" ++ show code ++ ")")
-      exitWith (ExitFailure 1)
-    Just (Payload _) -> pure ()
-
-  err0 <- drainStderr (procStderr repl)
-  unless (T.null err0) $
-    hPutStrLn stderr ("connector stderr: " <> T.unpack (T.take 200 err0))
-
-  -- Main loop: tail the log for posts addressed to us.
-  void $ postLocal root (mkPost name [] ("repl ready" :: Text))
-  cursor <- readCursor root name
-  tailLog (root </> "log.jsonl") [name] cursor Nothing (handlePost cfg repl root)
-  procClose repl
-
 -- | One delivered post: quit is control, anything else is an ask.
 handlePost ::
   ConnectorConfig ->
@@ -155,16 +108,6 @@ handlePost cfg repl root stored = do
           pure $ if any (T.isPrefixOf "<exited>" . body) replies then Halt else Continue
   where
     advance = writeCursor root (connName cfg) (snd (stamp stored) + 1)
-
--- | The result of one critical-section turn, before scribing.
-data TurnResult
-  = -- | Exactly one response frame.
-    TurnOk Text
-  | -- | No frame arrived before the deadline.
-    TurnZeroFrame
-  | -- | More than one frame arrived for the same ask.
-    TurnMultiFrame [Text]
-  deriving (Eq, Show)
 
 -- | Run one critical-section turn for an addressed post.
 --

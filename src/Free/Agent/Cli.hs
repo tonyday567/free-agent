@@ -4,7 +4,7 @@
 --
 -- A 'Cli' recipe describes how to invoke an external CLI agent (hermes, kimi,
 -- grok, or any shell command). 'cliQuery' runs the recipe with session
--- resume / stale fallback; 'cliShard' seats it as a 'Circuit.Agent.Shard'.
+-- resume / stale fallback.
 module Free.Agent.Cli
   ( -- * Invocation recipe
     Cli (..),
@@ -17,10 +17,8 @@ module Free.Agent.Cli
 
     -- * Query
     cliQuery,
-    cliQueryBS,
 
     -- * Shard adapters
-    cliShard,
 
     -- * Transcript
     TranscriptRecord (..),
@@ -38,7 +36,6 @@ module Free.Agent.Cli
   )
 where
 
-import Circuit.Agent (Post, Shard)
 import Circuit.Agent.Query
   ( echoShard,
     queryShard,
@@ -51,9 +48,7 @@ import Circuit.Agent.Query
   )
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, catch, try)
-import Control.Monad (void, when)
-import Data.ByteString qualified as BS
-import Data.ByteString.Lazy qualified as BL
+import Control.Monad (when)
 import Data.Char (chr, ord)
 import Data.Foldable (for_)
 import Data.IORef (IORef, readIORef)
@@ -62,19 +57,10 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
-import GHC.IO.Handle (hGetContents)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (-<.>))
-import System.IO (hClose)
-import System.Process
-  ( CreateProcess (std_err, std_out),
-    StdStream (CreatePipe),
-    createProcess,
-    proc,
-    readCreateProcessWithExitCode,
-    waitForProcess,
-  )
+import System.Process (proc, readCreateProcessWithExitCode)
 
 -- | Invocation recipe for a CLI agent.
 --
@@ -428,28 +414,6 @@ cliQuery cli prompt = do
           )
           (\(_ :: SomeException) -> pure ())
 
--- | Like 'cliQuery' but returns raw stdout as 'BS.ByteString' before
--- any decoding or filtering.  Uses 'CreatePipe' to read bytes directly
--- from the process rather than going through the locale-aware 'String'
--- path of 'readCreateProcessWithExitCode'.
-cliQueryBS :: Cli -> Text -> IO BS.ByteString
-cliQueryBS cli prompt = do
-  let cp =
-        (proc (cliCommand cli) (cliArgv cli prompt Nothing))
-          { std_out = CreatePipe,
-            std_err = CreatePipe
-          }
-  (_, Just outH, Just errH, ph) <- createProcess cp
-  -- Read the error handle fully so the process doesn't block.
-  _ <- BS.hGetContents errH
-  raw <- BS.hGetContents outH
-  code <- waitForProcess ph
-  hClose errH
-  hClose outH
-  if code /= ExitSuccess
-    then fail ("cliQueryBS: " <> cliCommand cli <> " exited " <> show code)
-    else pure raw
-
 readStoredSession :: FilePath -> IO (Maybe Text)
 readStoredSession path = do
   exists <- doesFileExist path
@@ -563,9 +527,3 @@ escapeText = T.concatMap escChar
     hexDigit d
       | d < 10 = chr (ord '0' + d)
       | otherwise = chr (ord 'a' + d - 10)
-
--- | A live CLI agent as a list 'Shard'.  Session file and process stay
--- inside @IO@ — apply-only at this boundary.  @who@ is the agent nick
--- (from on emitted posts).
-cliShard :: Text -> Cli -> IO (Shard IO [Post Text] [Post Text])
-cliShard who cli = queryShard who (cliQuery cli)

@@ -14,7 +14,6 @@ module Free.Agent.Host
     hostShard,
     processHost,
     cliHost,
-    hermesHost,
     hermesHostBatch,
     hermesCli,
     kimiHost,
@@ -27,23 +26,18 @@ where
 import Circuit.Agent (Post (..), mkPost)
 import Circuit.Agent.Tensor (AgentShard, ioShard)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
-import Control.Monad (forM_)
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL
-import Data.IORef (IORef, readIORef)
+import Data.IORef (IORef)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Text.IO qualified as TIO
-import Data.Time (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Vector qualified as V
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), TranscriptRecord (..), cleanCliOut, cliQuery, dshCli, encodeTranscriptLine, kimiCli, parseSessionId)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, dshCli, kimiCli, parseSessionId)
 import Free.Agent.Json (objLookup)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
-import System.Directory (createDirectoryIfMissing)
-import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.Process (proc, readCreateProcessWithExitCode, readProcess)
 
@@ -196,48 +190,6 @@ dshHost ::
   Host
 dshHost name mCard basePatch mModelPatch sessionFile mTranscript =
   cliHost name (dshCli mCard basePatch mModelPatch sessionFile) {cliTranscript = mTranscript}
-
--- | Hermes host on the shared 'Cli' seat.
---
--- Runs @hermes chat -q@ per body, prepending the supplied system prompt to
--- the body in the query.  The optional model and provider override the CLI
--- defaults; @Nothing@ keeps the hermes CLI default.  @yolo@ controls whether
--- @--yolo -Q@ is passed to hermes.
--- Sessions persist across calls via @sessionFile@; a stale session falls
--- back to fresh.
---
--- When @mTranscript@ is 'Just', one JSONL transcript record is appended to
--- the given file per invocation.  The caller writes the post id to the
--- 'IORef' before each call; see 'Free.Agent.Cli.cliQuery' for details.
---
--- The caller is responsible for building the system prompt; this function
--- knows nothing about design documents, protocol cards, or magic wording.
-hermesHost ::
-  -- | Host name (used as the 'from' field of reply posts).
-  Text ->
-  -- | System prompt text prepended to every body.
-  Text ->
-  -- | Model name passed to @hermes -m@, if any.
-  Maybe Text ->
-  -- | Provider passed to @hermes --provider@, if any.
-  Maybe Text ->
-  -- | Pass @--yolo -Q@ to hermes.
-  Bool ->
-  -- | Session file for cross-call context.
-  FilePath ->
-  -- | Optional transcript sink.
-  Maybe (IORef Int, FilePath) ->
-  Host
-hermesHost name systemPrompt model provider yolo sessionFile mTranscript =
-  Host
-    { hostName = name,
-      hostBodyMode = BodyWhole,
-      hostRun = traverse runOne
-    }
-  where
-    runOne body =
-      cliQuery cli (systemPrompt <> "\n\nUser message:\n" <> body)
-    cli = hermesCli model provider yolo sessionFile mTranscript
 
 -- | Shared CLI recipe for hermes backends.
 -- When @cliTranscript@ is 'Just', one JSONL record is appended per invocation.
