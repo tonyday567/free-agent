@@ -11,7 +11,7 @@ import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), Shard, awaitA
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
 import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unLog, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, markGlyph, markOf)
-import Circuit.Agent.StdPorts (ProcEnds (..))
+import Circuit.Agent.StdPorts (Frame (..), ProcEnds (..))
 import Circuit.Agent.Tensor
   ( AgentShard,
     awaitShard,
@@ -2271,11 +2271,11 @@ main = do
           cmdQ <- newTQueueIO
           respQ <- newTQueueIO
           let stdio = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-              stderrE = polesK (\_ -> pure ()) (pure "")
+              stderrE = polesK (\_ -> pure ()) (pure (Payload ""))
               ends = ProcEnds stdio stderrE (pure ())
           pump <- async $ do
             _ <- atomically $ readTQueue cmdQ
-            traverse_ (atomically . writeTQueue respQ) frames
+            traverse_ (atomically . writeTQueue respQ . Payload) frames
           pure (ends, pump)
 
     -- One frame: the response carries the ask id in its thread.

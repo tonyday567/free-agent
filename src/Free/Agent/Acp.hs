@@ -62,6 +62,7 @@ import Circuit.Agent.StdPorts
     lineMarks,
     openStdPorts,
   )
+import Circuit.Agent.StdPorts qualified as Ports
 import Circuit.Category (K (..))
 import Circuit.Machine (Poles (..))
 import Circuit.Parser.Json (Json (..), decodeJson)
@@ -244,12 +245,16 @@ acpSendValue c v = do
   runK (commit (stdIn (acpPorts c))) line
 
 -- | Read the next stdout line, blocking until a complete line frame
--- arrives, logging raw frames.
+-- arrives, logging raw frames.  The child's death is an 'IOException' —
+-- the stream ended before the next payload.
 acpReadLine :: AcpClient -> IO Text
 acpReadLine c = do
-  t <- runK (emit (stdOut (acpPorts c))) ()
-  logFrame c "recv" t
-  pure t
+  f <- runK (emit (stdOut (acpPorts c))) ()
+  case f of
+    Ports.Payload t -> do
+      logFrame c "recv" t
+      pure t
+    Ports.Exited code -> ioError (userError ("acp: process exited " ++ show code))
 
 -- | Read the next decodable JSON message, blocking on the stdout queue
 -- until one arrives or the timeout (microseconds) expires.  Lines that fail
@@ -517,7 +522,8 @@ acpCancel c sid =
 
 -- | Drain pending stderr diagnostics (bounded: returns after ~100ms of
 -- quiet).  Stderr is diagnostics, not dialogue — a bounded drain, not a
--- blocking read, so a silent stderr cannot stall the caller.
+-- blocking read, so a silent stderr cannot stall the caller.  The drain
+-- ends at the terminal 'Exited' frame, like any other quiet spell.
 acpReadStderr :: AcpClient -> IO Text
 acpReadStderr c = go []
   where
@@ -525,4 +531,5 @@ acpReadStderr c = go []
       m <- timeout 100_000 $ runK (emit (stdErr (acpPorts c))) ()
       case m of
         Nothing -> pure (T.unlines (reverse acc))
-        Just l -> go (l : acc)
+        Just (Ports.Payload l) -> go (l : acc)
+        Just (Ports.Exited _) -> pure (T.unlines (reverse acc))

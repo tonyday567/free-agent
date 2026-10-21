@@ -40,7 +40,8 @@ where
 import Circuit.Agent (Name, Post (..), PostId, mkPost)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.StdPorts
-  ( ProcConfig (..),
+  ( Frame (..),
+    ProcConfig (..),
     ProcEnds (..),
     defaultProcConfig,
     ghciMarks,
@@ -62,6 +63,7 @@ import Free.Agent.Bus.File
     tailLog,
     writeCursor,
   )
+import System.Exit (ExitCode (..), exitWith)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
@@ -104,10 +106,15 @@ runConnector cfg = do
   repl <- runK (eval (openProc encodeUtf8 decodeUtf8 (connRepl cfg))) ()
   void $ postLocal root (mkPost name [] ("starting repl: " <> T.pack (procCommand (connRepl cfg)) <> " " <> T.unwords (map T.pack (procArgs (connRepl cfg)))))
 
-  -- Drain the initial frame (up to the first prompt).
+  -- Drain the initial frame (up to the first prompt).  A dead repl is a
+  -- terminal frame, not a quiet stream: report and stop before tailing.
   mFirst <- timeout (connStartupTimeout cfg) (emitText (procStdio repl))
-  whenNothing mFirst $
-    hPutStrLn stderr "connector: startup deadline expired before first prompt"
+  case mFirst of
+    Nothing -> hPutStrLn stderr "connector: startup deadline expired before first prompt"
+    Just (Exited code) -> do
+      hPutStrLn stderr ("connector: repl exited during startup (" ++ show code ++ ")")
+      exitWith (ExitFailure 1)
+    Just (Payload _) -> pure ()
 
   err0 <- drainStderr (procStderr repl)
   unless (T.null err0) $
@@ -118,8 +125,6 @@ runConnector cfg = do
   cursor <- readCursor root name
   tailLog (root </> "log.jsonl") [name] cursor Nothing (handlePost cfg repl root)
   procClose repl
-  where
-    whenNothing m act = maybe act (const (pure ())) m
 
 -- | One delivered post: quit is control, anything else is an ask.
 handlePost ::
@@ -144,7 +149,10 @@ handlePost cfg repl root stored = do
           replies <- runTurn cfg repl stored
           traverse_ (postLocal root) replies
           advance
-          pure Continue
+          -- A dead repl ends the connector: the turn's diagnostic is
+          -- content-decided, so the halt reads from the log, not from a
+          -- hunch.
+          pure $ if any (T.isPrefixOf "<exited>" . body) replies then Halt else Continue
   where
     advance = writeCursor root (connName cfg) (snd (stamp stored) + 1)
 
@@ -181,14 +189,21 @@ runTurn cfg repl stored = do
   mFirst <- timeout (connCommandTimeout cfg) (emitText stdio)
   case mFirst of
     Nothing -> pure [stampedPost name asker askId "<zero-frame>"]
-    Just out -> do
+    Just (Exited code) ->
+      pure [stampedPost name asker askId ("<exited> " <> T.pack (show code))]
+    Just (Payload out) -> do
       mSecond <- timeout (connExtraFrameTimeout cfg) (emitText stdio)
       case mSecond of
         Nothing -> pure [replyPost name asker askId out]
-        Just out2 ->
+        Just (Payload out2) ->
           pure
             [ replyPost name asker askId out,
               stampedPost name asker askId ("<extra-frame> " <> out2)
+            ]
+        Just (Exited code) ->
+          pure
+            [ replyPost name asker askId out,
+              stampedPost name asker askId ("<exited> " <> T.pack (show code))
             ]
 
 replyPost :: Name -> Name -> PostId -> Text -> Post Text
@@ -204,18 +219,20 @@ commitText :: Poles () (K IO) Text b -> Text -> IO ()
 commitText e t = runK (commit e) t
 
 -- | Emit one 'Text' frame from an 'Poles' emit leg.  Blocks until a
--- complete frame arrives.
-emitText :: Poles () (K IO) a Text -> IO Text
+-- complete frame arrives; the child's death arrives as the terminal
+-- 'Exited' frame — blocking ends by content.
+emitText :: Poles () (K IO) a (Frame Text) -> IO (Frame Text)
 emitText e = runK (emit e) ()
 
 -- | Drain pending stderr lines, bounded: returns after ~100ms of quiet.
 -- Stderr is diagnostics, not dialogue — a bounded drain, not a blocking
 -- read, so a silent stderr cannot stall the turn.
-drainStderr :: Poles () (K IO) a Text -> IO Text
+drainStderr :: Poles () (K IO) a (Frame Text) -> IO Text
 drainStderr e = go []
   where
     go acc = do
       m <- timeout 100_000 (emitText e)
       case m of
         Nothing -> pure (T.unlines (reverse acc))
-        Just l -> go (l : acc)
+        Just (Payload l) -> go (l : acc)
+        Just (Exited _) -> pure (T.unlines (reverse acc))

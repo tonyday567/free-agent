@@ -2,6 +2,12 @@
 
 ## unreleased
 
+- **Downstream of death honesty.** The Connector and ACP seats read the
+  new terminal `Frame`s from the process ports: a dead repl is a
+  `<exited N>` diagnostic turn (content-decided halt) instead of a silent
+  hang, startup death stops the connector before it tails, and stderr
+  drains end at the terminal frame. The axioma's mock proc-ends deliver
+  `Payload` frames. Adapted to circuits-agent's S-a commit.
 - **Reply ancestry (M1a).** `runAgentLoop` now cites the delivered post's
   stamped id in every post it produces: handler replies prepend the parent
   id to their thread (`runSeatBus` parity), and both 🔴 relays — the
