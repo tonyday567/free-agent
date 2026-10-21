@@ -2,6 +2,15 @@
 
 ## unreleased
 
+- **The seam oracle (Q7).** One deterministic index-citing seat runs
+  through the pure calculus `loop` (circuits-agent) and the operational
+  `runAgentLoop`; the final logs are the same `[Post Text]` once stamps
+  are stripped — ancestry edges, mark control, and log order all agree.
+  The pure `Log` is newest-first (seed it newest-first; `watch` is the
+  oldest-first reading), and the cursor is pinned to 0 up front — the
+  cold-boot default would skip the script. Pinned by the Q7 oracles in
+  `free-agent-axioma` (mutation-verified against the pre-M1 no-ancestry
+  runner).
 - **Downstream of death honesty.** The Connector and ACP seats read the
   new terminal `Frame`s from the process ports: a dead repl is a
   `<exited N>` diagnostic turn (content-decided halt) instead of a silent

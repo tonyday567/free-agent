@@ -7,10 +7,10 @@
 module Main (main) where
 
 import Circuit (Poles (Poles, commit, emit))
-import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), Shard, awaitA, branchesByIndex, cellToAgent, coneByIndex, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag)
+import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), PostId, Shard, awaitA, branchesByIndex, cellToAgent, coneByIndex, loop, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag, watch)
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
 import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unLog, unframeStored, pattern Stamped)
-import Circuit.Agent.Mark (Mark (..), isEscalate, markGlyph, markOf)
+import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Circuit.Agent.StdPorts (Frame (..), ProcEnds (..))
 import Circuit.Agent.Tensor
   ( AgentShard,
@@ -44,7 +44,7 @@ import Data.Time (UTCTime, getCurrentTime)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (Bus, awaitDurable, awaitQuiescent, awaitSince, busImage, closeBus, openBus, postLocal, readSince, runSeatBus, scribeIO)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
-import Free.Agent.Bus.File (Decision (..), Flow (..), QEvent (..), QuiesceConfig (..), quiesceAgent, tailLog)
+import Free.Agent.Bus.File (Decision (..), Flow (..), QEvent (..), QuiesceConfig (..), quiesceAgent, tailLog, writeCursor)
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
 import Free.Agent.Connector (ConnectorConfig (..), TurnResult (..), defaultConnectorConfig, runTurn)
@@ -1459,6 +1459,82 @@ main = do
       case relays of
         [r] -> thread r == [0] && "escalation received" `T.isInfixOf` body r
         _ -> False
+    removePathForcibly root
+
+  -------------------------------------------------------------------------
+  -- The seam (Q7): one deterministic seat, two machines.
+  --
+  -- The same index-citing seat runs through the pure calculus 'loop'
+  -- (circuits-agent) and through the operational 'runAgentLoop'
+  -- (free-agent).  The pure seat cites its parent's log index; the
+  -- runner prepends the parent's file id; the B3 id-agreement makes
+  -- those the same number.  The final logs must be the SAME
+  -- [Post Text] once stamps are stripped — no modulo left in the
+  -- comparison.
+  --
+  -- Counterexamples this pins: a runner that drops the ancestry edge
+  -- (pre-M1 shape, thread == []), a cold-boot cursor that skips the
+  -- script (the seat answers nothing), a seat that answers the halt
+  -- mark, and a silent pair of empty logs (the non-triviality clause).
+  -------------------------------------------------------------------------
+  putStrLn "the seam (Q7)"
+  do
+    let seatName = "q7" :: Text
+        -- Pure side: the tape sees the whole addressed history
+        -- (post-step observation), so the parent's log index is
+        -- length hist - 1.  Halt marks are control: silence, and the
+        -- loop quiesces.
+        q7Seat :: [Post Text] -> [Post Text]
+        q7Seat hist =
+          let p = case hist of
+                (x : _) -> x
+                [] -> error "Q7: empty history"
+              parentId = fromIntegral (length hist - 1) :: PostId
+           in case markOf p of
+                Just m
+                  | isHalt m -> []
+                _ -> [(mkPost seatName [from p] ("ack: " <> body p)) {thread = [parentId]}]
+        agent = cellToAgent (tape q7Seat) :: Agent (->) [Post Text] (Post Text) [Post Text]
+        a = mkPost "human" [seatName] "one"
+        b = mkPost "human" [seatName] "two"
+        c = mkPost "human" [seatName] "three"
+        stopper = mkPost "human" [seatName] (markGlyph Landed <> " done")
+        -- The pure Log is newest-first (post = cons); seeding it
+        -- newest-first makes the whole lifecycle consistent, and
+        -- 'watch' is the calculus's own oldest-first reading.
+        (_, pureLog, _) = loop [(seatName, agent)] [stopper, c, b, a]
+        pureTimeline = watch ["human", seatName] pureLog
+    -- Operational side: the cursor is pinned to 0 up front — the
+    -- cold-boot default (latestPostId) would skip the script, which is
+    -- exactly the divergence this test exists to catch.
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-q7-seam"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    writeCursor root seatName 0
+    done <- newEmptyMVar
+    _ <-
+      forkIO $
+        runAgentLoop
+          seatName
+          [seatName]
+          root
+          Nothing
+          ( \stored ->
+              pure [mkPost seatName [from (stamped stored)] ("ack: " <> body (stamped stored))]
+          )
+          >> putMVar done ()
+    _ <- postLocal root a
+    _ <- postLocal root b
+    _ <- postLocal root c
+    _ <- postLocal root stopper
+    takeMVar done
+    content <- TIO.readFile (root </> "log.jsonl")
+    let fileLog = map stamped (mapMaybe (unframeStored @Text) (T.lines content))
+    assert "Q7 the run produced the full script plus replies (no silent pair)" $
+      length fileLog == 7 && length pureTimeline == 7
+    assert "Q7 the seam: loop and runAgentLoop give the same final log modulo stamps" $
+      pureTimeline == fileLog
     removePathForcibly root
 
   -------------------------------------------------------------------------
