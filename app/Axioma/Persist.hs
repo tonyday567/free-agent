@@ -11,7 +11,7 @@ import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (stamp, stamped, unLog, unframeStored)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.STM (atomically, orElse)
-import Data.Either (isLeft, isRight)
+import Data.Either (fromRight, isLeft, isRight)
 import Data.Foldable (traverse_)
 import Data.List (sort)
 import Data.Maybe (mapMaybe)
@@ -88,7 +88,9 @@ persistTopic = do
 
   -- B2: undurable delivery — no reader can react to a post the persister
   -- never wrote. Deterministic half: readSince excludes the ghost.
-  -- Death-detection half: awaitSince cannot produce it within a bound.
+  -- Death-detection half: awaitSince answers with the persister's
+  -- failure instead of retrying forever (the wave H death-is-content
+  -- contract, shared with L5).
   do
     tmp <- getTemporaryDirectory
     let root = tmp </> "free-agent-b2-undurable"
@@ -104,9 +106,11 @@ persistTopic = do
     seen <- atomically (readSince bus ["seat"] 0)
     assert "B2 undurable: readSince never surfaces the ghost" $
       map (body . stamped) seen == ["durable"]
-    timedOut <- timeout 200_000 (atomically (awaitSince bus ["seat"] 1))
-    assert "B2 undurable: awaitSince cannot deliver the ghost" $
-      timedOut == Nothing
+    answered <- timeout 2_000_000 (atomically (awaitSince bus ["seat"] 1))
+    assert "B2 undurable: awaitSince answers Left, never delivers the ghost" $
+      case answered of
+        Just (Left _) -> True
+        _ -> False
     closeBus bus
     removePathForcibly root
     -- Positive half: after a successful persist, delivery flows.
@@ -118,7 +122,7 @@ persistTopic = do
     _ <- atomically (awaitDurable bus2 0)
     got <- atomically (awaitSince bus2 ["seat"] 0)
     assert "B2 after a successful persist, the post delivers" $
-      map (body . stamped) got == ["landed"]
+      map (body . stamped) (fromRight [] got) == ["landed"]
     closeBusDurable bus2
     removePathForcibly root2
 

@@ -91,7 +91,7 @@ import Control.Concurrent.STM
     retry,
     writeTVar,
   )
-import Control.Exception (SomeException, bracket, displayException, toException, try)
+import Control.Exception (SomeException, bracket, displayException, throwIO, toException, try)
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
@@ -373,17 +373,32 @@ readSince bus names since = do
     ]
 
 -- | Wait until at least one matching post exists in the persisted prefix
--- after the cursor.
-awaitSince :: Bus a -> [Name] -> PostId -> STM [Stamped a]
+-- after the cursor — or the persister has failed.
+--
+-- Ends by content, mirroring 'awaitDurable': a dead persister answers
+-- 'Left' with its exit reason instead of retrying forever (wave H — a
+-- waiter downstream of a killed persistLoop used to block in STM retry
+-- indefinitely, one level up from 'BlockedIndefinitelyOnSTM').
+awaitSince :: Bus a -> [Name] -> PostId -> STM (Either SomeException [Stamped a])
 awaitSince bus names since = do
-  found <- readSince bus names since
-  if null found then retry else pure found
+  st <- readTVar (busPersist bus)
+  case st of
+    Failed e -> pure (Left e)
+    Persisting -> do
+      found <- readSince bus names since
+      if null found then retry else pure (Right found)
 
 -- | Run a 'FreeSeat' as a bus agent.
 --
 -- Blocks via 'awaitSince' (STM retry) for posts addressed to any of the
 -- names, feeds the batch into the seat, and scribes any emitted replies.
 -- This is the callback loop: no polling, no file locks in the agent path.
+--
+-- A dead persister ends the loop: no durable post can ever arrive, so
+-- the seat rethrows the persister's exit reason rather than waiting on
+-- an empty durable prefix forever (wave H). Rethrowing keeps 'closeBus'
+-- behavior identical to a 'killThread' — the exception a waiter sees
+-- after a normal close is the persister's own 'ThreadKilled'.
 --
 -- Replies carry thread edges citing the parent 'stamp'. To preserve the
 -- input-to-output mapping we process one 'Stamped Text' at a time; the seat
@@ -402,12 +417,15 @@ runSeatBus bus agentName names seat = loop 0
   where
     sh = interpretSeat seat
     loop lastId = do
-      posts <- atomically (awaitSince bus names lastId)
-      let marked = any (halts . stamped) posts
-          work = filter (not . halts . stamped) posts
-      selfHalt <- go work
-      unless (marked || selfHalt) $
-        loop (maximum (map (snd . stamp) posts) + 1)
+      incoming <- atomically (awaitSince bus names lastId)
+      case incoming of
+        Left e -> throwIO e
+        Right posts -> do
+          let marked = any (halts . stamped) posts
+              work = filter (not . halts . stamped) posts
+          selfHalt <- go work
+          unless (marked || selfHalt) $
+            loop (maximum (map (snd . stamp) posts) + 1)
     go [] = pure False
     go (stored : rest) = do
       outs <- processOne stored

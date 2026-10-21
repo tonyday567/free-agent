@@ -10,16 +10,33 @@ where
 import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (stamp, stamped, unLog, unframeStored)
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent (forkFinally, forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.STM (atomically)
+import Control.Exception (SomeException, displayException, try)
+import Data.Either (isLeft)
 import Data.List (nub, sort)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Free.Agent.Bus (awaitQuiescent, busImage, closeBus, openBus, postLocal, scribeIO)
-import System.Directory (removePathForcibly)
+import Data.Time (diffUTCTime, getCurrentTime)
+import Free.Agent.Bus
+  ( awaitQuiescent,
+    awaitSince,
+    busImage,
+    closeBus,
+    openBus,
+    postLocal,
+    readFileStrict,
+    runSeatBus,
+    scribeIO,
+  )
+import Free.Agent.Bus.Daemon (ensureFifo, fifoPath, postViaDaemon, runDaemon)
+import Free.Agent.Seat (FreeSeat (..))
+import System.Directory (removeFile, removePathForcibly)
 import System.FilePath ((</>))
+import System.Mem (performGC)
+import System.Posix.Files (getFileStatus, isNamedPipe)
 import System.Timeout (timeout)
 
 lifecycleTopic :: IO ()
@@ -31,7 +48,8 @@ lifecycleTopic = do
   -- Pre-fix (blocking withFileLock, non-threaded RTS) a waiter wedged in
   -- the flock FFI while the holder was descheduled deadlocked the runtime
   -- permanently; the in-test timeout cannot fire once the wedge lands, so
-  -- the red evidence is an externally-killed binary.
+  -- the red evidence is an externally-killed binary (observed: wedged on
+  -- the 3rd of 15 attempts against the pre-fix build).
   --
   -- Mutation guard: a lock regression re-wedges under the same hammer.
   -------------------------------------------------------------------------
@@ -106,4 +124,117 @@ lifecycleTopic = do
             assert "L1 image ids equal file ids" $
               imgIds == fileIds
     closeBus bus
+    removePathForcibly root
+
+  -------------------------------------------------------------------------
+  -- L2: receipt stress — one sender, many rapid sequential daemon posts.
+  --
+  -- The client's receipt poll and the daemon's next receipt write share
+  -- a path in-process; pre-fix the lazy read pinned it and the daemon's
+  -- write threw "resource busy", killing the daemon thread. Pins the
+  -- strict read, the mutex-serialized receipt write, and daemon survival.
+  -------------------------------------------------------------------------
+  putStrLn "receipt stress"
+
+  do
+    root <- tempRoot "free-agent-l2-receipts"
+    tid <- forkIO (runDaemon @Text root)
+    threadDelay 100_000
+    let n = 100
+    rs <-
+      mapM
+        (\i -> postViaDaemon root (mkPost "l2" ["hub"] ("m" <> T.pack (show (i :: Int)))))
+        [1 .. n]
+    -- Daemon alive at the end: one more post round-trips.
+    fin <- postViaDaemon root (mkPost "l2" ["hub"] "final")
+    killThread tid
+    assert "L2 daemon survived the receipt storm" $
+      snd (stamp fin) == fromIntegral n
+    assert "L2 receipts contiguous in arrival order" $
+      map (snd . stamp) rs == [0 .. fromIntegral n - 1]
+    content <- readFileStrict (root </> "log.jsonl")
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+    assert "L2 log holds exactly the storm" $
+      length parsed == n + 1
+    removePathForcibly root
+
+  -------------------------------------------------------------------------
+  -- L3: dead-daemon honesty — a killed daemon makes postViaDaemon fail
+  -- fast with a message naming the daemon and the root, not the 10s
+  -- receipt-timeout backstop and not an opaque ENXIO.
+  --
+  -- The daemon's fifo handle closes via finalizer after the kill, so a
+  -- full GC makes the ENXIO-at-open deterministic; the attempt stays
+  -- externally bounded regardless.
+  -------------------------------------------------------------------------
+  putStrLn "dead-daemon honesty"
+
+  do
+    root <- tempRoot "free-agent-l3-dead-daemon"
+    tid <- forkIO (runDaemon @Text root)
+    threadDelay 100_000
+    _ <- postViaDaemon root (mkPost "l3" ["hub"] "ping")
+    killThread tid
+    threadDelay 100_000
+    performGC
+    t0 <- getCurrentTime
+    r <- timeout 5_000_000 $ try @SomeException (postViaDaemon root (mkPost "l3" ["hub"] "post"))
+    dt <- diffUTCTime <$> getCurrentTime <*> pure t0
+    case r of
+      Nothing -> assert "L3 fails fast, not via the 10s receipt backstop" False
+      Just (Right _) -> assert "L3 posting to a dead daemon must fail" False
+      Just (Left e) -> do
+        let msg = T.pack (displayException e)
+        assert "L3 the failure names the daemon" ("daemon" `T.isInfixOf` msg)
+        assert "L3 the failure names the root" (T.pack root `T.isInfixOf` msg)
+        assert "L3 fails well under the 10s receipt timeout" (dt < 3)
+    removePathForcibly root
+
+  -------------------------------------------------------------------------
+  -- L4: double create — fifo creation is idempotent when the path is a
+  -- fifo, loud when it is anything else.
+  -------------------------------------------------------------------------
+  putStrLn "fifo double create"
+
+  do
+    root <- tempRoot "free-agent-l4-fifo"
+    let fifo = fifoPath root
+    ensureFifo fifo
+    ensureFifo fifo
+    st <- getFileStatus fifo
+    assert "L4 double create passes on a fifo" (isNamedPipe st)
+    removeFile fifo
+    TIO.writeFile fifo "not a pipe"
+    again <- try @SomeException (ensureFifo fifo)
+    assert "L4 a regular file at bus.fifo fails loudly" $
+      case again of
+        Left e -> "named pipe" `T.isInfixOf` T.pack (displayException e)
+        Right () -> False
+    daemon <- try @SomeException (runDaemon @Text root)
+    assert "L4 runDaemon refuses a non-fifo path loudly" (isLeft daemon)
+    removePathForcibly root
+
+  -------------------------------------------------------------------------
+  -- L5: persister death ends seats — awaitSince answers Left instead of
+  -- retrying forever, and a runSeatBus waiter halts rather than blocking
+  -- on an empty durable prefix.
+  -------------------------------------------------------------------------
+  putStrLn "persister death"
+
+  do
+    root <- tempRoot "free-agent-l5-persister-death"
+    bus <- openBus root
+    seatDied <- newEmptyMVar
+    _ <- forkFinally (runSeatBus bus "l5" ["l5"] SeatSilent) (putMVar seatDied)
+    closeBus bus
+    answered <- timeout 5_000_000 (atomically (awaitSince bus ["l5"] 0))
+    assert "L5 awaitSince answers with the persister's failure" $
+      case answered of
+        Just (Left _) -> True
+        _ -> False
+    died <- timeout 5_000_000 (takeMVar seatDied)
+    assert "L5 a runSeatBus seat halts on a dead persister" $
+      case died of
+        Just (Left _) -> True
+        _ -> False
     removePathForcibly root
