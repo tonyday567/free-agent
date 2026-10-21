@@ -1,11 +1,11 @@
--- | Derivations: the 2-cells where the two dimensions meet (stage 6 of
+-- | Lineage: the 2-cells where the two dimensions meet (stage 6 of
 -- endgame-path).
 --
--- A derivation is a square: the horizontal edge is the agent box (the
+-- A lineage is a square: the horizontal edge is the agent box (the
 -- sender — process dimension); the vertical edges are the ancestry,
 -- resolved to strictly-earlier posts (record dimension).  With honest
 -- ancestry ('synthesisPosts', stage 4) the square is /recoverable from
--- the log alone/ — the record projects the derivation, which is the
+-- the log alone/ — the record projects the lineage, which is the
 -- unification claim of the endgame.
 --
 -- Pasting:
@@ -17,9 +17,9 @@
 --   * /vertical/ — stacking squares in time: chasing resolved parents
 --     from any post walks the pasting back to the roots.  Oracle: the
 --     chase from the last post of a meeting covers the whole log.
-module Free.Agent.Derivation
-  ( Derivation (..),
-    derivation,
+module Free.Agent.Lineage
+  ( Lineage (..),
+    lineage,
     valid,
     chaseLog,
   )
@@ -28,10 +28,10 @@ where
 import Circuit.Agent (Post (..))
 import Data.List (genericIndex)
 
--- | A derivation square: @dPost@ is the output (the square's target);
+-- | A lineage square: @dPost@ is the output (the square's target);
 -- @dParents@ are the resolved vertical sources, in 'thread' order.
 -- Dangling ids are an error (the log is expected to be well-formed).
-data Derivation a = Derivation
+data Lineage a = Lineage
   { dPost :: Post a,
     dParents :: [Post a]
   }
@@ -40,9 +40,9 @@ data Derivation a = Derivation
 -- | The square of a post against the posts prior to it (oldest first).
 -- Each 'thread' edge is a 'PostId' interpreted as a positional index into
 -- @prior@, exactly as in 'Circuit.Agent.branches'.
-derivation :: [Post a] -> Post a -> Derivation a
-derivation prior p =
-  Derivation
+lineage :: [Post a] -> Post a -> Lineage a
+lineage prior p =
+  Lineage
     p
     [ prior `genericIndex` i
     | i <- thread p
@@ -53,7 +53,7 @@ derivation prior p =
 valid :: [Post a] -> Post a -> Bool
 valid prior p = all (< fromIntegral (length prior)) (thread p)
 
--- | The posts reachable from the last post by chasing derivations back
+-- | The posts reachable from the last post by chasing lineage back
 -- through the log (vertical pasting made executable).  When ancestry is
 -- honest and the log is one meeting, the chase covers the whole log.
 --
@@ -67,4 +67,4 @@ chaseLog posts = go [] [last posts]
     go acc [] = acc
     go acc (p : ps)
       | p `elem` acc = go acc ps
-      | otherwise = go (p : acc) (dParents (derivation (priorOf p) p) ++ ps)
+      | otherwise = go (p : acc) (dParents (lineage (priorOf p) p) ++ ps)

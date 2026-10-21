@@ -61,7 +61,7 @@ library
     Free.Agent.Cli
     Free.Agent.Cli.Config
     Free.Agent.Connector
-    Free.Agent.Derivation
+    Free.Agent.Lineage
     Free.Agent.Diagram
     Free.Agent.Fare.Cli
     Free.Agent.Fare.Config

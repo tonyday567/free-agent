@@ -51,12 +51,12 @@ import Free.Agent.Bus.File (Decision (..), Flow (..), QEvent (..), QuiesceConfig
 import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
 import Free.Agent.Connector (ConnectorConfig (..), TurnResult (..), defaultConnectorConfig, runTurn)
-import Free.Agent.Derivation (chaseLog, dParents, derivation, valid)
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, machineProcess, meetingSkeleton, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, hostShard, mkHost, processHost)
 import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
 import Free.Agent.Json (objLookup)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
+import Free.Agent.Lineage (chaseLog, dParents, lineage, valid)
 import Free.Agent.Meeting (AgentBox (..), meetLog, quoter, unchanged)
 import Free.Agent.Pipeline
   ( Pipeline,
@@ -1092,7 +1092,7 @@ main = do
     assert "thread ids reproduce exactly between identical replays" $
       map thread log1 == map thread log2
 
-  -- Derivations as 2-cells (endgame stage 6): the squares are recoverable
+  -- Lineage as 2-cells (endgame stage 6): the squares are recoverable
   -- from the log; pasting is roster merge (horizontal) and time (vertical).
   putStrLn "derivations as 2-cells"
   do
@@ -1109,7 +1109,7 @@ main = do
       case drop 5 log3 of
         (p : _) ->
           let prior = take 5 log3
-           in map from (dParents (derivation prior p))
+           in map from (dParents (lineage prior p))
                 == map (\i -> from (prior !! fromIntegral i)) (thread p)
         _ -> False
     let boxA = AgentBox ([], [], [], []) (quoter "a" "A")
