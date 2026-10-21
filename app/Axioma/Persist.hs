@@ -137,6 +137,19 @@ persistTopic = do
         agree bus = do
           rq <- atomically (awaitQuiescent bus)
           assert "B3 persister alive" $ isRight rq
+          -- Reconciliation of trailing external growth rides the
+          -- persister's one-second tick (wave H): wait (bounded) until
+          -- the image has pulled the file in, then compare.
+          let waitReconciled :: Int -> IO Bool
+              waitReconciled 0 = pure False
+              waitReconciled n = do
+                imgLen <- atomically $ length . unLog <$> busImage bus
+                fileLen <- length . T.lines <$> TIO.readFile path
+                if imgLen == fileLen
+                  then pure True
+                  else threadDelay 100_000 >> waitReconciled (n - 1)
+          reconciled <- waitReconciled 100
+          assert "B3 image reconciled with the file" reconciled
           img <- atomically (busImage bus)
           content <- TIO.readFile path
           let parsed = mapMaybe (unframeStored @Text) (T.lines content)
