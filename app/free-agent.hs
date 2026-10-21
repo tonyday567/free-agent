@@ -32,6 +32,7 @@ import Free.Agent.Acp (AcpConfig (..), acpHost, acpInitialize, acpNewSession, cl
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus.Cli (BusCommand, busParser, runBusCommand, runStatus)
 import Free.Agent.Bus.File (QuiesceConfig (..), cursorPath)
+import Free.Agent.Cli (cleanCliOut)
 import Free.Agent.Cli.Config
   ( AcpCliConfig (..),
     Backend (..),
@@ -231,25 +232,6 @@ buildQuiesce :: Maybe Int -> Maybe Name -> Maybe QuiesceConfig
 buildQuiesce Nothing _ = Nothing
 buildQuiesce (Just n) mp = Just (QuiesceConfig n (fromMaybe "pitboss" mp) 1000000)
 
--- | Drop Hermes/Kimi CLI noise lines that can precede the actual reply text.
-scrubReply :: Post Text -> Post Text
-scrubReply p =
-  let ls = T.lines (body p)
-      clean = filter (not . noise) ls
-      noise l =
-        T.null l
-          || "(empty)" == l
-          || "↪" `T.isPrefixOf` l
-          || "session_id:" `T.isPrefixOf` l
-          || "Warning:" `T.isPrefixOf` l
-          || "Resumed session" `T.isInfixOf` l
-          || "Resume this session with:" `T.isInfixOf` l
-          || "⚕" `T.isPrefixOf` l
-          || "❯" `T.isPrefixOf` l
-          || "kimi version" `T.isPrefixOf` l
-          || "To resume this session:" `T.isPrefixOf` l
-   in p {body = T.strip (T.unlines clean)}
-
 -- | Parse a leading @name: prefix from a reply body.
 routeReply :: Post Text -> Post Text
 routeReply p =
@@ -276,7 +258,7 @@ runOneSeat seat stored = do
       parentId = snd (stamp stored)
       sh = interpretSeat seat
   (outs, _st) <- closeShardIO sh [p] []
-  pure [routeReply (scrubReply out) {thread = sortNub (parentId : thread out)} | out <- outs]
+  pure [routeReply out {body = cleanCliOut (body out), thread = sortNub (parentId : thread out)} | out <- outs]
 
 keepReplyHermes :: Post Text -> Bool
 keepReplyHermes p =

@@ -40,6 +40,7 @@ module Free.Agent.Bus
     -- * Durable append
     appendStoredPosts,
     appendStoredPostsUnlocked,
+    writePings,
 
     -- * Durability
     Persist (..),

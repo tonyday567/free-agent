@@ -52,7 +52,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
-import Free.Agent.Bus (appendStoredPostsUnlocked)
+import Free.Agent.Bus (appendStoredPostsUnlocked, writePings)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FileLock (SharedExclusive (Exclusive), withFileLock)
 import System.FilePath (takeDirectory, (<.>), (</>))
@@ -158,18 +158,5 @@ waitReceipt root p = go (200 :: Int)
 
 -- | Write a @.ping-NAME@ file for each named recipient of each post.
 --
--- Copied from "Free.Agent.Bus" because the original helper is internal to
--- that module.
-writePings :: FilePath -> [Stamped a] -> IO ()
-writePings path posts = traverse_ writeOne recipients
-  where
-    root = takeDirectory path
-    pingFile name = root </> printf ".ping-%s" (T.unpack name)
-    recipients = concatMap postRecipients posts
-    postRecipients stored =
-      case to (stamped stored) of
-        [] -> []
-        [""] -> []
-        ts -> [(name, snd (stamp stored)) | name <- ts]
-    writeOne (name, pid) =
-      TIO.writeFile (pingFile name) (T.pack (show pid))
+-- 'writePings' lives in "Free.Agent.Bus" (the canonical spelling); this
+-- module re-exports it via the import list above.

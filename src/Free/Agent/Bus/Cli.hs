@@ -31,6 +31,7 @@ import Data.Foldable (traverse_)
 import Data.List (isPrefixOf, sort, sortOn)
 import Data.Maybe (listToMaybe, mapMaybe, maybe)
 import Data.Ord (Down (..))
+import Free.Agent.Cli.Config (rootOpt)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -77,18 +78,6 @@ data BusCommand
 -- ---------------------------------------------------------------------------
 -- Parsers
 -- ---------------------------------------------------------------------------
-
-rootOpt :: Parser FilePath
-rootOpt =
-  option
-    str
-    ( long "root"
-        <> short 'r'
-        <> metavar "ROOT"
-        <> value "."
-        <> showDefault
-        <> help "Bus root directory"
-    )
 
 nameArg :: Parser Text
 nameArg = argument (T.pack <$> str) (metavar "NAME" <> help "Agent name")

@@ -38,6 +38,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Vector qualified as V
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), TranscriptRecord (..), cleanCliOut, cliQuery, dshCli, encodeTranscriptLine, kimiCli, parseSessionId)
+import Free.Agent.Json (objLookup)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -373,16 +374,12 @@ chatCompletion cfg systemPrompt userMessage = do
     then pure ("🔴 HTTP " <> T.pack (show status) <> ": " <> TE.decodeUtf8 (BL.toStrict body))
     else case decodeJson (BL.toStrict body) of
       Left err -> pure ("🔴 JSON error: " <> T.pack err)
-      Right j -> case jObjLookup "choices" j of
+      Right j -> case objLookup "choices" j of
         Just (JArray vs) -> case V.toList vs of
           [] -> pure "🔴 empty choices"
-          (c : _) -> case jObjLookup "message" c of
-            Just m -> case jObjLookup "content" m of
+          (c : _) -> case objLookup "message" c of
+            Just m -> case objLookup "content" m of
               Just (JString t) -> pure t
               _ -> pure "🔴 missing content"
             _ -> pure "🔴 missing message"
         _ -> pure "🔴 empty choices"
-  where
-    jObjLookup :: Text -> Json -> Maybe Json
-    jObjLookup k (JObject ps) = lookup k ps
-    jObjLookup _ _ = Nothing

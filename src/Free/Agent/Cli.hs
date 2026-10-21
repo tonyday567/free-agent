@@ -9,7 +9,6 @@ module Free.Agent.Cli
   ( -- * Invocation recipe
     Cli (..),
     StderrPolicy (..),
-    hermesCli,
     kimiCli,
     grokCli,
     dshCli,
@@ -312,29 +311,6 @@ parseSessionId out =
        in if T.null sid then Nothing else Just sid
     [] -> Nothing
 
--- | Recipe for the hermes CLI: @hermes chat -q \<prompt\> … --resume \<sid\>@.
-hermesCli :: Maybe Text -> Maybe Text -> FilePath -> Cli
-hermesCli model provider sessionFile =
-  Cli
-    { cliCommand = "hermes",
-      cliArgv = \prompt mSid ->
-        ["chat", "-q", T.unpack prompt]
-          <> maybe [] (\m -> ["-m", T.unpack m]) model
-          <> maybe [] (\p -> ["--provider", T.unpack p]) provider
-          <> ["--yolo", "-Q", "--max-turns", "90"]
-          <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
-      cliStdin = const "",
-      cliSessionFile = sessionFile,
-      cliSessionId = parseSessionId,
-      cliStale = \_code out ->
-        "No session found matching" `T.isInfixOf` out
-          || "Session not found" `T.isInfixOf` out,
-      cliScrub = cleanCliOut,
-      cliStderr = StderrMerge,
-      cliStderrTee = Nothing,
-      cliTranscript = Nothing
-    }
-
 -- | Maximum retries for transient failures when resuming a session.
 -- A transient failure (non-zero exit, not stale) is retried with the
 -- same session id before giving up.
@@ -505,6 +481,9 @@ cleanCliOut =
     keep l
       | T.null l = False
       | "(empty)" == l = False
+      | "↪" `T.isPrefixOf` l = False
+      | "kimi version" `T.isPrefixOf` l = False
+      | "To resume this session:" `T.isPrefixOf` l = False
       | "session_id:" `T.isPrefixOf` l = False
       | "Warning:" `T.isPrefixOf` l = False
       | "Resumed session" `T.isInfixOf` l = False
