@@ -6,9 +6,7 @@
 
 module Main (main) where
 
-import Circuit (Poles (Poles, commit, emit))
-import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), PostId, Shard, awaitA, branchesByIndex, cellToAgent, coneByIndex, loop, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag, watch)
-import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
+import Circuit.Agent (Agent, AgentSeat (..), Post (..), PostId, branchesByIndex, cellToAgent, coneByIndex, loop, raceA, replyTo, runAgentShard, sortNub, synthesis, tape, toBag, watch)
 import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unLog, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Circuit.Agent.StdPorts (DoubleStep (..), Frame (..), ProcEnds (..), scriptedDouble)
@@ -28,8 +26,8 @@ import Circuit.Machine (Body (Body), Moore, MooreT (..), delay, polesK, register
 import Circuit.Parser.Json (decodeJson)
 import Circuit.Syntax ((:~>))
 import Circuit.Tensor (Const (..), unConst)
-import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
-import Control.Concurrent (MVar, forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
+import Circuit.Traced (Strength (..), Yank (..))
+import Control.Concurrent (forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM (atomically, newTQueueIO, orElse, readTQueue, writeTQueue)
 import Control.Monad (when)
@@ -42,15 +40,15 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
-import Data.Time (UTCTime, getCurrentTime)
+import Data.Time (getCurrentTime)
 import Free.Agent.Acp (AcpClient (..), acpHost, acpInitialize, acpNewSession, defaultAcpConfig, jsonToInt)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (Bus, awaitDurable, awaitQuiescent, awaitSince, busImage, closeBus, openBus, postLocal, readSince, runSeatBus, scribeIO)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (Decision (..), Flow (..), QEvent (..), QuiesceConfig (..), quiesceAgent, tailLog, writeCursor)
-import Free.Agent.BusStats (Classification (..), Rules (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
+import Free.Agent.BusStats (Classification (..), SliceMode (..), Stats (..), classify, computeStats, defaultRules, isDoneClaim, slicePosts)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
-import Free.Agent.Connector (ConnectorConfig (..), TurnResult (..), defaultConnectorConfig, runTurn)
+import Free.Agent.Connector (ConnectorConfig (..), defaultConnectorConfig, runTurn)
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, machineProcess, meetingSkeleton, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, hostShard, mkHost, processHost)
 import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
@@ -74,7 +72,6 @@ import Free.Agent.Pipeline
 import Free.Agent.Pipeline qualified as P
 import Free.Agent.Seat
   ( FreeSeat (..),
-    SeatBehaviour,
     awaitSeat,
     bundleSeat,
     fanInSeat,
@@ -94,7 +91,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDi
 import System.Environment (getExecutablePath, setEnv, unsetEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath (takeDirectory, (</>))
-import System.IO (Handle, IOMode (AppendMode), hFlush, withFile)
+import System.IO (IOMode (AppendMode), hFlush, withFile)
 import System.Posix.Files (setFileMode)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)

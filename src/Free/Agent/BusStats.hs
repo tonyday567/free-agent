@@ -104,7 +104,6 @@ matches pat txt = T.unpack txt =~ T.unpack pat
 -- Time handling
 -- ---------------------------------------------------------------------------
 
--- | Parse the timestamp format written by the bus scribe.
 -- | Format a timestamp for display.
 formatTs :: UTCTime -> Text
 formatTs = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S"
