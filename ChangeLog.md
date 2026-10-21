@@ -2,6 +2,39 @@
 
 ## unreleased
 
+- **Lifecycle hygiene (wave H).** The B3 watermark hang and the daemon
+  receipt crash had three distinct mechanisms, all fixed at the root.
+  (1) The log lock no longer wedges the runtime: `withLogLock` replaces
+  the blocking `flock` with a `withTryFileLock` spin (bounded, loud at
+  ~10s) at all four lock sites — a same-process waiter can no longer
+  sleep an OS thread in the C call while the holder waits to be
+  rescheduled. (2) GHC's RTS locks files in-process per (dev,ino) and
+  the modes conflict fatally (Append-vs-Append and Read-vs-Append both
+  throw "resource busy"): a process-wide mutex (`withBusFiles`) now
+  serializes every bus-path open/act/close — appends and touches under
+  `withLogLock`, drains via `withLogRead`, strict reads via
+  `readFileStrict` (all lazy `TIO.readFile` spellings of bus paths are
+  gone; `Framing.readLogFile` remains for other packages). (3) The
+  stamping daemon cannot die on a receipt write: bounded retries then a
+  stderr report — the receipt is a courtesy, the log is truth — and
+  `postViaDaemon` fails fast naming the daemon and the root when no
+  live daemon reads the fifo (ENXIO is the expected tell), with the
+  receipt timeout as mid-flight backstop. `ensureFifo` makes fifo
+  creation idempotent: already-exists passes only for a real named
+  pipe. `awaitSince` observes a `Failed` persister (`Left`, mirroring
+  `awaitDurable`) and `runSeatBus` halts with the persister's exit
+  reason instead of retrying forever. The persister reconciles external
+  growth on a one-second tick — a quiet bus's image no longer lags the
+  file until the next local scribe. `free-agent-axioma` builds
+  `-threaded` (defense in depth; the lock fixes are what make it safe);
+  the fork-first seat oracles (M1a, Q7) and B3's reconcile check are
+  deterministic under true parallelism — cursor pins and a batch plant
+  replace the scheduling accidents they encoded. Every axioma temp root
+  is per-run unique (`Axioma.Common.tempRoot`), killing the
+  cross-instance class: orphaned fifos, truncated logs, false-matched
+  receipts. New `lifecycle` topic: L1 lock stress, L2 receipt stress,
+  L3 dead-daemon honesty, L4 fifo double-create, L5 persister death
+  ends seats.
 - **Redundancy sweep (R2b).** `Free.Agent.Derivation` renamed to
   `Free.Agent.Lineage` (the dPost/dParents square; `Circuit.Agent` keeps
   `Derivation`). Dedupes: `writePings` one spelling in `Bus`, the dead
