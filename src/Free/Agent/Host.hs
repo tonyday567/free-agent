@@ -61,6 +61,12 @@ data BodyMode
 -- The host receives arguments derived from the body of an incoming post and
 -- produces output lines.  The caller decides how to turn those lines back into
 -- posts; 'hostShard' uses the default mapping (reply to sender).
+--
+-- The default is the design card's branching factor exactly 1: a reply
+-- addresses the sender only, and the @all@ magic top is localised by
+-- 'deliversTo', never propagated into replies (a reply carrying @all@
+-- would re-broadcast — the amplifier the card flags).  Reply-all widening
+-- is a seat-level choice for the deferred address-type wave.
 data Host = Host
   { -- | Name used as the 'from' field of reply posts.
     hostName :: Text,

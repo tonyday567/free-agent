@@ -24,7 +24,6 @@ import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
 import Circuit.Machine (Body (Body), Moore, MooreT (..), delay, polesK, register, scan)
 import Circuit.Parser.Json (decodeJson)
-import Circuit.Syntax ((:~>))
 import Circuit.Tensor (Const (..), unConst)
 import Circuit.Traced (Strength (..), Yank (..))
 import Control.Concurrent (forkIO, killThread, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
@@ -51,9 +50,7 @@ import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parse
 import Free.Agent.Connector (ConnectorConfig (..), defaultConnectorConfig, runTurn)
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, machineProcess, meetingSkeleton, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, hostShard, mkHost, processHost)
-import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
 import Free.Agent.Json (objLookup)
-import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Lineage (chaseLog, dParents, lineage, valid)
 import Free.Agent.Meeting (AgentBox (..), meetLog, quoter, unchanged)
 import Free.Agent.Pipeline
@@ -86,7 +83,6 @@ import Free.Agent.Seat
     runAgentSBox,
     silentSeat,
   )
-import Free.Agent.Syntax (FreeAgent (..))
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly)
 import System.Environment (getExecutablePath, setEnv, unsetEnv)
 import System.Exit (ExitCode (..), exitFailure)
@@ -143,65 +139,6 @@ countSpiders _ _ = 0
 main :: IO ()
 main = do
   putStrLn "free-agent oracle tests"
-
-  -------------------------------------------------------------------------
-  -- Layer laws
-  -------------------------------------------------------------------------
-  putStrLn "Layer laws"
-
-  do
-    let f :: Int -> Int
-        f = (+ 1)
-        g :: Int -> Int
-        g = (* 2)
-        h :: Int -> Int
-        h = subtract 3
-        freeF = Lift f :: FreeAgent (->) Int Int
-        freeG = Lift g :: FreeAgent (->) Int Int
-        freeH = Lift h :: FreeAgent (->) Int Int
-        freeGF = freeG `Compose` freeF
-        freeHG = freeH `Compose` freeG
-        leftAssoc = freeH `Compose` freeGF
-        rightAssoc = freeHG `Compose` freeF
-        freeId = Lift id :: FreeAgent (->) Int Int
-    assert "run (Lift f) == f" $ runFreeAgent freeF 5 == 6
-    assert "run (Compose (Lift g) (Lift f)) == g . f" $ runFreeAgent freeGF 5 == 12
-    assert "left unit: run (Compose f id) == run f" $
-      runFreeAgent (freeF `Compose` freeId) 5 == runFreeAgent freeF 5
-    assert "right unit: run (Compose id f) == run f" $
-      runFreeAgent (freeId `Compose` freeF) 5 == runFreeAgent freeF 5
-    assert "Compose associative under run" $
-      runFreeAgent leftAssoc 5 == runFreeAgent rightAssoc 5
-
-  do
-    let f :: Int -> Int
-        f = (+ 1)
-        g :: Int -> Int
-        g = (* 2)
-        freeF = Lift f :: FreeAgent (->) Int Int
-        freeG = Lift g :: FreeAgent (->) Int Int
-        freeGF = freeG `Compose` freeF
-        target = bindFreeAgent id freeF :: (->) Int Int
-        targetGF = bindFreeAgent id freeGF :: (->) Int Int
-    assert "bind/unit: bind id (Lift f) == f" $ target 5 == 6
-    assert "bind preserves Compose" $ targetGF 5 == 12
-
-  do
-    let f :: Int -> Int
-        f = (+ 1)
-        g :: Int -> Int
-        g = (* 2)
-        freeF = Lift f :: FreeAgent (->) Int Int
-        freeG = Lift g :: FreeAgent (->) Int Int
-        freeGF = freeG `Compose` freeF
-        toMaybe :: (->) :~> K Maybe
-        toMaybe h = K (Just . h)
-        targetF = bindFreeAgent toMaybe freeF :: K Maybe Int Int
-        targetGF = bindFreeAgent toMaybe freeGF :: K Maybe Int Int
-    assert "bindFreeAgent folds into a discrete target (K Maybe)" $
-      runK targetF 5 == Just 6
-    assert "bindFreeAgent preserves Compose into K Maybe" $
-      runK targetGF 5 == Just 12
 
   -------------------------------------------------------------------------
   -- Pipeline laws (on the pure fold)
@@ -1028,45 +965,6 @@ main = do
     assert "the synthesis merge spider is visible (SSpider 3 1)" $
       countSpiders (3, 1) skel == 1
 
-  -------------------------------------------------------------------------
-  -- Hyper generators (endgame stage 3): copy/merge/braid for streams, and
-  -- 'both' — the merge of two agents.  Semantics on record: bag at the
-  -- wire, set at the name.
-  -------------------------------------------------------------------------
-  putStrLn "hyper generators"
-  do
-    let xs = [mkPost "a" [] "a1", mkPost "a" [] "a2"]
-        ys = [mkPost "b" [] "b1"]
-        lhs = copyP (mergeP (xs, ys))
-        rhs = merge2 (braidP (copy2 (xs, ys)))
-    assert "bialgebra holds exactly for singleton blocks" $
-      copyP (mergeP ([mkPost "a" [] "a1"], [mkPost "b" [] "b1"]))
-        == merge2 (braidP (copy2 ([mkPost "a" [] "a1"], [mkPost "b" [] "b1"])))
-    assert "bialgebra holds exactly for general streams" $
-      lhs == rhs
-
-  do
-    let obsA =
-          tape (\hist -> [mkPost "a" [] ("a:" <> T.pack (show (length hist)))]) ::
-            Moore (,) [Post Text] (->) (Post Text) [Post Text]
-        obsB =
-          tape (\hist -> [mkPost "b" [] ("b:" <> T.pack (show (length hist)))]) ::
-            Moore (,) [Post Text] (->) (Post Text) [Post Text]
-        ins = [mkPost "human" ["x"] "one", mkPost "human" ["x"] "two"]
-        outsAB = concat (iterateAgent (both obsA obsB) ([], []) ins)
-        outsBA = concat (iterateAgent (both obsB obsA) ([], []) ins)
-    assert "both commutes as a bag of outputs" $
-      toBag outsAB == toBag outsBA
-    assert "both emits left then right per step" $
-      map from outsAB == ["a", "b", "a", "b"]
-    assert "silent is a left zero for both" $
-      iterateAgent (both silent obsA) ((), []) ins == iterateAgent obsA [] ins
-    assert "silent is a right zero for both" $
-      iterateAgent (both obsA silent) ([], ()) ins == iterateAgent obsA [] ins
-    assert "both is not idempotent: bag at the wire (double-post)" $
-      length (concat (iterateAgent (both obsA obsA) ([], []) ins))
-        == 2 * length (concat (iterateAgent obsA [] ins))
-
   -- Replay (endgame stage 5): swap one box, re-derive the meeting.
   -- Deterministic quoters stand in for models; the tag is the "model".
   putStrLn "replay"
@@ -1109,12 +1007,6 @@ main = do
            in map from (dParents (lineage prior p))
                 == map (\i -> from (prior !! fromIntegral i)) (thread p)
         _ -> False
-    let boxA = AgentBox ([], [], [], []) (quoter "a" "A")
-        boxB = AgentBox ([], [], [], []) (quoter "b" "B")
-        merged = AgentBox (([], [], [], []), ([], [], [], [])) (both (quoter "a" "A") (quoter "b" "B"))
-    assert "horizontal pasting: loop [both a b] ≡ loop [a, b]" $
-      meetLog 2 [merged] seed == meetLog 2 [boxA, boxB] seed
-
   -------------------------------------------------------------------------
   -- Bus stats (flow metrics)
   -------------------------------------------------------------------------
@@ -1351,6 +1243,35 @@ main = do
       map (snd . stamp) parsed == [0, 1, 2, 3]
     assert "the halt mark got silence from every seat" $
       length (fromAlpha ++ fromBeta) == 2
+
+  -------------------------------------------------------------------------
+  -- Reply audience: one spelling, branching factor 1 (R2b)
+  --
+  -- The card's default: a seat's reply addresses the sender only — the
+  -- "all" magic top is localised by 'deliversTo', never propagated.  A
+  -- reply carrying "all" forward would re-broadcast (the amplifier the
+  -- design card flags), so a wire-preserving "convergence" of the
+  -- audience rule goes red here.
+  -------------------------------------------------------------------------
+  putStrLn "reply audience"
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-r2b-audience"
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    _ <- postLocal root (mkPost "human" ["all"] "ping")
+    _ <- postLocal root (mkPost "human" ["aud"] (markGlyph Landed <> " done"))
+    bus <- openBus root
+    runSeatBus bus "aud" ["aud"] (hostSeat (mkHost "aud" (pure . map ("ack: " <>))))
+    closeBusDurable bus
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+        replies = [stamped s | s <- parsed, from (stamped s) == "aud"]
+    assert "R2b a reply to an all-post addresses the sender only (no amplifier)" $
+      case replies of
+        [r] -> body r == "ack: ping" && to r == ["human"]
+        _ -> False
+    removePathForcibly root
 
   -------------------------------------------------------------------------
   -- Reply ancestry (M1a): every post produced in response to a delivery

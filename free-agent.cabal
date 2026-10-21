@@ -70,14 +70,11 @@ library
     Free.Agent.Fare.State
     Free.Agent.Gateway
     Free.Agent.Host
-    Free.Agent.Hyper
     Free.Agent.Json
-    Free.Agent.Layer
     Free.Agent.Lineage
     Free.Agent.Meeting
     Free.Agent.Pipeline
     Free.Agent.Seat
-    Free.Agent.Syntax
 
   build-depends:
     base >=4.20 && <5,
