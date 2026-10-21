@@ -116,6 +116,7 @@ executable free-agent-axioma
     circuits,
     circuits-agent,
     circuits-diagrams,
+    circuits-parser >=0.1 && <0.2,
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
     free-agent,
@@ -124,6 +125,7 @@ executable free-agent-axioma
     stm >=2.5 && <2.6,
     text >=1.2 && <3,
     time >=1.9 && <1.15,
+    unix >=2.8 && <2.9,
 
 executable free-agent
   import: ghc-options-stanza

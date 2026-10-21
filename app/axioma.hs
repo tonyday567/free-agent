@@ -11,7 +11,7 @@ import Circuit.Agent (Agent, AgentSeat (..), Bag, Name, Post (..), PostId, Shard
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
 import Circuit.Agent.Framing (Stamped, frameStored, parseTimeText, stamp, stamped, unLog, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
-import Circuit.Agent.StdPorts (Frame (..), ProcEnds (..))
+import Circuit.Agent.StdPorts (DoubleStep (..), Frame (..), ProcEnds (..), scriptedDouble)
 import Circuit.Agent.Tensor
   ( AgentShard,
     awaitShard,
@@ -25,6 +25,7 @@ import Circuit.Category (Category (id, (.)), K (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper (BoundaryEnd (..), HyperGraph (..), PortDir (..), PortEnd (..), Wire (..), hyperEquiv, normalise)
 import Circuit.Machine (Body (Body), Moore, MooreT (..), delay, polesK, register, scan)
+import Circuit.Parser.Json (decodeJson)
 import Circuit.Syntax ((:~>))
 import Circuit.Tensor (Const (..), unConst)
 import Circuit.Traced (Assoc (..), Slide (..), Strength (..), Yank (..))
@@ -36,11 +37,13 @@ import Data.Either (isLeft, isRight)
 import Data.Foldable (traverse_)
 import Data.IORef (newIORef, writeIORef)
 import Data.List (inits, sort, sortOn)
-import Data.Maybe (isJust, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
+import Free.Agent.Acp (AcpClient (..), acpHost, acpInitialize, acpNewSession, defaultAcpConfig, jsonToInt)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (Bus, awaitDurable, awaitQuiescent, awaitSince, busImage, closeBus, openBus, postLocal, readSince, runSeatBus, scribeIO)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
@@ -52,6 +55,7 @@ import Free.Agent.Derivation (chaseLog, dParents, derivation, valid)
 import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, machineProcess, meetingSkeleton, skeletonLabels)
 import Free.Agent.Host (BodyMode (..), Host (..), cliHost, hostShard, mkHost, processHost)
 import Free.Agent.Hyper (both, braidP, copy2, copyP, merge2, mergeP, silent)
+import Free.Agent.Json (objLookup)
 import Free.Agent.Layer (bindFreeAgent, runFreeAgent)
 import Free.Agent.Meeting (AgentBox (..), meetLog, quoter, unchanged)
 import Free.Agent.Pipeline
@@ -91,6 +95,7 @@ import System.Environment (getExecutablePath, setEnv, unsetEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath (takeDirectory, (</>))
 import System.IO (Handle, IOMode (AppendMode), hFlush, withFile)
+import System.Posix.Files (setFileMode)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Prelude hiding (id, (.))
@@ -2400,5 +2405,94 @@ main = do
               && to r2 == ["human"]
               && thread r2 == [2]
           _ -> False
+
+  -------------------------------------------------------------------------
+  -- ACP seat (R2a)
+  --
+  -- A scripted NDJSON peer answers initialize / session/new / prompt with
+  -- a streamed agent_message_chunk — no live kimi.  First on the S-a
+  -- double (protocol precision), then through the wired binary on real
+  -- pipes (integration).  Counterexample: a peer whose response id does
+  -- not echo the request hangs the turn; a chunk that is not a
+  -- session/update notification leaves the reply empty.
+  -------------------------------------------------------------------------
+  putStrLn "ACP seat (R2a)"
+
+  -- Protocol precision: one script step per wire turn.
+  do
+    let ridOf line = case decodeJson (encodeUtf8 line) of
+          Right j -> objLookup "id" j >>= jsonToInt
+          Left _ -> Nothing
+        resp rid body = "{\"jsonrpc\":\"2.0\",\"id\":" <> T.pack (show rid) <> ",\"result\":" <> body <> "}"
+        initOut line = maybe "" (\r -> resp r "{\"protocolVersion\":1,\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}") (ridOf line)
+        newOut line = maybe "" (\r -> resp r "{\"sessionId\":\"fake-session\"}") (ridOf line)
+        chunkNote = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"fake-session\",\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"acp says hi\"}}}}"
+        promptOut line = maybe "" (\r -> resp r "{\"stopReason\":\"end_turn\"}") (ridOf line)
+    pp <- scriptedDouble [Reply initOut, Reply newOut, Reply2 (const chunkNote) promptOut]
+    nref <- newIORef 1
+    let client = AcpClient {acpPorts = pp, acpConfig = defaultAcpConfig, acpNextId = nref}
+    _ <- acpInitialize client 1_000_000
+    (msid, _) <- acpNewSession client 1_000_000 "."
+    assert "R2a initialize and session/new yield the peer's session id" $
+      msid == Just "fake-session"
+    let sid = fromMaybe "fake-session" msid
+        seat = hostSeat (acpHost "acp-seat" 1_000_000 "You are terse." client sid)
+        ask = mkPost "human" ["acp-seat"] "hello"
+    (outs, _) <- closeShardIO (interpretSeat seat) [ask] []
+    assert "R2a the ACP seat answers from the streamed chunk" $
+      case outs of
+        [o] -> from o == "acp-seat" && body o == "acp says hi"
+        _ -> False
+
+  -- Integration: the wired `free-agent acp` binary against a fake peer on
+  -- real pipes, on a tmpdir bus.  The cursor is pinned to 0 up front (the
+  -- cold-boot default would skip the script).
+  do
+    tmp <- getTemporaryDirectory
+    let root = tmp </> "free-agent-r2a-acp"
+        script = root </> "fake-acp.sh"
+        promptFile = root </> "prompt.md"
+        peer =
+          unlines
+            [ "#!/bin/sh",
+              "while IFS= read -r line; do",
+              "  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')",
+              "  case \"$line\" in",
+              "    *'\"method\":\"initialize\"'*)\n      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":1,\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}}\\n' \"$id\" ;;",
+              "    *'\"method\":\"session/new\"'*)\n      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"sessionId\":\"fake-bus\"}}\\n' \"$id\" ;;",
+              "    *'\"method\":\"session/prompt\"'*)\n      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"fake-bus\",\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"acp ack: ok\"}}}}'\n      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"stopReason\":\"end_turn\"}}\\n' \"$id\" ;;",
+              "  esac",
+              "done"
+            ]
+    removePathForcibly root
+    createDirectoryIfMissing True root
+    TIO.writeFile promptFile "You are a test seat."
+    TIO.writeFile script (T.pack peer)
+    setFileMode script 0o755
+    writeCursor root "acp1" 0
+    myPath <- takeDirectory <$> getExecutablePath
+    let bin = myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent"
+    done <- newEmptyMVar
+    _ <-
+      forkIO $ do
+        (code, _out, err) <-
+          readProcessWithExitCode
+            bin
+            ["acp", "--root", root, "--name", "acp1", "--prompt", promptFile, "--acp-cmd", script]
+            ""
+        when (code /= ExitSuccess) (putStrLn err)
+        putMVar done code
+    _ <- postLocal root (mkPost "human" ["acp1"] "ping")
+    _ <- postLocal root (mkPost "human" ["acp1"] (markGlyph Landed <> " done"))
+    code <- takeMVar done
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+        replies = [stamped s | s <- parsed, from (stamped s) == "acp1"]
+    assert "R2a the wired acp seat answers the bus through a real pipe" $
+      code == ExitSuccess
+        && case replies of
+          [r] -> "acp ack: ok" `T.isInfixOf` body r && thread r == [0]
+          _ -> False
+    removePathForcibly root
 
   putStrLn "All tests passed"

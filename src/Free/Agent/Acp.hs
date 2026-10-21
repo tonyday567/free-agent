@@ -35,6 +35,7 @@ module Free.Agent.Acp
     -- * Wire frames
     Frame (..),
     classifyFrame,
+    jsonToInt,
 
     -- * Session updates
     Update (..),
@@ -52,6 +53,9 @@ module Free.Agent.Acp
     PromptResult (..),
     acpCancel,
     acpReadStderr,
+
+    -- * Seat
+    acpHost,
   )
 where
 
@@ -78,6 +82,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text.IO qualified as TIO
 import Data.Time (diffUTCTime, getCurrentTime)
+import Free.Agent.Host (BodyMode (..), Host (..))
 import Free.Agent.Json
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
@@ -533,3 +538,31 @@ acpReadStderr c = go []
         Nothing -> pure (T.unlines (reverse acc))
         Just (Ports.Payload l) -> go (l : acc)
         Just (Ports.Exited _) -> pure (T.unlines (reverse acc))
+
+-- ---------------------------------------------------------------------------
+-- Seat
+-- ---------------------------------------------------------------------------
+
+-- | ACP seat: one persistent child, one session, one prompt per body — the
+-- multi-turn repl the one-shot CLI seats cannot be.  The caller owns the
+-- lifecycle: 'openAcp', 'acpInitialize', 'acpNewSession' (whose session id
+-- is passed here), and 'closeAcp' when the seat stands down.
+acpHost ::
+  -- | Seat name (used as the 'from' field of reply posts).
+  Text ->
+  -- | Deadline for initialize/new/prompt turns, in microseconds.
+  Int ->
+  -- | System prompt text prepended to every message.
+  Text ->
+  AcpClient ->
+  -- | The ACP session id, from 'acpNewSession'.
+  Text ->
+  Host
+acpHost name micros systemPrompt c sid =
+  Host
+    { hostName = name,
+      hostBodyMode = BodyWhole,
+      hostRun = \bodies -> do
+        r <- acpPrompt c micros sid (systemPrompt <> "\n\nUser messages:\n" <> T.unlines bodies)
+        pure [prReply r]
+    }

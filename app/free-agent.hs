@@ -19,6 +19,7 @@ import Circuit.Agent (Name, Post (..), mkPost, sortNub)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.Tensor (closeShardIO)
 import Control.Applicative ((<|>))
+import Control.Exception (finally)
 import Control.Monad (forM_, unless)
 import Data.Foldable (traverse_)
 import Data.IORef (IORef, newIORef, writeIORef)
@@ -27,17 +28,20 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (NominalDiffTime)
+import Free.Agent.Acp (AcpConfig (..), acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, openAcp)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus.Cli (BusCommand, busParser, runBusCommand, runStatus)
 import Free.Agent.Bus.File (QuiesceConfig (..), cursorPath)
 import Free.Agent.Cli.Config
-  ( Backend (..),
+  ( AcpCliConfig (..),
+    Backend (..),
     CommandConfig (..),
     DshConfig (..),
     GatewayCliConfig (..),
     HermesConfig (..),
     KimiConfig (..),
     LlmConfig (..),
+    parseAcpConfig,
     parseCommandConfig,
     parseDshConfig,
     parseHermesConfig,
@@ -141,6 +145,7 @@ commandParser =
         <> command "llm" (info (AgentCmd . BackendLlm <$> parseLlmConfig <**> helper) (progDesc "Direct API seat (old bus-bare)"))
         <> command "cmd" (info (AgentCmd . BackendCommand <$> parseCommandConfig <**> helper) (progDesc "External-command seat"))
         <> command "dsh" (info (AgentCmd . BackendDsh <$> parseDshConfig <**> helper) (progDesc "DSH / local ollama seat"))
+        <> command "acp" (info (AgentCmd . BackendAcp <$> parseAcpConfig <**> helper) (progDesc "ACP seat (kimi acp — persistent repl)"))
         <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <**> helper) (progDesc "Bus log statistics"))
     )
     <|> defaultAgentParser
@@ -199,6 +204,7 @@ runBackend :: Backend -> IO ()
 runBackend (BackendHermes cfg) = runHermes cfg
 runBackend (BackendKimi cfg) = runKimi cfg
 runBackend (BackendDsh cfg) = runDsh cfg
+runBackend (BackendAcp cfg) = runAcp cfg
 runBackend (BackendLlm cfg) = runLlm cfg
 runBackend (BackendCommand cfg) = runCommand cfg
 runBackend (BackendGateway cfg) = runGateway cfg
@@ -358,6 +364,45 @@ runDsh cfg = do
   forM_ (dcDshModelPatch cfg) $ \p ->
     TIO.putStrLn $ "   model patch: " <> T.pack p
   runAgentLoop agentName names (dcRoot cfg) mQuiesce handle
+
+-- ---------------------------------------------------------------------------
+-- ACP seat (persistent repl)
+-- ---------------------------------------------------------------------------
+
+-- | One prompt turn against a live ACP child.
+acpTurnMicros :: Int
+acpTurnMicros = 600_000_000
+
+runAcp :: AcpCliConfig -> IO ()
+runAcp cfg = do
+  validatePrompt (acPromptFile cfg)
+  systemPrompt <- TIO.readFile (acPromptFile cfg)
+  let names = acNames cfg
+      agentName = agentNameOf names
+      -- F3: inject agent name so the LLM knows its posting identity
+      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ". Use this name for all --from fields and cursor checks.\n\n" <> systemPrompt
+      mQuiesce = buildQuiesce (acQuiesce cfg) (acPitboss cfg)
+  client <-
+    openAcp
+      defaultAcpConfig
+        { acpCommand = acAcpCommand cfg,
+          acpWorkDir = acRoot cfg
+        }
+  flip finally (closeAcp client) $ do
+    _ <- acpInitialize client acpTurnMicros
+    (msid, _) <- acpNewSession client acpTurnMicros (acRoot cfg)
+    sid <- case msid of
+      Just s -> pure s
+      Nothing -> do
+        TIO.hPutStrLn stderr "🔴 acp: session/new returned no session id"
+        exitFailure
+    let seat = hostSeat (acpHost agentName acpTurnMicros framedPrompt client sid)
+        handle stored = do
+          outs <- runOneSeat seat stored
+          pure [out | out <- outs, not (T.null (T.strip (body out)))]
+    TIO.putStrLn $ "   protocol: acp (" <> T.pack (acAcpCommand cfg) <> ")"
+    TIO.putStrLn $ "   session: " <> sid
+    runAgentLoop agentName names (acRoot cfg) mQuiesce handle
 
 -- ---------------------------------------------------------------------------
 -- Direct API (llm)

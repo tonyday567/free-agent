@@ -2,6 +2,15 @@
 
 ## unreleased
 
+- **ACP seat wired (R2a).** `free-agent acp` runs a persistent ACP child
+  (`kimi acp` by default, `--acp-cmd` to override) as a bus seat: one
+  `session/new` at startup, one `session/prompt` per ask — the multi-turn
+  repl the one-shot CLI seats cannot be.  `Free.Agent.Acp` gains the
+  `acpHost` seat constructor; the client lifecycle (open/initialize/new/
+  close) rides the runner like the gateway seat.  Pinned by two oracles: a
+  scripted NDJSON peer on the S-a double (protocol precision) and the wired
+  binary against a fake peer on real pipes (integration).  A live
+  `kimi acp` probe remains the runner's seat.
 - **The seam oracle (Q7).** One deterministic index-citing seat runs
   through the pure calculus `loop` (circuits-agent) and the operational
   `runAgentLoop`; the final logs are the same `[Post Text]` once stamps

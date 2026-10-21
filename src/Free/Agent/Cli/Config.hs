@@ -9,6 +9,7 @@ module Free.Agent.Cli.Config
     LlmConfig (..),
     CommandConfig (..),
     GatewayCliConfig (..),
+    AcpCliConfig (..),
     defaultHermesConfig,
     defaultKimiConfig,
     defaultDshConfig,
@@ -20,6 +21,7 @@ module Free.Agent.Cli.Config
     parseLlmConfig,
     parseCommandConfig,
     parseGatewayConfig,
+    parseAcpConfig,
     commonAgentOptions,
     rootOpt,
     namesOpt,
@@ -48,6 +50,7 @@ data Backend
   | BackendLlm LlmConfig
   | BackendCommand CommandConfig
   | BackendGateway GatewayCliConfig
+  | BackendAcp AcpCliConfig
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -120,6 +123,19 @@ data GatewayCliConfig = GatewayCliConfig
     gcwKeyEnv :: String,
     gcwQuiesce :: Maybe Int,
     gcwPitboss :: Maybe Name
+  }
+  deriving (Show)
+
+-- | ACP seat configuration: a persistent 'Circuit.Agent.StdPorts' child
+-- speaking JSON-RPC over stdio (see "Free.Agent.Acp").
+data AcpCliConfig = AcpCliConfig
+  { acRoot :: FilePath,
+    acNames :: [Name],
+    acPromptFile :: FilePath,
+    -- | The ACP executable (default @kimi@; invoked as @kimi acp@).
+    acAcpCommand :: FilePath,
+    acQuiesce :: Maybe Int,
+    acPitboss :: Maybe Name
   }
   deriving (Show)
 
@@ -401,6 +417,25 @@ parseCommandConfig =
         ( argument
             str
             (metavar "ARG..." <> help "Arguments passed to CMD")
+        )
+
+parseAcpConfig :: Parser AcpCliConfig
+parseAcpConfig =
+  AcpCliConfig
+    <$> rootOpt
+    <*> namesOpt
+    <*> promptOpt
+    <*> acpCmdOpt
+    <*> quiesceOpt
+    <*> pitbossOpt
+  where
+    acpCmdOpt =
+      strOption
+        ( long "acp-cmd"
+            <> metavar "CMD"
+            <> value "kimi"
+            <> showDefault
+            <> help "ACP executable (run as CMD acp)"
         )
 
 parseGatewayConfig :: Parser GatewayCliConfig
