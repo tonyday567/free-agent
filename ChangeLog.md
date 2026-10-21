@@ -2,6 +2,17 @@
 
 ## unreleased
 
+- **Redundancy sweep (R2b).** `Free.Agent.Derivation` renamed to
+  `Free.Agent.Lineage` (the dPost/dParents square; `Circuit.Agent` keeps
+  `Derivation`). Dedupes: `writePings` one spelling in `Bus`, the dead
+  3-arg `hermesCli`, `jObjLookup` onto `Json.objLookup`, `scrubReply`
+  folded into `cleanCliOut`, `rootOpt` one spelling. Binned: `runConnector`
+  + `TurnResult` (`runTurn` stays, oracled), `cliQueryBS`, `cliShard`, the
+  non-batch `hermesHost`, the fare usage/pc/bash stubs, and
+  `Free.Agent.Syntax`/`Layer`/`Hyper` with their oracles (runner verdict).
+  Cabal: `-Wno-unused-imports` and the vestigial `mtl` dep dropped, the
+  exposed unused imports cleaned. The audience default is pinned: a seat's
+  reply to an `all`-post addresses the sender only.
 - **ACP seat wired (R2a).** `free-agent acp` runs a persistent ACP child
   (`kimi acp` by default, `--acp-cmd` to override) as a bus seat: one
   `session/new` at startup, one `session/prompt` per ask — the multi-turn
