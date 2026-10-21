@@ -6,7 +6,7 @@ module Axioma.Persist
   )
 where
 
-import Axioma.Common (assert, closeBusDurable, mkPost)
+import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (stamp, stamped, unLog, unframeStored)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -30,7 +30,7 @@ import Free.Agent.Bus
     scribeIO,
   )
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile, removePathForcibly)
+import System.Directory (createDirectoryIfMissing, removeFile, removePathForcibly)
 import System.Environment (getExecutablePath, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -54,11 +54,8 @@ persistTopic = do
   -- (Counterexample under the old code: the takeTMVar ack blocked
   -- forever — these assertions could not even run.)
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-b1-failed"
-        path = root </> "log.jsonl"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-b1-failed"
+    let path = root </> "log.jsonl"
     bus <- openBus root
     _ <- scribeIO bus (mkPost "human" ["seat"] "healthy")
     r0 <- atomically (awaitDurable bus 0)
@@ -92,11 +89,8 @@ persistTopic = do
   -- failure instead of retrying forever (the wave H death-is-content
   -- contract, shared with L5).
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-b2-undurable"
-        path = root </> "log.jsonl"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-b2-undurable"
+    let path = root </> "log.jsonl"
     bus <- openBus root
     _ <- scribeIO bus (mkPost "human" ["seat"] "durable")
     _ <- atomically (awaitDurable bus 0)
@@ -114,9 +108,7 @@ persistTopic = do
     closeBus bus
     removePathForcibly root
     -- Positive half: after a successful persist, delivery flows.
-    let root2 = tmp </> "free-agent-b2-recovered"
-    removePathForcibly root2
-    createDirectoryIfMissing True root2
+    root2 <- tempRoot "free-agent-b2-recovered"
     bus2 <- openBus root2
     _ <- scribeIO bus2 (mkPost "human" ["seat"] "landed")
     _ <- atomically (awaitDurable bus2 0)
@@ -135,9 +127,8 @@ persistTopic = do
     let positional ids =
           let n = length ids
            in ids == map fromIntegral ([0 .. n - 1] :: [Int])
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-b3-ids"
-        path = root </> "log.jsonl"
+    root <- tempRoot "free-agent-b3-ids"
+    let path = root </> "log.jsonl"
         agree bus = do
           rq <- atomically (awaitQuiescent bus)
           assert "B3 persister alive" $ isRight rq
@@ -165,8 +156,6 @@ persistTopic = do
             fileIds == imgIds
           assert "B3 image content equals file content" $
             map stamped (unLog img) == map stamped parsed
-    removePathForcibly root
-    createDirectoryIfMissing True root
     _ <- postLocal root (mkPost "human" ["seat"] "seed")
     bus <- openBus root
     -- Deterministic reconcile: external growth lands while the
@@ -196,13 +185,8 @@ persistTopic = do
   putStrLn "bus post anti-pollution"
 
   do
-    tmp <- getTemporaryDirectory
-    let busRoot = tmp </> "free-agent-b4-bus"
-        badRoot = tmp </> "free-agent-b4-nobus"
-    removePathForcibly busRoot
-    removePathForcibly badRoot
-    createDirectoryIfMissing True busRoot
-    createDirectoryIfMissing True badRoot
+    busRoot <- tempRoot "free-agent-b4-bus"
+    badRoot <- tempRoot "free-agent-b4-nobus"
     -- Create a real bus with a log.jsonl
     _ <- postLocal busRoot (mkPost "test" [] "seed")
     -- Test 1: postLocal on a real bus works
@@ -218,13 +202,8 @@ persistTopic = do
 
   -- CLI-level test: the binary refuses when no log.jsonl and no env var
   do
-    tmp <- getTemporaryDirectory
-    let nobusDir = tmp </> "free-agent-b4-cli-nobus"
-        busDir = tmp </> "free-agent-b4-cli-bus"
-    removePathForcibly nobusDir
-    removePathForcibly busDir
-    createDirectoryIfMissing True nobusDir
-    createDirectoryIfMissing True busDir
+    nobusDir <- tempRoot "free-agent-b4-cli-nobus"
+    busDir <- tempRoot "free-agent-b4-cli-bus"
     -- Create a bus with log.jsonl for the env var test
     _ <- postLocal busDir (mkPost "seed" [] "init")
     -- Find the free-agent binary relative to the axioma binary
@@ -271,16 +250,12 @@ persistTopic = do
 
   -- Test (a): concurrent posters produce a contiguous total order.
   do
-    tmp <- getTemporaryDirectory
     let posters = ["a", "b", "c", "d"]
         postsPerPoster = 5
         expectedBodies =
           [name <> "-" <> T.pack (show i) | name <- posters, i <- [1 .. postsPerPoster]]
-        trialRoot n = tmp </> ("free-agent-daemon-order-" <> show (n :: Int))
         runTrial n = do
-          let root = trialRoot n
-          removePathForcibly root
-          createDirectoryIfMissing True root
+          root <- tempRoot "free-agent-daemon-order"
           tid <- forkIO (runDaemon @Text root)
           threadDelay 100_000
           mvars <-
@@ -315,15 +290,12 @@ persistTopic = do
           assert ("daemon total order: timestamps monotone by id (trial " <> show n <> ")") $
             and (zipWith (<=) (map (fst . stamp) parsed) (drop 1 (map (fst . stamp) parsed)))
           pure root
-    roots <- mapM runTrial [1 .. 5]
+    roots <- mapM runTrial [1 .. 5 :: Int]
     mapM_ removePathForcibly roots
 
   -- Test (b): malformed FIFO input is skipped; the daemon survives.
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-daemon-garbage"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-daemon-garbage"
     tid <- forkIO (runDaemon @Text root)
     threadDelay 100_000
     -- Send a line that is not a valid bare post.

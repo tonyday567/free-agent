@@ -7,7 +7,7 @@ module Axioma.Transcript
   )
 where
 
-import Axioma.Common (assert, mkPost)
+import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Tensor (AgentShard, closeShardIO)
 import Data.IORef (newIORef, writeIORef)
@@ -16,7 +16,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
 import Free.Agent.Host (cliHost, hostShard)
-import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removePathForcibly)
+import System.Directory (doesFileExist, removePathForcibly)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 
@@ -31,14 +31,11 @@ transcriptTopic = do
   putStrLn "Transcript oracle"
 
   do
-    tmp <- getTemporaryDirectory
-    let dir = tmp </> "free-agent-transcript-axioma"
-        script = dir </> "fake-cli.sh"
+    dir <- tempRoot "free-agent-transcript-axioma"
+    let script = dir </> "fake-cli.sh"
         sf = dir </> "session"
         transcriptLog = dir </> "transcripts" </> "fake.jsonl"
         badTranscriptLog = script </> "transcripts" </> "fake.jsonl"
-    removePathForcibly dir
-    createDirectoryIfMissing True dir
     TIO.writeFile script $
       T.pack $
         unlines
@@ -99,13 +96,10 @@ transcriptTopic = do
   -- transcript log stays empty and this test fails at the length check.
 
   do
-    tmp <- getTemporaryDirectory
-    let dir = tmp </> "free-agent-transcript-host-axioma"
-        script = dir </> "fake-echo.sh"
+    dir <- tempRoot "free-agent-transcript-host-axioma"
+    let script = dir </> "fake-echo.sh"
         sf = dir </> "session"
         transcriptLog = dir </> "transcripts" </> "fake.jsonl"
-    removePathForcibly dir
-    createDirectoryIfMissing True dir
     TIO.writeFile script $
       T.pack $
         unlines

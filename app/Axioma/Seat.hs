@@ -7,7 +7,7 @@ module Axioma.Seat
   )
 where
 
-import Axioma.Common (assert, mkPost)
+import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Tensor (AgentShard, closeShardIO)
 import Circuit.Category (Category (id, (.)))
@@ -32,7 +32,7 @@ import Free.Agent.Pipeline
   )
 import Free.Agent.Pipeline qualified as P
 import Free.Agent.Seat (FreeSeat (..), hostSeat, interpretSeat, pipelineSeat)
-import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile)
+import System.Directory (doesFileExist, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import Prelude hiding (id, (.))
@@ -276,11 +276,9 @@ seatTopic = do
   putStrLn "CLI host sketch"
 
   do
-    tmp <- getTemporaryDirectory
-    let dir = tmp </> "free-agent-cli-axioma"
-        script = dir </> "fake-cli.sh"
+    dir <- tempRoot "free-agent-cli-axioma"
+    let script = dir </> "fake-cli.sh"
         sf = dir </> "session"
-    createDirectoryIfMissing True dir
     se <- doesFileExist sf
     when se (removeFile sf)
     TIO.writeFile script $

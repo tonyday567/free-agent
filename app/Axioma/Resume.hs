@@ -6,7 +6,7 @@ module Axioma.Resume
   )
 where
 
-import Axioma.Common (assert, closeBusDurable, mkPost)
+import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (stamped, unframeStored)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
@@ -18,7 +18,7 @@ import Free.Agent.Bus (openBus, postLocal, runSeatBus)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
 import Free.Agent.Host (mkHost)
 import Free.Agent.Seat (hostSeat)
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly)
+import System.Directory (removePathForcibly)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 
@@ -36,10 +36,7 @@ resumeTopic = do
 
   -- Test (a): empty/whitespace replies are not posted; the cursor advances.
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-b2-empty"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-b2-empty"
     _ <- postLocal root (mkPost "human" ["echo"] "hello")
     _ <- postLocal root (mkPost "human" ["echo"] "  ")
     _ <- postLocal root (mkPost "human" ["echo"] "world")
@@ -74,10 +71,7 @@ resumeTopic = do
   -- Exercise the other fix site (runAgentLoop via runSeatBus — the same
   -- filter applies in both common paths).
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-b2-emptybody"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-b2-emptybody"
     _ <- postLocal root (mkPost "human" ["silent"] "ping")
     _ <- postLocal root (mkPost "human" ["silent"] (markGlyph Landed <> " done"))
     bus <- openBus root
@@ -118,10 +112,7 @@ resumeTopic = do
   -- Test (b): handler returning (empty) → scrubbed to empty → B2 drop → no post.
   -- Uses cleanCliOut to simulate the cliHost scrubbing path.
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-b8-empty"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-b8-empty"
     _ <- postLocal root (mkPost "human" ["hermes"] "ping")
     _ <- postLocal root (mkPost "human" ["hermes"] "real")
     _ <- postLocal root (mkPost "human" ["hermes"] (markGlyph Landed <> " done"))
@@ -151,13 +142,10 @@ resumeTopic = do
 
   -- Test (a): transient failure → retry with same session id
   do
-    tmp <- getTemporaryDirectory
-    let dir = tmp </> "free-agent-b6a"
-        script = dir </> "fake.sh"
+    dir <- tempRoot "free-agent-b6a"
+    let script = dir </> "fake.sh"
         sf = dir </> "session"
         attemptFile = dir </> "attempt"
-    removePathForcibly dir
-    createDirectoryIfMissing True dir
     -- Seed the session file with a known id.
     TIO.writeFile sf "test-sid-b6a"
     -- Fake CLI: fails on first call (exit 1), succeeds on second,
@@ -203,12 +191,9 @@ resumeTopic = do
 
   -- Test (b): stale session → fresh, new .sid written
   do
-    tmp <- getTemporaryDirectory
-    let dir = tmp </> "free-agent-b6b"
-        script = dir </> "fake.sh"
+    dir <- tempRoot "free-agent-b6b"
+    let script = dir </> "fake.sh"
         sf = dir </> "session"
-    removePathForcibly dir
-    createDirectoryIfMissing True dir
     TIO.writeFile sf "old-stale-sid"
     -- Fake CLI: returns a stale-session message, then a fresh id.
     TIO.writeFile script $
@@ -254,13 +239,10 @@ resumeTopic = do
   -- If someone regresses hermesCli back to code-is-stale, this test
   -- catches it by asserting no --resume on the second call.
   do
-    tmp <- getTemporaryDirectory
-    let dir = tmp </> "free-agent-b6c"
-        script = dir </> "fake.sh"
+    dir <- tempRoot "free-agent-b6c"
+    let script = dir </> "fake.sh"
         sf = dir </> "session"
         attemptFile = dir </> "attempt"
-    removePathForcibly dir
-    createDirectoryIfMissing True dir
     TIO.writeFile sf "should-not-survive"
     TIO.writeFile script $
       T.pack $

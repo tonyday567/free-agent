@@ -7,7 +7,7 @@ module Axioma.Quiesce
   )
 where
 
-import Axioma.Common (assert, iterateAgent, mkPost)
+import Axioma.Common (assert, iterateAgent, mkPost, tempRoot)
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (frameStored, parseTimeText, stamped, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), markGlyph, markOf)
@@ -16,7 +16,6 @@ import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus.File (Decision (..), Flow (..), QEvent (..), quiesceAgent, tailLog)
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly)
 import System.FilePath ((</>))
 
 quiesceTopic :: IO ()
@@ -29,15 +28,12 @@ quiesceTopic = do
   -------------------------------------------------------------------------
   putStrLn "tailLog"
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-tail-axioma"
-        path = root </> "log.jsonl"
+    root <- tempRoot "free-agent-tail-axioma"
+    let path = root </> "log.jsonl"
         mkStored i ts f t b = case parseTimeText ts of
           Just ts' -> Stamped (ts', i) (Post f t [] b)
           Nothing -> error $ "bad timestamp: " <> show ts
         frame i ts f t b = frameStored @Text (mkStored i ts f t b)
-    removePathForcibly root
-    createDirectoryIfMissing True root
     -- Write one complete line and one partial line (no trailing newline).
     TIO.writeFile
       path

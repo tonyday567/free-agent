@@ -8,7 +8,7 @@ module Axioma.Bus
   )
 where
 
-import Axioma.Common (assert, closeBusDurable, mkPost)
+import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
 import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, loop, tape, watch)
 import Circuit.Agent.Framing (parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
@@ -33,7 +33,7 @@ import Free.Agent.BusStats
   )
 import Free.Agent.Host (mkHost)
 import Free.Agent.Seat (hostSeat)
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly)
+import System.Directory (removePathForcibly)
 import System.FilePath ((</>))
 
 busTopic :: IO ()
@@ -130,10 +130,7 @@ busTopic = do
   -------------------------------------------------------------------------
   putStrLn "bus seat"
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-seat-axioma"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-seat-axioma"
     _ <- postLocal root (mkPost "human" ["echo"] "hello")
     _ <- postLocal root (mkPost "human" ["echo"] "🟢 landed")
     bus <- openBus root
@@ -157,10 +154,7 @@ busTopic = do
   -------------------------------------------------------------------------
   putStrLn "bus seat supervision"
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-supervision-axioma"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-supervision-axioma"
     _ <- postLocal root (mkPost "human" ["fragile"] "hello")
     _ <- postLocal root (mkPost "human" ["fragile"] "boom")
     _ <- postLocal root (mkPost "human" ["fragile"] "world")
@@ -199,10 +193,7 @@ busTopic = do
   -------------------------------------------------------------------------
   putStrLn "bus seat self-halt"
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-selfhalt-axioma"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-selfhalt-axioma"
     _ <- postLocal root (mkPost "human" ["echo"] "task")
     _ <- postLocal root (mkPost "human" ["echo"] "hello")
     _ <- postLocal root (mkPost "human" ["echo"] "finish")
@@ -241,11 +232,8 @@ busTopic = do
   -------------------------------------------------------------------------
   putStrLn "multi-seat card meeting"
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-meeting-axioma"
-        card = "panel"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-meeting-axioma"
+    let card = "panel"
     _ <- postLocal root (mkPost "human" [card] "discuss")
     _ <- postLocal root (mkPost "human" [card] "🟢 landed")
     bus <- openBus root
@@ -286,10 +274,7 @@ busTopic = do
   -------------------------------------------------------------------------
   putStrLn "reply audience"
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-r2b-audience"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-r2b-audience"
     _ <- postLocal root (mkPost "human" ["all"] "ping")
     _ <- postLocal root (mkPost "human" ["aud"] (markGlyph Landed <> " done"))
     bus <- openBus root
@@ -316,14 +301,11 @@ busTopic = do
   -- asks are planted after (a cold-boot cursor would skip pre-planted
   -- history — production seats do not answer the past).
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-m1a-ancestry"
-        path = root </> "log.jsonl"
+    root <- tempRoot "free-agent-m1a-ancestry"
+    let path = root </> "log.jsonl"
         plant = do
           _ <- postLocal root (mkPost "human" ["m1a"] "ask")
           postLocal root (mkPost "human" ["m1a"] (markGlyph Landed <> " done"))
-    removePathForcibly root
-    createDirectoryIfMissing True root
     -- Pin the cursor to 0 up front (the Q7 idiom): fork-first + plant is
     -- a scheduling race under -threaded — if the plant wins, the seat's
     -- latestPostId cold-boot skips the script.
@@ -353,14 +335,11 @@ busTopic = do
 
   -- A handler exception produces a 🔴 citing the ask.
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-m1a-escalation"
-        path = root </> "log.jsonl"
+    root <- tempRoot "free-agent-m1a-escalation"
+    let path = root </> "log.jsonl"
         plant = do
           _ <- postLocal root (mkPost "human" ["m1x"] "boom-ask")
           postLocal root (mkPost "human" ["m1x"] (markGlyph Landed <> " done"))
-    removePathForcibly root
-    createDirectoryIfMissing True root
     -- Pin the cursor to 0 up front (the Q7 idiom; see the ancestry test).
     writeCursor root "m1x" 0
     done <- newEmptyMVar
@@ -386,11 +365,8 @@ busTopic = do
 
   -- An incoming 🔴 relayed to the pitboss cites the escalation it answers.
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-m1a-relay"
-        path = root </> "log.jsonl"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-m1a-relay"
+    let path = root </> "log.jsonl"
     -- Pin the cursor to 0 up front (the Q7 idiom; see the ancestry test).
     writeCursor root "m1r" 0
     done <- newEmptyMVar
@@ -469,11 +445,8 @@ busTopic = do
     -- Operational side: the cursor is pinned to 0 up front — the
     -- cold-boot default (latestPostId) would skip the script, which is
     -- exactly the divergence this test exists to catch.
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-q7-seam"
-        logPath = root </> "log.jsonl"
-    removePathForcibly root
-    createDirectoryIfMissing True root
+    root <- tempRoot "free-agent-q7-seam"
+    let logPath = root </> "log.jsonl"
     writeCursor root seatName 0
     -- The pure calculus feeds 'loop' the entire tape in one batch: the
     -- seat sees all four asks at once (replies carry ask-indices, not

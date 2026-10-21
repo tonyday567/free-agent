@@ -6,7 +6,7 @@ module Axioma.Tensor
   )
 where
 
-import Axioma.Common (assert, mkPost)
+import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (Stamped, stamp, stamped, unframeStored)
 import Control.Concurrent (forkIO, killThread, threadDelay)
@@ -17,7 +17,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.Daemon (postViaDaemon, runDaemon)
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly)
+import System.Directory (removePathForcibly)
 import System.FilePath ((</>))
 
 tensorTopic :: IO ()
@@ -37,7 +37,6 @@ tensorTopic = do
   putStrLn "Tensor/par probe"
 
   do
-    tmp <- getTemporaryDirectory
     let exchangeA = [("a1", "A1"), ("a2", "A2")]
         exchangeB = [("b1", "B1"), ("b2", "B2")]
         orderedAB = exchangeA <> exchangeB
@@ -78,9 +77,7 @@ tensorTopic = do
     officeOnTrials <-
       mapM
         ( \n -> do
-            let root = tmp </> ("free-agent-probe-on-" <> show (n :: Int))
-            removePathForcibly root
-            createDirectoryIfMissing True root
+            root <- tempRoot "free-agent-probe-on"
             ag <- runViaDaemon root orderedAB
             content <- TIO.readFile (root </> "log.jsonl")
             let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -95,18 +92,14 @@ tensorTopic = do
           all (== on0) (drop 1 officeOnTrials)
 
         -- Office off, order AB: checker sees A before B.
-        let rootAB = tmp </> "free-agent-probe-off-ab"
-        removePathForcibly rootAB
-        createDirectoryIfMissing True rootAB
+        rootAB <- tempRoot "free-agent-probe-off-ab"
         agAB <- runViaPostLocal rootAB orderedAB
         contentAB <- TIO.readFile (rootAB </> "log.jsonl")
         let parsedAB = mapMaybe (unframeStored @Text) (T.lines contentAB)
         assert "office-off AB invariant" $ invariantSet "checker" parsedAB
 
         -- Office off, order BA: checker sees B before A.
-        let rootBA = tmp </> "free-agent-probe-off-ba"
-        removePathForcibly rootBA
-        createDirectoryIfMissing True rootBA
+        rootBA <- tempRoot "free-agent-probe-off-ba"
         agBA <- runViaPostLocal rootBA orderedBA
         contentBA <- TIO.readFile (rootBA </> "log.jsonl")
         let parsedBA = mapMaybe (unframeStored @Text) (T.lines contentBA)
@@ -120,11 +113,6 @@ tensorTopic = do
         assert "daemon-on aggregate matches office-off AB" $
           on0 == agAB
 
-        mapM_
-          removePathForcibly
-          [ tmp </> ("free-agent-probe-on-" <> show n)
-          | n <- [1 .. 5] :: [Int]
-          ]
         removePathForcibly rootAB
         removePathForcibly rootBA
       _ -> assert "daemon-on produced at least one trial" False

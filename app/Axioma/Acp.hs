@@ -6,7 +6,7 @@ module Axioma.Acp
   )
 where
 
-import Axioma.Common (assert, mkPost)
+import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (stamped, unframeStored)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
@@ -26,7 +26,7 @@ import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.File (writeCursor)
 import Free.Agent.Json (objLookup)
 import Free.Agent.Seat (hostSeat, interpretSeat)
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly)
+import System.Directory (removePathForcibly)
 import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -77,9 +77,8 @@ acpTopic = do
   -- real pipes, on a tmpdir bus.  The cursor is pinned to 0 up front (the
   -- cold-boot default would skip the script).
   do
-    tmp <- getTemporaryDirectory
-    let root = tmp </> "free-agent-r2a-acp"
-        script = root </> "fake-acp.sh"
+    root <- tempRoot "free-agent-r2a-acp"
+    let script = root </> "fake-acp.sh"
         promptFile = root </> "prompt.md"
         peer =
           unlines
@@ -93,8 +92,6 @@ acpTopic = do
               "  esac",
               "done"
             ]
-    removePathForcibly root
-    createDirectoryIfMissing True root
     TIO.writeFile promptFile "You are a test seat."
     TIO.writeFile script (T.pack peer)
     setFileMode script 0o755
