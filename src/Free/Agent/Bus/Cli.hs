@@ -31,7 +31,6 @@ import Data.Foldable (traverse_)
 import Data.List (isPrefixOf, sort, sortOn)
 import Data.Maybe (listToMaybe, mapMaybe, maybe)
 import Data.Ord (Down (..))
-import Free.Agent.Cli.Config (rootOpt)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -40,6 +39,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (readCursor, writeCursor)
+import Free.Agent.Cli.Config (rootOpt)
 import Options.Applicative
 import System.Directory (doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
