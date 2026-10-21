@@ -7,6 +7,7 @@ module Axioma.Common
     runMono,
     closeBusDurable,
     mkPost,
+    tempRoot,
     boxLabels,
     countSpiders,
   )
@@ -21,7 +22,9 @@ import Data.Either (isRight)
 import Data.Text (Text)
 import Free.Agent.Bus (Bus, awaitQuiescent, closeBus)
 import Free.Agent.Diagram (skeletonLabels)
+import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile)
 import System.Exit (exitFailure)
+import System.IO (hClose, openTempFile)
 
 assert :: String -> Bool -> IO ()
 assert msg ok =
@@ -53,6 +56,21 @@ closeBusDurable bus = do
 
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a ds []
+
+-- | Per-run unique directory under the temp root: @TMPDIR/name-XXXXXX@,
+-- created fresh through 'openTempFile''s exclusive naming. Sibling suite
+-- instances used to share fixed names and orphan each other's daemons on
+-- unlinked fifos (wave H); a unique root per run kills that class. The
+-- directory exists on return; callers should 'removePathForcibly' when
+-- done.
+tempRoot :: String -> IO FilePath
+tempRoot name = do
+  tmp <- getTemporaryDirectory
+  (p, h) <- openTempFile tmp (name <> "-")
+  hClose h
+  removeFile p
+  createDirectoryIfMissing True p
+  pure p
 
 -- | The 'SBox' labels of a meeting skeleton, in composition order (meeting
 -- skeletons contain only boxes, spiders and swaps besides wires).

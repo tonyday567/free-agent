@@ -36,7 +36,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (LocalTime, NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, localTimeToUTC, utc)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
-import Free.Agent.Bus (postLocal)
+import Free.Agent.Bus (postLocal, readFileStrict)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (readCursor, writeCursor)
 import Free.Agent.Cli.Config (rootOpt)
@@ -299,7 +299,7 @@ runRead root names since = do
   exists <- doesFileExist path
   unless exists $ pure ()
   when exists $ do
-    content <- TIO.readFile path
+    content <- readFileStrict path
     let lines' = T.lines content
     traverse_ TIO.putStrLn (mapMaybe (filterStoredSince names sinceId) lines')
 
@@ -336,7 +336,7 @@ runPingWatch root name = do
   withManager $ \mgr -> do
     done <- newEmptyMVar
     _ <- watchDir mgr root (\ev -> takeFileName (eventPath ev) == pingName) $ \_ev -> do
-      txt <- TIO.readFile pingPath
+      txt <- readFileStrict pingPath
       TIO.putStrLn txt
       putMVar done ()
     takeMVar done
@@ -359,7 +359,7 @@ runStatus root threshold = do
   unless exists $ do
     TIO.putStrLn ("🔴 " <> T.pack root <> " — no log.jsonl; not a bus")
     exitFailure
-  content <- TIO.readFile path
+  content <- readFileStrict path
   let ls = filter (not . T.null) (T.lines content)
       posts = mapMaybe (unframeStored @Text) ls
       idless = length ls - length posts

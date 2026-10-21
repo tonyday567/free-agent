@@ -41,6 +41,12 @@ module Free.Agent.Bus
     appendStoredPosts,
     appendStoredPostsUnlocked,
     writePings,
+    withLogLock,
+    readFileStrict,
+    readLogStrict,
+    withBusFiles,
+    withLogRead,
+    touchLog,
 
     -- * Durability
     Persist (..),
@@ -65,14 +71,15 @@ import Circuit.Agent.Framing
     Uncons (..),
     encodeLog,
     frameStored,
-    readLogFile,
     stamp,
     stamped,
+    unframeStored,
     pattern Stamped,
   )
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Circuit.Agent.Tensor (closeShardIO)
-import Control.Concurrent (ThreadId, forkFinally, killThread)
+import Control.Concurrent (ThreadId, forkFinally, killThread, threadDelay)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM
   ( STM,
     TVar,
@@ -80,6 +87,7 @@ import Control.Concurrent.STM
     check,
     newTVarIO,
     readTVar,
+    readTVarIO,
     retry,
     writeTVar,
   )
@@ -88,15 +96,19 @@ import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
 import Data.List (maximum)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
 import Free.Agent.Seat (FreeSeat, interpretSeat)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FileLock (SharedExclusive (Exclusive), withFileLock)
+import System.FileLock (SharedExclusive (Exclusive), withTryFileLock)
 import System.FilePath (takeDirectory, (<.>), (</>))
-import System.IO (IOMode (AppendMode), withFile)
+import System.IO (Handle, IOMode (AppendMode, ReadMode), withFile)
+import System.IO.Unsafe (unsafePerformIO)
+import System.Timeout (timeout)
 import Text.Printf (printf)
 
 -- | Live bus handle, polymorphic in the post body type.
@@ -139,8 +151,8 @@ openBus root = do
   unless exists $ do
     -- Create an empty log file so out-of-process tailers have something to
     -- watch before the first post arrives.
-    withFile path AppendMode (\_ -> pure ())
-  initial <- if exists then readLogFile path else pure (Log [])
+    touchLog path
+  initial <- if exists then readLogStrict path else pure (Log [])
   tv <- newTVarIO initial
   dur <- newTVarIO (fromIntegral (length (unLog initial)))
   st <- newTVarIO Persisting
@@ -226,9 +238,9 @@ postLocal root p = do
   createDirectoryIfMissing True root
   let path = root </> "log.jsonl"
   exists <- doesFileExist path
-  unless exists $ withFile path AppendMode (\_ -> pure ())
+  unless exists $ touchLog path
   ts <- getCurrentTime
-  stored <- withFileLock (path <.> "lock") Exclusive $ \_lock -> do
+  stored <- withLogLock (path <.> "lock") $ do
     n <- BS.count 0x0A <$> BS.readFile path
     let stored = Stamped (ts, fromIntegral n) p
     appendStoredPostsUnlocked path [stored]
@@ -236,17 +248,105 @@ postLocal root p = do
   writePings path [stored]
   pure stored
 
+-- | Acquire the log's exclusive lock without ever blocking the runtime.
+--
+-- 'System.FileLock.withFileLock' blocks in @flock(2)@; a same-process
+-- waiter then wedges a non-threaded RTS, whose single OS thread sleeps in
+-- the C call while the holder is never rescheduled to release (wave H,
+-- the B3 watermark hang). 'withTryFileLock' never blocks: a busy lock is
+-- a short sleep and another try, so waiters and holders always share the
+-- runtime. Bounded at ~10 s so a stuck holder fails loudly instead of
+-- spinning silently.
+--
+-- The action rides 'withBusFiles' first: GHC's RTS lock is per-process,
+-- so same-process writers must serialise before anyone reaches the
+-- flock. Lock order is always mutex-then-flock; 'appendStoredPostsUnlocked'
+-- and the persister's reads are the raw inner spellings (already inside).
+withLogLock :: FilePath -> IO a -> IO a
+withLogLock lockPath act = withBusFiles (go (20_000 :: Int))
+  where
+    go 0 =
+      ioError
+        ( userError
+            ("Free.Agent.Bus: could not acquire " <> lockPath <> " within 10s; lock holder stuck?")
+        )
+    go n = do
+      m <- withTryFileLock lockPath Exclusive (\_lock -> act)
+      case m of
+        Just r -> pure r
+        Nothing -> threadDelay 500 >> go (n - 1)
+
+-- | Process-wide mutex over bus-path handle lifetimes.
+--
+-- GHC's RTS locks files in-process per (dev,ino) and the modes conflict
+-- fatally: a second AppendMode open while one is alive throws "resource
+-- busy (file is locked)", and a ReadMode open against a held append
+-- handle throws the same (wave H — the m1a crashes: the runner's tailLog
+-- touch and drain racing the planter's postLocal append). The flock
+-- serialises writers across processes; this serialises the
+-- open/act/close window within one process. Never taken twice on one
+-- thread: combinators that run inside a 'withLogLock' action use the raw
+-- spelling instead.
+logWriteMutex :: MVar ()
+logWriteMutex = unsafePerformIO (newMVar ())
+{-# NOINLINE logWriteMutex #-}
+
+-- | Serialize an action against every other same-process bus-path file
+-- op. For callers outside this module (receipt writes in the daemon,
+-- claim writes) whose paths share the hazard but not the helpers.
+withBusFiles :: IO a -> IO a
+withBusFiles act = withMVar logWriteMutex (\_ -> act)
+
+-- | Read-mode open of a bus path, serialised process-wide.
+withLogRead :: FilePath -> (Handle -> IO a) -> IO a
+withLogRead path act = withBusFiles $ withFile path ReadMode act
+
+-- | Create the log if absent. Touches race appends in this process the
+-- same way appends race each other, so the touch rides the same mutex.
+touchLog :: FilePath -> IO ()
+touchLog path = withBusFiles $ withFile path AppendMode (\_ -> pure ())
+
+-- | Strict, bracketed whole-file read.
+--
+-- A lazy 'TIO.readFile' closes its handle by finalizer, and GHC's RTS
+-- lock conflicts fatally between a held handle of one mode and any open
+-- of another: reads and writes of a bus path must serialise in-process
+-- (wave H — the m1a crashes, the daemon receipt crash). Every read of a
+-- bus path this process may also write goes through here. Callers already
+-- inside 'withLogLock' use the raw 'BS.readFile' spelling instead.
+readFileStrict :: FilePath -> IO Text
+readFileStrict path = withBusFiles (TE.decodeUtf8 <$> BS.readFile path)
+
+-- | Strictly read and parse a stored log.
+--
+-- 'Circuit.Agent.Framing.readLogFile' is the lazy spelling; the persister
+-- (already inside 'withLogLock') uses this shape raw, and 'openBus' must
+-- not hold a pin on the log while writers append (wave H).
+readLogStrict :: (PostBody a) => FilePath -> IO (Log a)
+readLogStrict path = parseLog <$> readFileStrict path
+
+-- | The parse half of 'readLogStrict', for callers that already hold the
+-- process write mutex (the persister's reconcile).
+readLogRaw :: (PostBody a) => FilePath -> IO (Log a)
+readLogRaw path = parseLog . TE.decodeUtf8 <$> BS.readFile path
+
+parseLog :: (PostBody a) => Text -> Log a
+parseLog content = Log (mapMaybe unframeStored (filter (not . T.null) (T.lines content)))
+
 -- | Append stamped posts under the exclusive file lock.
 --
 -- Shared durable image primitive for the live bus persistence loop. Does not
 -- assign ids or timestamps.
 appendStoredPosts :: (PostBody a) => FilePath -> [Stamped a] -> IO ()
 appendStoredPosts path posts =
-  withFileLock (path <.> "lock") Exclusive $ \_lock ->
+  withLogLock (path <.> "lock") $
     appendStoredPostsUnlocked path posts
 
--- | Append stamped posts without taking the lock. Caller must already hold
--- @path.lock@ (or otherwise guarantee exclusive writers).
+-- | Append stamped posts without taking the lock. Caller must already
+-- hold @path.lock@ via 'withLogLock' (or otherwise guarantee exclusive
+-- writers) — which also puts this call inside the process-wide
+-- 'logWriteMutex', so this is the raw append: taking the mutex here
+-- would self-deadlock.
 appendStoredPostsUnlocked :: (PostBody a) => FilePath -> [Stamped a] -> IO ()
 appendStoredPostsUnlocked path posts =
   withFile path AppendMode $ \h ->
@@ -355,6 +455,12 @@ runSeatBus bus agentName names seat = loop 0
 -- on every interleaving of 'scribeIO' and 'postLocal'. A file that shrank
 -- below the watermark is corruption: fail loudly with a named error.
 --
+-- The STM wait rides a one-second 'timeout': a bus that only receives
+-- 'postLocal' traffic must still reconcile — without the tick the
+-- persister sleeps until the next local scribe and external posts sit
+-- unreconciled indefinitely (wave H: the L1 lock stress caught the image
+-- lagging 99 posts behind the file).
+--
 -- Never returns; any exit (via 'forkFinally' in 'openBus') writes
 -- 'Failed' — death is content.
 persistLoop :: (PostBody a) => FilePath -> TVar (Log a) -> TVar PostId -> IO ()
@@ -362,12 +468,18 @@ persistLoop path logVar durVar = loop
   where
     lockPath = path <.> "lock"
     loop = do
-      (d, image) <- atomically $ do
-        d <- readTVar durVar
-        image <- readTVar logVar
-        check (fromIntegral (length (unLog image)) > d)
-        pure (d, image)
-      withFileLock lockPath Exclusive $ \_lock -> do
+      wake <-
+        timeout 1_000_000 $
+          atomically $ do
+            d <- readTVar durVar
+            image <- readTVar logVar
+            check (fromIntegral (length (unLog image)) > d)
+            pure (d, image)
+      let mImage = fmap snd wake
+      d <- case wake of
+        Just (d0, _) -> pure d0
+        Nothing -> readTVarIO durVar
+      withLogLock lockPath $ do
         m <- countLines path
         case compare m d of
           LT -> do
@@ -375,13 +487,16 @@ persistLoop path logVar durVar = loop
               ( userError
                   "Free.Agent.Bus: log.jsonl shrank below the durable watermark — external truncation?"
               )
-          EQ -> do
-            let delta = drop (fromIntegral d) (unLog image)
-            appendStoredPostsUnlocked path delta
-            writePings path delta
-            atomically (writeTVar durVar (d + fromIntegral (length delta)))
+          EQ -> case mImage of
+            Just image
+              | let delta = drop (fromIntegral d) (unLog image),
+                not (null delta) -> do
+                  appendStoredPostsUnlocked path delta
+                  writePings path delta
+                  atomically (writeTVar durVar (d + fromIntegral (length delta)))
+            _ -> pure ()
           GT -> do
-            full <- readLogFile path
+            full <- readLogRaw path
             let ext = drop (fromIntegral d) (unLog full)
             renumbered <- atomically $ do
               img <- unLog <$> readTVar logVar

@@ -21,6 +21,7 @@ import Control.Monad (when)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Free.Agent.Bus (readFileStrict, withBusFiles)
 import System.Directory (doesFileExist, listDirectory, removeFile)
 import System.FilePath ((</>))
 
@@ -40,7 +41,7 @@ claimTask root n name = do
       TIO.putStrLn $ "task-" <> T.pack (show n) <> " held by " <> holder
       pure False
     else do
-      TIO.writeFile path (name <> " 0")
+      withBusFiles (TIO.writeFile path (name <> " 0"))
       pure True
 
 -- | Who holds task @n@?  Returns 'Nothing' if unclaimed.
@@ -55,7 +56,7 @@ checkTask root n = do
 -- | Read the first word of a claim file (the holder name).
 readHolder :: FilePath -> IO Text
 readHolder path = do
-  txt <- TIO.readFile path
+  txt <- readFileStrict path
   pure $ T.takeWhile (/= ' ') (T.strip txt)
 
 -- | Release (delete) the claim on task @n@.

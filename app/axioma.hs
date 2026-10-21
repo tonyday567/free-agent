@@ -11,6 +11,7 @@ import Axioma.Bundle (bundleTopic)
 import Axioma.Bus (busTopic)
 import Axioma.Connector (connectorTopic)
 import Axioma.Diagram (diagramTopic)
+import Axioma.Lifecycle (lifecycleTopic)
 import Axioma.Meeting (meetingTopic)
 import Axioma.Persist (persistTopic)
 import Axioma.Quiesce (quiesceTopic)
@@ -36,6 +37,7 @@ data Topic
   | Tensor
   | Connector
   | Acp
+  | Lifecycle
   deriving (Show, Eq, Bounded, Enum)
 
 topicName :: Topic -> String
@@ -53,6 +55,7 @@ topicName Resume = "resume"
 topicName Tensor = "tensor"
 topicName Connector = "connector"
 topicName Acp = "acp"
+topicName Lifecycle = "lifecycle"
 
 topicDesc :: Topic -> String
 topicDesc All = "run all topics"
@@ -69,6 +72,7 @@ topicDesc Resume = "empty-reply drop (B2), empty-sentinel drop (B8), resume fix 
 topicDesc Tensor = "tensor/par probe: the stamping office as a connective toggle"
 topicDesc Connector = "connector turn grammar (B7): zero/one/two-frame turns"
 topicDesc Acp = "ACP seat (R2a): scripted double + wired-binary integration"
+topicDesc Lifecycle = "lifecycle hygiene (H): lock stress, daemon liveness, death honesty (L1-L5)"
 
 topicParser :: Parser Topic
 topicParser =
@@ -110,6 +114,7 @@ runTopic Resume = resumeTopic
 runTopic Tensor = tensorTopic
 runTopic Connector = connectorTopic
 runTopic Acp = acpTopic
+runTopic Lifecycle = lifecycleTopic
 
 main :: IO ()
 main = do

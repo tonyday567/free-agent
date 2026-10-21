@@ -52,14 +52,13 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
+import Free.Agent.Bus (readFileStrict, touchLog, withLogRead)
 import System.Directory (doesFileExist)
 import System.FSNotify (Event (..), watchDir, withManager)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO
-  ( IOMode (AppendMode, ReadMode),
-    SeekMode (AbsoluteSeek),
+  ( SeekMode (AbsoluteSeek),
     hSeek,
-    withFile,
   )
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
@@ -141,7 +140,7 @@ readCursor root name = do
   if not exists
     then latestPostId root
     else do
-      txt <- TIO.readFile path
+      txt <- readFileStrict path
       pure $ maybe 0 fromIntegral (readMaybe @Integer (T.unpack (T.strip txt)))
 
 -- | Return the id that would follow the last post in the log (i.e. the
@@ -154,7 +153,7 @@ latestPostId root = do
   if not logExists
     then pure 0
     else do
-      txt <- TIO.readFile logPath
+      txt <- readFileStrict logPath
       let ls = filter (not . T.null) (T.lines txt)
       case ls of
         [] -> pure 0
@@ -211,7 +210,7 @@ tailLog path names startCursor mQuiesce cb = do
   exists <- doesFileExist path
   unless exists $ do
     -- Touch an empty log so the scribe has a file to append to.
-    withFile path AppendMode (\_ -> pure ())
+    touchLog path
   (off0, halted0, _, _) <- drainFrom 0 (filterStoredSince startCursor)
   offRef <- newIORef off0
   halted <- newTVarIO halted0
@@ -284,7 +283,7 @@ tailLog path names startCursor mQuiesce cb = do
           (n, h) <- deliver ps
           pure (n + 1, h)
 
-    readCompleteLines off = withFile path ReadMode $ \h -> do
+    readCompleteLines off = withLogRead path $ \h -> do
       hSeek h AbsoluteSeek off
       bs <- BS.hGetContents h
       pure (completeLines off bs)

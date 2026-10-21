@@ -19,7 +19,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Agent.Runner (runAgentLoop)
-import Free.Agent.Bus (openBus, postLocal, runSeatBus)
+import Free.Agent.Bus (openBus, postLocal, readFileStrict, runSeatBus)
 import Free.Agent.Bus.File (QuiesceConfig (..), writeCursor)
 import Free.Agent.BusStats
   ( Classification (..),
@@ -504,7 +504,7 @@ busTopic = do
     _ <- postLocal root stopper
     putMVar planted ()
     takeMVar done
-    content <- TIO.readFile logPath
+    content <- readFileStrict logPath
     let fileLog = map stamped (mapMaybe (unframeStored @Text) (T.lines content))
     assert "Q7 the run produced the full script plus replies (no silent pair)" $
       length fileLog == 7 && length pureTimeline == 7
