@@ -23,8 +23,7 @@ module Free.Agent.Host
   )
 where
 
-import Circuit.Agent (Post (..), mkPost)
-import Circuit.Agent.Tensor (AgentShard, ioShard)
+import Circuit.Agent (AgentShard, Post (..), ioShard, mkPost)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL

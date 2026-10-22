@@ -15,9 +15,8 @@
 --   free-agent status [ROOT] [--threshold SECS]
 module Main (main) where
 
-import Circuit.Agent (Name, Post (..), mkPost, sortNub)
+import Circuit.Agent (AgentShard, Name, Post (..), closeShardIO, mkPost, sortNub)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
-import Circuit.Agent.Tensor (closeShardIO)
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (forM_, unless)
@@ -55,8 +54,7 @@ import Free.Agent.Gateway
     gatewayHost,
     openGateway,
   )
-import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, dshHost, hermesHostBatch, kimiHost, processHost)
-import Free.Agent.Seat (FreeSeat, hostSeat, interpretSeat)
+import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, dshHost, hermesHostBatch, hostShard, kimiHost, processHost)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (lookupEnv)
@@ -250,13 +248,13 @@ decorateSender stored =
   let p = stamped stored
    in stored {stamped = p {body = from p <> ": " <> body p}}
 
--- | Run one stored post through a seat and produce reply posts with thread edges.
-runOneSeat :: FreeSeat -> Stamped Text -> IO [Post Text]
-runOneSeat seat stored = do
+-- | Run one stored post through an agent shard and produce reply posts with
+-- thread edges.
+runOneSeat :: AgentShard [Post Text] [Post Text] -> Stamped Text -> IO [Post Text]
+runOneSeat sh stored = do
   let stored' = decorateSender stored
       p = stamped stored'
       parentId = snd (stamp stored)
-      sh = interpretSeat seat
   (outs, _st) <- closeShardIO sh [p] []
   pure [routeReply out {body = cleanCliOut (body out), thread = sortNub (parentId : thread out)} | out <- outs]
 
@@ -278,11 +276,11 @@ runHermes cfg = do
   createDirectoryIfMissing True (takeDirectory sessionFile)
   transcriptRef <- newIORef 0
   let host = hermesHostBatch agentName framedPrompt (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile (Just (transcriptRef, transcriptPath))
-      seat = hostSeat host
+      sh = hostShard host
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
       handle stored = do
         writeIORef transcriptRef (fromIntegral (snd (stamp stored)))
-        filter keepReplyHermes <$> runOneSeat seat stored
+        filter keepReplyHermes <$> runOneSeat sh stored
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
   runAgentLoop agentName names (hcRoot cfg) mQuiesce handle
 
@@ -302,11 +300,11 @@ runKimi cfg = do
           { hostRun =
               hostRun host0 . map (\b -> systemPrompt <> "\n\nUser message:\n" <> b)
           }
-      seat = hostSeat host
+      sh = hostShard host
       mQuiesce = buildQuiesce (kcQuiesce cfg) (kcPitboss cfg)
       handle stored = do
         writeIORef transcriptRef (fromIntegral (snd (stamp stored)))
-        filter keepReplyHermes <$> runOneSeat seat stored
+        filter keepReplyHermes <$> runOneSeat sh stored
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
   runAgentLoop agentName names (kcRoot cfg) mQuiesce handle
 
@@ -337,11 +335,11 @@ runDsh cfg = do
           (dcDshModelPatch cfg)
           sessionPath
           (Just (transcriptRef, transcriptPath))
-      seat = hostSeat host
+      sh = hostShard host
       mQuiesce = buildQuiesce (dcQuiesce cfg) (dcPitboss cfg)
       handle stored = do
         writeIORef transcriptRef (fromIntegral (snd (stamp stored)))
-        filter keepReplyDsh <$> runOneSeat seat stored
+        filter keepReplyDsh <$> runOneSeat sh stored
   TIO.putStrLn $ "   patch: " <> T.pack (dcDshPatch cfg)
   forM_ (dcDshModelPatch cfg) $ \p ->
     TIO.putStrLn $ "   model patch: " <> T.pack p
@@ -378,9 +376,9 @@ runAcp cfg = do
       Nothing -> do
         TIO.hPutStrLn stderr "🔴 acp: session/new returned no session id"
         exitFailure
-    let seat = hostSeat (acpHost agentName acpTurnMicros framedPrompt client sid)
+    let sh = hostShard (acpHost agentName acpTurnMicros framedPrompt client sid)
         handle stored = do
-          outs <- runOneSeat seat stored
+          outs <- runOneSeat sh stored
           pure [out | out <- outs, not (T.null (T.strip (body out)))]
     TIO.putStrLn $ "   protocol: acp (" <> T.pack (acAcpCommand cfg) <> ")"
     TIO.putStrLn $ "   session: " <> sid
@@ -410,12 +408,11 @@ runLlm cfg = do
                 key = T.pack k
               }
           host = bareHost bareCfg systemPrompt
-          seat = hostSeat host
+          sh = hostShard host
           mQuiesce = buildQuiesce (lcQuiesce cfg) (lcPitboss cfg)
           handle stored = do
             let p = stamped stored
                 parentId = snd (stamp stored)
-                sh = interpretSeat seat
             (outs, _st) <- closeShardIO sh [p] []
             pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
       TIO.putStrLn $ "   base: " <> baseUrl bareCfg
@@ -436,12 +433,11 @@ runGateway cfg = do
       framedPrompt = "Your name on the free-agent bus is " <> agentName <> ". Use this name for all --from fields and cursor checks.\n\n" <> systemPrompt
       gwCfg = defaultGatewayConfig {gwBaseUrl = gcwBaseUrl cfg, gwKeyEnv = gcwKeyEnv cfg}
   client <- openGateway gwCfg
-  let seat = hostSeat (gatewayHost agentName framedPrompt client)
+  let sh = hostShard (gatewayHost agentName framedPrompt client)
       mQuiesce = buildQuiesce (gcwQuiesce cfg) (gcwPitboss cfg)
       handle stored = do
         let p = stamped stored
             parentId = snd (stamp stored)
-            sh = interpretSeat seat
         (outs, _st) <- closeShardIO sh [p] []
         pure [routeReply out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
   TIO.putStrLn $ "   gateway: " <> gwBaseUrl gwCfg
@@ -457,12 +453,11 @@ runCommand cfg = do
   let names = ccNames cfg
       agentName = agentNameOf names
       host = (processHost agentName (ccCmd cfg) (ccArgs cfg)) {hostBodyMode = BodyWhole}
-      seat = hostSeat host
+      sh = hostShard host
       mQuiesce = buildQuiesce (ccQuiesce cfg) (ccPitboss cfg)
       handle stored = do
         let p = stamped stored
             parentId = snd (stamp stored)
-            sh = interpretSeat seat
         (outs, _st) <- closeShardIO sh [p] []
         pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
   TIO.putStrLn $ "   command: " <> T.pack (ccCmd cfg) <> " " <> T.intercalate " " (map T.pack (ccArgs cfg))

@@ -9,12 +9,12 @@ author: Tony Day
 maintainer: tonyday567@gmail.com
 homepage: https://github.com/tonyday567/free-agent#readme
 bug-reports: https://github.com/tonyday567/free-agent/issues
-synopsis: Free syntax above circuits-agent (Agent / Shard seats)
+synopsis: Free syntax above circuits-agent (Host / Shard seats)
 description:
   Free constructions above circuits-agent: FreeAgent category and Layer folds,
-  inspectable Pipeline stages (Category, route/forName helpers), Host and
-  processHost shards (multi-post emit), and FreeSeat composition into
-  Shard (StateT [Post] IO) via composeEnds. Package role ABOVE — depends on
+  one-shot Host algebra (process / CLI / API hosts) folded into
+  Circuit.Agent.AgentShard values, and the bus runtime (runAgentLoop, the
+  watermark persister, cursor claims). Package role ABOVE — depends on
   circuits-agent; does not replace Post/Agent/Shard.
 
 build-type: Simple
@@ -73,8 +73,6 @@ library
     Free.Agent.Json
     Free.Agent.Lineage
     Free.Agent.Meeting
-    Free.Agent.Pipeline
-    Free.Agent.Seat
 
   build-depends:
     base >=4.20 && <5,
@@ -109,7 +107,6 @@ executable free-agent-axioma
   ghc-options: -threaded
   other-modules:
     Axioma.Acp
-    Axioma.Bundle
     Axioma.Bus
     Axioma.Common
     Axioma.Connector
@@ -120,7 +117,6 @@ executable free-agent-axioma
     Axioma.Quiesce
     Axioma.Resume
     Axioma.Seat
-    Axioma.Stm
     Axioma.Tensor
     Axioma.Transcript
 

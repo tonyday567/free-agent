@@ -31,8 +31,7 @@ import Free.Agent.BusStats
     isDoneClaim,
     slicePosts,
   )
-import Free.Agent.Host (mkHost)
-import Free.Agent.Seat (hostSeat)
+import Free.Agent.Host (hostShard, mkHost)
 import System.Directory (removePathForcibly)
 import System.FilePath ((</>))
 
@@ -134,7 +133,7 @@ busTopic = do
     _ <- postLocal root (mkPost "human" ["echo"] "hello")
     _ <- postLocal root (mkPost "human" ["echo"] "🟢 landed")
     bus <- openBus root
-    runSeatBus bus "echo" ["echo"] (hostSeat (mkHost "echo" (pure . map ("echo:" <>))))
+    runSeatBus bus "echo" ["echo"] (hostShard (mkHost "echo" (pure . map ("echo:" <>))))
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -164,7 +163,7 @@ busTopic = do
           if ws == ["boom"]
             then error "boom"
             else pure (map ("fragile:" <>) ws)
-    runSeatBus bus "fragile" ["fragile"] (hostSeat fragileHost)
+    runSeatBus bus "fragile" ["fragile"] (hostShard fragileHost)
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -208,7 +207,7 @@ busTopic = do
                 if "finish" `elem` ws
                   then [markGlyph StandDown <> " standing down"]
                   else map ("echo:" <>) ws
-    runSeatBus bus "echo" ["echo"] (hostSeat host)
+    runSeatBus bus "echo" ["echo"] (hostShard host)
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -224,7 +223,7 @@ busTopic = do
       map (snd . stamp) parsed == [0, 1, 2, 3, 4, 5, 6, 7]
 
   -------------------------------------------------------------------------
-  -- Multi-seat card meeting: two FreeSeats share a subscription on the bus
+  -- Multi-seat card meeting: two seat shards share a subscription on the bus
   --
   -- A seed addressed to a shared card wakes every seat; each replies to the
   -- original sender.  A pre-planted halt mark stops all seats once they have
@@ -237,8 +236,8 @@ busTopic = do
     _ <- postLocal root (mkPost "human" [card] "discuss")
     _ <- postLocal root (mkPost "human" [card] "🟢 landed")
     bus <- openBus root
-    let alphaSeat = hostSeat (mkHost "alpha" (pure . map ("alpha:" <>)))
-        betaSeat = hostSeat (mkHost "beta" (pure . map ("beta:" <>)))
+    let alphaSeat = hostShard (mkHost "alpha" (pure . map ("alpha:" <>)))
+        betaSeat = hostShard (mkHost "beta" (pure . map ("beta:" <>)))
     doneAlpha <- newEmptyMVar
     doneBeta <- newEmptyMVar
     _ <- forkIO $ runSeatBus bus "alpha" [card] alphaSeat >> putMVar doneAlpha ()
@@ -278,7 +277,7 @@ busTopic = do
     _ <- postLocal root (mkPost "human" ["all"] "ping")
     _ <- postLocal root (mkPost "human" ["aud"] (markGlyph Landed <> " done"))
     bus <- openBus root
-    runSeatBus bus "aud" ["aud"] (hostSeat (mkHost "aud" (pure . map ("ack: " <>))))
+    runSeatBus bus "aud" ["aud"] (hostShard (mkHost "aud" (pure . map ("ack: " <>))))
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)

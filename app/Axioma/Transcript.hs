@@ -8,8 +8,7 @@ module Axioma.Transcript
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Post (..))
-import Circuit.Agent.Tensor (AgentShard, closeShardIO)
+import Circuit.Agent (AgentShard, Post (..), closeShardIO)
 import Data.IORef (newIORef, writeIORef)
 import Data.Text (Text)
 import Data.Text qualified as T

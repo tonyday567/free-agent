@@ -16,8 +16,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (openBus, postLocal, runSeatBus)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
-import Free.Agent.Host (mkHost)
-import Free.Agent.Seat (hostSeat)
+import Free.Agent.Host (hostShard, mkHost)
 import System.Directory (removePathForcibly)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -45,7 +44,7 @@ resumeTopic = do
     bus <- openBus root
     let host = mkHost "echo" $ \ws ->
           pure [T.unwords ws]
-    runSeatBus bus "echo" ["echo"] (hostSeat host)
+    runSeatBus bus "echo" ["echo"] (hostShard host)
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -80,7 +79,7 @@ resumeTopic = do
           if "ping" `elem` ws
             then pure [""]
             else pure []
-    runSeatBus bus "silent" ["silent"] (hostSeat host)
+    runSeatBus bus "silent" ["silent"] (hostShard host)
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -119,7 +118,7 @@ resumeTopic = do
     bus <- openBus root
     let host = mkHost "hermes" $ \ws ->
           pure [cleanCliOut (if "ping" `elem` ws then "(empty)" else T.unwords ws)]
-    runSeatBus bus "hermes" ["hermes"] (hostSeat host)
+    runSeatBus bus "hermes" ["hermes"] (hostShard host)
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)

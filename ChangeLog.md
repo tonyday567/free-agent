@@ -2,6 +2,23 @@
 
 ## unreleased
 
+- **Wave X: the seat term language is gone.** `Free.Agent.Seat` (`FreeSeat`,
+  `interpretSeat`, `interpretSeatA`, `interpretSeatS`, the combinators and
+  the STM rung) and `Free.Agent.Pipeline` pinned an inspectable term
+  algebra that no production path used: every live seat was a bare
+  `SeatHost` erased by `interpretSeat` immediately at the call site, and
+  `runSeatBus` was the only consumer of the seat fold. Both modules are
+  deleted; `runSeatBus` now takes the `AgentShard` from circuits-agent
+  directly, the seven backend handlers in `free-agent.hs` call
+  `hostShard` directly, and the oracles that pinned surviving behavior
+  (host shard round-trips, the CLI/process host sketches, runSeatBus
+  supervision/self-halt/resume/empty-reply semantics, L5 persister death)
+  are re-pointed at `hostShard` / a silent `ioShard`. The `bundle` and
+  `stm` axioma topics die with the term language, as do the seat-fold
+  sections of the `seat` topic (pipeline laws, FreeSeat close/assoc,
+  fork-is-id, route-by-name). Suite: 266 → 221 PASS (45 dead-term oracles;
+  zero surviving assertions lost).
+
 - **Lifecycle hygiene (wave H).** The B3 watermark hang and the daemon
   receipt crash had three distinct mechanisms, all fixed at the root.
   (1) The log lock no longer wedges the runtime: `withLogLock` replaces

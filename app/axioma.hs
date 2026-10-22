@@ -7,7 +7,6 @@
 module Main (main) where
 
 import Axioma.Acp (acpTopic)
-import Axioma.Bundle (bundleTopic)
 import Axioma.Bus (busTopic)
 import Axioma.Connector (connectorTopic)
 import Axioma.Diagram (diagramTopic)
@@ -17,7 +16,6 @@ import Axioma.Persist (persistTopic)
 import Axioma.Quiesce (quiesceTopic)
 import Axioma.Resume (resumeTopic)
 import Axioma.Seat (seatTopic)
-import Axioma.Stm (stmTopic)
 import Axioma.Tensor (tensorTopic)
 import Axioma.Transcript (transcriptTopic)
 import Options.Applicative
@@ -26,8 +24,6 @@ data Topic
   = All
   | Seat
   | Transcript
-  | Bundle
-  | Stm
   | Diagram
   | Meeting
   | Bus
@@ -44,8 +40,6 @@ topicName :: Topic -> String
 topicName All = "all"
 topicName Seat = "seat"
 topicName Transcript = "transcript"
-topicName Bundle = "bundle"
-topicName Stm = "stm"
 topicName Diagram = "diagram"
 topicName Meeting = "meeting"
 topicName Bus = "bus"
@@ -59,10 +53,8 @@ topicName Lifecycle = "lifecycle"
 
 topicDesc :: Topic -> String
 topicDesc All = "run all topics"
-topicDesc Seat = "pipeline laws + seat round-trips: host/CLI sketches, FreeSeat close/assoc"
+topicDesc Seat = "host shard round-trips: echo/process/CLI host sketches, BodyLines split, session resume"
 topicDesc Transcript = "transcript oracle (B1): JSONL records, scrub agreement, silent failure"
-topicDesc Bundle = "FreeSeat bundle primitives + tensor laws: folds to shard citizens, fork/plain agreement"
-topicDesc Stm = "STM seat interpretation: interpretSeatS agrees with pure/shard behaviour"
 topicDesc Diagram = "diagram bridge + bend with delay: machine bodies as string diagrams"
 topicDesc Meeting = "meeting skeletons, panel meeting, replay, derivations as 2-cells"
 topicDesc Bus = "bus stats + seats: supervision, self-halt, card meetings, M1a ancestry, the seam (Q7)"
@@ -103,8 +95,6 @@ runTopic :: Topic -> IO ()
 runTopic All = mapM_ runTopic (filter (/= All) [minBound .. maxBound])
 runTopic Seat = seatTopic
 runTopic Transcript = transcriptTopic
-runTopic Bundle = bundleTopic
-runTopic Stm = stmTopic
 runTopic Diagram = diagramTopic
 runTopic Meeting = meetingTopic
 runTopic Bus = busTopic

@@ -62,7 +62,16 @@ module Free.Agent.Bus
   )
 where
 
-import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
+import Circuit.Agent
+  ( AgentShard,
+    Name,
+    Post (..),
+    PostId,
+    closeShardIO,
+    deliversTo,
+    mkPost,
+    sortNub,
+  )
 import Circuit.Agent.Framing
   ( Log (..),
     PostBody,
@@ -77,7 +86,6 @@ import Circuit.Agent.Framing
     pattern Stamped,
   )
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
-import Circuit.Agent.Tensor (closeShardIO)
 import Control.Concurrent (ThreadId, forkFinally, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM
@@ -102,7 +110,6 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
-import Free.Agent.Seat (FreeSeat, interpretSeat)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FileLock (SharedExclusive (Exclusive), withTryFileLock)
 import System.FilePath (takeDirectory, (<.>), (</>))
@@ -388,34 +395,33 @@ awaitSince bus names since = do
       found <- readSince bus names since
       if null found then retry else pure (Right found)
 
--- | Run a 'FreeSeat' as a bus agent.
+-- | Run an agent shard as a bus agent.
 --
 -- Blocks via 'awaitSince' (STM retry) for posts addressed to any of the
--- names, feeds the batch into the seat, and scribes any emitted replies.
+-- names, feeds the batch into the shard, and scribes any emitted replies.
 -- This is the callback loop: no polling, no file locks in the agent path.
 --
 -- A dead persister ends the loop: no durable post can ever arrive, so
--- the seat rethrows the persister's exit reason rather than waiting on
+-- the agent rethrows the persister's exit reason rather than waiting on
 -- an empty durable prefix forever (wave H). Rethrowing keeps 'closeBus'
 -- behavior identical to a 'killThread' — the exception a waiter sees
 -- after a normal close is the persister's own 'ThreadKilled'.
 --
 -- Replies carry thread edges citing the parent 'stamp'. To preserve the
--- input-to-output mapping we process one 'Stamped Text' at a time; the seat
--- still sees a singleton batch, and the parent id is prepended to each
--- emitted post's 'thread'.
+-- input-to-output mapping we process one 'Stamped Text' at a time; the
+-- shard still sees a singleton batch, and the parent id is prepended to
+-- each emitted post's 'thread'.
 --
 -- Decided quiet: a delivered post carrying a halt (🟢 / 🔵) or escalation
 -- (🔴) mark stops the loop. Marks are control, not content: they are not
--- handed to the seat.
+-- handed to the shard.
 --
--- Self-halt: a 🔵 reply is the seat deciding its own quiet — scribe it and
--- stop, mid-batch if need be; later posts go unanswered (the seat is gone).
--- 🟢 stays exchange-level: a seat may land one exchange and host more.
-runSeatBus :: Bus Text -> Name -> [Name] -> FreeSeat -> IO ()
-runSeatBus bus agentName names seat = loop 0
+-- Self-halt: a 🔵 reply is the agent deciding its own quiet — scribe it and
+-- stop, mid-batch if need be; later posts go unanswered (the agent is gone).
+-- 🟢 stays exchange-level: an agent may land one exchange and host more.
+runSeatBus :: Bus Text -> Name -> [Name] -> AgentShard [Post Text] [Post Text] -> IO ()
+runSeatBus bus agentName names sh = loop 0
   where
-    sh = interpretSeat seat
     loop lastId = do
       incoming <- atomically (awaitSince bus names lastId)
       case incoming of
