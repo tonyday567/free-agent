@@ -69,7 +69,7 @@ import Circuit.Agent.StdPorts
 import Circuit.Agent.StdPorts qualified as Ports
 import Circuit.Category (K (..))
 import Circuit.Machine (Poles (..))
-import Circuit.Parser.Json (Json (..), decodeJson)
+import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Syntax (eval, run)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
@@ -82,8 +82,8 @@ import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text.IO qualified as TIO
 import Data.Time (diffUTCTime, getCurrentTime)
+import Data.Vector qualified as V
 import Free.Agent.Host (BodyMode (..), Host (..))
-import Free.Agent.Json
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
@@ -165,12 +165,23 @@ logFrame :: AcpClient -> Text -> Text -> IO ()
 logFrame c dir raw =
   forM_ (acpTranscript (acpConfig c)) $ \fp -> do
     now <- getCurrentTime
-    let line = encodeJsonText (jobject [("ts", jtext (T.pack (show now))), ("dir", jtext dir), ("raw", jtext raw)])
+    let line = decodeUtf8 (encodeJson (JObject [("ts", JString (T.pack (show now))), ("dir", JString dir), ("raw", JString raw)]))
     TIO.appendFile fp (line <> "\n")
 
 -- ---------------------------------------------------------------------------
 -- JSON plumbing
 -- ---------------------------------------------------------------------------
+
+-- | Look up a key in a JSON object.
+objLookup :: Text -> Json -> Maybe Json
+objLookup k (JObject ps) = lookup k ps
+objLookup _ _ = Nothing
+
+-- | Extract a text value from a JSON object field.
+textAt :: Text -> Json -> Maybe Text
+textAt k j = case objLookup k j of
+  Just (JString t) -> Just t
+  _ -> Nothing
 
 resultOf :: Json -> Maybe Json
 resultOf = objLookup "result"
@@ -245,7 +256,7 @@ parseUpdate params = do
 -- | Encode and commit one JSON-RPC message line, logging the raw frame.
 acpSendValue :: AcpClient -> Json -> IO ()
 acpSendValue c v = do
-  let line = encodeJsonText v
+  let line = decodeUtf8 (encodeJson v)
   logFrame c "send" line
   runK (commit (stdIn (acpPorts c))) line
 
@@ -288,7 +299,7 @@ uriPath params = case textAt "uri" params of
 
 sendResult :: AcpClient -> Int -> Json -> IO ()
 sendResult c rid r =
-  acpSendValue c (jobject [("jsonrpc", jtext t2), ("id", jnum rid), ("result", r)])
+  acpSendValue c (JObject [("jsonrpc", JString t2), ("id", JNumber (fromIntegral rid)), ("result", r)])
   where
     t2 = "2.0" :: Text
 
@@ -296,10 +307,10 @@ sendError :: AcpClient -> Int -> Int -> Text -> IO ()
 sendError c rid code msg =
   acpSendValue
     c
-    ( jobject
-        [ ("jsonrpc", jtext t2),
-          ("id", jnum rid),
-          ("error", jobject [("code", jnum code), ("message", jtext msg)])
+    ( JObject
+        [ ("jsonrpc", JString t2),
+          ("id", JNumber (fromIntegral rid)),
+          ("error", JObject [("code", JNumber (fromIntegral code)), ("message", JString msg)])
         ]
     )
   where
@@ -318,7 +329,7 @@ acpAnswer c rid method params = case method of
     Just p -> do
       r <- try @SomeException (TIO.readFile p)
       case r of
-        Right content -> sendResult c rid (jobject [("content", jtext content)])
+        Right content -> sendResult c rid (JObject [("content", JString content)])
         Left e -> sendError c rid (-32000) (T.pack (show e))
   "fs/write_text_file" -> case uriPath params of
     Nothing -> sendError c rid (-32602) "fs/write_text_file: missing uri/path"
@@ -328,16 +339,16 @@ acpAnswer c rid method params = case method of
         try @SomeException
           (createDirectoryIfMissing True (takeDirectory p) >> TIO.writeFile p content)
       case r of
-        Right () -> sendResult c rid (jobject [])
+        Right () -> sendResult c rid (JObject [])
         Left e -> sendError c rid (-32000) (T.pack (show e))
   "session/request_permission" ->
     sendResult
       c
       rid
-      ( jobject
+      ( JObject
           [ ( "outcome",
-              jobject
-                [("outcome", jtext ("selected" :: Text)), ("optionId", jtext firstOption)]
+              JObject
+                [("outcome", JString ("selected" :: Text)), ("optionId", JString firstOption)]
             )
           ]
       )
@@ -361,10 +372,10 @@ acpRequest c micros method params = do
   rid <- atomicModifyIORef' (acpNextId c) (\i -> (i + 1, i))
   acpSendValue
     c
-    ( jobject
-        [ ("jsonrpc", jtext t2),
-          ("id", jnum rid),
-          ("method", jtext method),
+    ( JObject
+        [ ("jsonrpc", JString t2),
+          ("id", JNumber (fromIntegral rid)),
+          ("method", JString method),
           ("params", params)
         ]
     )
@@ -398,15 +409,15 @@ acpInitialize c micros =
     c
     micros
     "initialize"
-    ( jobject
-        [ ("protocolVersion", jnum (1 :: Int)),
+    ( JObject
+        [ ("protocolVersion", JNumber 1),
           ( "clientInfo",
-            jobject
-              [("name", jtext ("free-agent-acp" :: Text)), ("version", jtext ("0.1.0" :: Text))]
+            JObject
+              [("name", JString ("free-agent-acp" :: Text)), ("version", JString ("0.1.0" :: Text))]
           ),
           ( "clientCapabilities",
-            jobject
-              [("fs", jobject [("readTextFile", jbool True), ("writeTextFile", jbool True)]), ("terminal", jbool False)]
+            JObject
+              [("fs", JObject [("readTextFile", JBool True), ("writeTextFile", JBool True)]), ("terminal", JBool False)]
           )
         ]
     )
@@ -420,7 +431,7 @@ acpNewSession c micros cwd = do
       c
       micros
       "session/new"
-      (jobject [("cwd", jtext (T.pack cwd)), ("mcpServers", jarray [])])
+      (JObject [("cwd", JString (T.pack cwd)), ("mcpServers", JArray V.empty)])
   pure (mresp >>= resultOf >>= textAt "sessionId", msgs)
 
 -- | @session/set_config_option@ — returns the full configOptions array.
@@ -431,10 +442,10 @@ acpSetConfigOption c micros sid configId value =
     c
     micros
     "session/set_config_option"
-    ( jobject
-        [ ("sessionId", jtext sid),
-          ("configId", jtext configId),
-          ("value", jtext value)
+    ( JObject
+        [ ("sessionId", JString sid),
+          ("configId", JString configId),
+          ("value", JString value)
         ]
     )
 
@@ -468,10 +479,10 @@ acpPrompt c micros sid promptText = do
       c
       micros
       "session/prompt"
-      ( jobject
-          [ ("sessionId", jtext sid),
+      ( JObject
+          [ ("sessionId", JString sid),
             ( "prompt",
-              jarray [jobject [("type", jtext ("text" :: Text)), ("text", jtext promptText)]]
+              JArray (V.fromList [JObject [("type", JString ("text" :: Text)), ("text", JString promptText)]])
             )
           ]
       )
@@ -512,10 +523,10 @@ acpCancel :: AcpClient -> Text -> IO ()
 acpCancel c sid =
   acpSendValue
     c
-    ( jobject
-        [ ("jsonrpc", jtext t2),
-          ("method", jtext ("session/cancel" :: Text)),
-          ("params", jobject [("sessionId", jtext sid)])
+    ( JObject
+        [ ("jsonrpc", JString t2),
+          ("method", JString ("session/cancel" :: Text)),
+          ("params", JObject [("sessionId", JString sid)])
         ]
     )
   where

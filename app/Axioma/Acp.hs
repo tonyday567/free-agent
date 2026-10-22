@@ -11,7 +11,7 @@ import Circuit.Agent (Post (..), closeShardIO)
 import Circuit.Agent.Framing (stamped, unframeStored)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
 import Circuit.Agent.StdPorts (DoubleStep (..), scriptedDouble)
-import Circuit.Parser.Json (decodeJson)
+import Circuit.Parser.Json (Json (..), decodeJson)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (when)
 import Data.IORef (newIORef)
@@ -24,7 +24,6 @@ import Free.Agent.Acp (AcpClient (..), acpHost, acpInitialize, acpNewSession, de
 import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.File (writeCursor)
 import Free.Agent.Host (hostShard)
-import Free.Agent.Json (objLookup)
 import System.Directory (removePathForcibly)
 import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
@@ -49,8 +48,8 @@ acpTopic = do
   -- Protocol precision: one script step per wire turn.
   do
     let ridOf line = case decodeJson (encodeUtf8 line) of
-          Right j -> objLookup "id" j >>= jsonToInt
-          Left _ -> Nothing
+          Right (JObject ps) -> lookup "id" ps >>= jsonToInt
+          _ -> Nothing
         resp rid body = "{\"jsonrpc\":\"2.0\",\"id\":" <> T.pack (show rid) <> ",\"result\":" <> body <> "}"
         initOut line = maybe "" (\r -> resp r "{\"protocolVersion\":1,\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}") (ridOf line)
         newOut line = maybe "" (\r -> resp r "{\"sessionId\":\"fake-session\"}") (ridOf line)

@@ -18,6 +18,12 @@
   sections of the `seat` topic (pipeline laws, FreeSeat close/assoc,
   fork-is-id, route-by-name). Suite: 266 → 221 PASS (45 dead-term oracles;
   zero surviving assertions lost).
+- **Wave X: `Free.Agent.Json` is gone.** It was thin accessors over
+  `Circuit.Parser.Json`'s AST; the five callers (`Acp`, `Gateway`,
+  `Host`, `BusStats`, `Axioma.Acp`) now use the parser's constructors
+  directly, with `objLookup` / `textAt` inlined locally where the parser
+  exports no equivalent. Same wire shapes, same behavior — suite
+  unchanged at 221 PASS.
 
 - **Lifecycle hygiene (wave H).** The B3 watermark hang and the daemon
   receipt crash had three distinct mechanisms, all fixed at the root.

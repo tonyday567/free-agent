@@ -30,7 +30,7 @@ where
 
 import Circuit.Agent (Post (..), PostId)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
-import Circuit.Parser.Json (Json (..))
+import Circuit.Parser.Json (Json (..), encodeJson)
 import Data.Bifunctor (first)
 import Data.List (minimumBy, sort, sortOn)
 import Data.Map (Map)
@@ -39,9 +39,10 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (decodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
-import Free.Agent.Json (encodeJsonText, jarray, jbool, jnum, jobject, jtext)
+import Data.Vector qualified as V
 import Numeric.Natural (Natural)
 import Text.Printf (printf)
 import Text.Regex.TDFA ((=~))
@@ -293,30 +294,30 @@ showd = T.pack . printf "%0.3f"
 -- | JSON report.
 renderStatsJson :: Rules -> [Stats] -> Text
 renderStatsJson rules stats =
-  encodeJsonText (jobject [("rules", rulesObj), ("slices", jarray (map statsObject stats))])
+  decodeUtf8 (encodeJson (JObject [("rules", rulesObj), ("slices", JArray (V.fromList (map statsObject stats)))]))
   where
     rulesObj =
-      jobject
-        [ ("noise", jtext (noiseRE rules)),
-          ("signal", jtext (signalRE rules)),
-          ("deliverable", jtext (deliverableRE rules))
+      JObject
+        [ ("noise", JString (noiseRE rules)),
+          ("signal", JString (signalRE rules)),
+          ("deliverable", JString (deliverableRE rules))
         ]
     statsObject s =
-      jobject
-        [ ("slice", jtext (statSlice s)),
-          ("posts", jnum (statPosts s)),
-          ("agents", jnum (statAgents s)),
+      JObject
+        [ ("slice", JString (statSlice s)),
+          ("posts", JNumber (fromIntegral (statPosts s))),
+          ("agents", JNumber (fromIntegral (statAgents s))),
           ("duration_minutes", jdouble (statDurationMinutes s)),
           ("posts_per_minute", jdouble (statPostsPerMinute s)),
-          ("damping_rules", jnum (statDamping s)),
+          ("damping_rules", JNumber (fromIntegral (statDamping s))),
           ("re_bus", jdouble (statReBus s)),
-          ("signal", jnum (statSignal s)),
-          ("noise", jnum (statNoise s)),
-          ("unclassified", jnum (statUnclassified s)),
+          ("signal", JNumber (fromIntegral (statSignal s))),
+          ("noise", JNumber (fromIntegral (statNoise s))),
+          ("unclassified", JNumber (fromIntegral (statUnclassified s))),
           ("snr", jmaybe jdouble (statSNR s)),
           ("snr_prime", jmaybe jdouble (statSNRPrime s)),
-          ("deliverables", jnum (statDeliverables s)),
-          ("done_claims", jnum (statDoneClaims s)),
+          ("deliverables", JNumber (fromIntegral (statDeliverables s))),
+          ("done_claims", JNumber (fromIntegral (statDoneClaims s))),
           ("posts_per_deliverable", jmaybe jdouble (statPostsPerDeliverable s)),
           ("time_to_quiescence_minutes", jdouble (statTimeToQuiescenceMinutes s))
         ]

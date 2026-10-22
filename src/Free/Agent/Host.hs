@@ -33,7 +33,6 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, dshCli, kimiCli, parseSessionId)
-import Free.Agent.Json (objLookup)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -340,3 +339,8 @@ chatCompletion cfg systemPrompt userMessage = do
               _ -> pure "🔴 missing content"
             _ -> pure "🔴 missing message"
         _ -> pure "🔴 empty choices"
+
+-- | Look up a key in a JSON object.
+objLookup :: Text -> Json -> Maybe Json
+objLookup k (JObject ps) = lookup k ps
+objLookup _ _ = Nothing

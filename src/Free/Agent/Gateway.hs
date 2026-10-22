@@ -49,7 +49,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Free.Agent.Host (BodyMode (..), Host (..))
-import Free.Agent.Json (jobject, jtext)
 import Network.HTTP.Client
 import Network.HTTP.Types (RequestHeaders, statusCode)
 import System.Environment (lookupEnv)
@@ -108,7 +107,7 @@ openGateway cfg = do
         req0
           { method = "POST",
             requestHeaders = hdrs key,
-            requestBody = RequestBodyLBS (BL.fromStrict (encodeJson (jobject [("cwd", jtext (T.pack (gwCwd cfg)))])))
+            requestBody = RequestBodyLBS (BL.fromStrict (encodeJson (JObject [("cwd", JString (T.pack (gwCwd cfg)))])))
           }
   resp <- httpLbs req mgr
   case decodeJson (BL.toStrict (responseBody resp)) of
@@ -137,7 +136,7 @@ gatewayChat c msg = do
         req0
           { method = "POST",
             requestHeaders = hdrs (gcKey c),
-            requestBody = RequestBodyLBS (BL.fromStrict (encodeJson (jobject [("message", jtext msg)])))
+            requestBody = RequestBodyLBS (BL.fromStrict (encodeJson (JObject [("message", JString msg)])))
           }
   withResponse req (gcManager c) $ \resp -> do
     let status = statusCode (responseStatus resp)

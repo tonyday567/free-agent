@@ -70,7 +70,6 @@ library
     Free.Agent.Fare.State
     Free.Agent.Gateway
     Free.Agent.Host
-    Free.Agent.Json
     Free.Agent.Lineage
     Free.Agent.Meeting
 
