@@ -28,22 +28,20 @@ module Free.Agent.BusStats
   )
 where
 
-import Circuit.Agent (Post (..), PostId)
+import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Parser.Json (Json (..), encodeJson)
 import Data.Bifunctor (first)
 import Data.List (minimumBy, sort, sortOn)
-import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (mapMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime)
-import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Vector qualified as V
-import Numeric.Natural (Natural)
 import Text.Printf (printf)
 import Text.Regex.TDFA ((=~))
 

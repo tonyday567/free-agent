@@ -43,11 +43,10 @@ import Control.Exception (throwIO)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Data.ByteString.Lazy qualified as BL
-import Data.Foldable (foldl')
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Text.Encoding (decodeUtf8)
 import Free.Agent.Host (BodyMode (..), Host (..))
 import Network.HTTP.Client
 import Network.HTTP.Types (RequestHeaders, statusCode)
@@ -194,10 +193,13 @@ gatewayHost name systemPrompt c =
 -- SSE framing
 -- ---------------------------------------------------------------------------
 
+-- $setup
+-- >>> import Data.ByteString.Char8 (pack)
+
 -- | Parse one SSE event frame (@event: x\\ndata: {…}@) into the event name
 -- and decoded JSON payload.  'Nothing' for comment\/keep-alive frames.
 --
--- >>> parseSseFrame (Data.ByteString.Char8.pack "event: done\ndata: {\"seq\": 7}")
+-- >>> parseSseFrame (pack "event: done\ndata: {\"seq\": 7}")
 -- Just ("done",JObject [("seq",JNumber 7.0)])
 parseSseFrame :: BS.ByteString -> Maybe (Text, Json)
 parseSseFrame f = do
