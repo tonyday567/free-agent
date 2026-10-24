@@ -9,12 +9,12 @@
 -- state.
 --
 -- Stage 1b: the bend, at the 'MooreT' layer.  A stateful agent decomposes
--- as a stateless body plus cross-tick feedback: 'register' closes the
+-- as a stateless body plus cross-tick feedback: 'feedback' closes the
 -- state wire with 'delay' making the one-tick lag observable (sound for
 -- strict state, where the lazy cartesian knot would diverge).  So:
 --
 -- @
--- agent = box + bend + delay ≡ machineProcess sys s0 = register s0 body
+-- agent = box + bend + delay ≡ machineProcess sys s0 = feedback s0 body
 -- @
 --
 -- What is still missing is the same wiring inside the
@@ -39,7 +39,7 @@ module Free.Agent.Diagram
 where
 
 import Circuit.Agent (Post (..))
-import Circuit.Machine (Body (Body), Moore, MooreT, moore, register)
+import Circuit.Machine (Body (Body), Moore, MooreT, feedback, moore)
 import Circuit.Poly (Lens, lens)
 import Circuit.Poly.StringDiagram (Diagram, SDiagram (..), box, runDiagram)
 import Circuit.Tensor (Const (..), unConst)
@@ -91,12 +91,12 @@ machineBody :: Moore (,) s (->) i o -> MooreT (,) (->) (i, s) (o, s)
 machineBody (Body _ k o) = liftProcess (\(i, s) -> let s' = k (s, i) in (unConst (o s'), s'))
 
 -- | A system as a 'MooreT': the stateless 'machineBody' with its state wire
--- bent back through a one-tick 'delay' — 'register' makes the delay
+-- bent back through a one-tick 'delay' — 'feedback' makes the delay
 -- explicit in the wiring rather than implicit in a lazy knot.
 --
 -- Oracle-pinned: @scan (machineProcess sys s0) is == iterateAgent sys s0 is@.
 machineProcess :: Moore (,) s (->) i o -> s -> MooreT (,) (->) i o
-machineProcess sys s0 = register s0 (machineBody sys)
+machineProcess sys s0 = feedback s0 (machineBody sys)
 
 -- | The drawing skeleton of a conversation: each post is a box labelled by
 -- its sender, wired by its 'thread' ancestry — "the log is the diagram of
