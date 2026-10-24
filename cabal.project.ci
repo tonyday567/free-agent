@@ -77,8 +77,3 @@ source-repository-package
   tag: main
 
 write-ghc-environment-files: always
-
-source-repository-package
-  type: git
-  location: https://github.com/tonyday567/circuits-rel.git
-  tag: main
