@@ -30,6 +30,7 @@ import Free.Agent.Bus.File
     tailLog,
     writeCursor,
   )
+import Free.Agent.Bus.Heartbeat (HbState (..), writeHeartbeat)
 import System.FilePath ((</>))
 import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
 import System.Posix.Process (getProcessID)
@@ -97,49 +98,59 @@ runAgentLoop agentName names root mQuiesce handlePost = do
           _ -> pure Nothing
   cursor <- readCursor root agentName
   TIO.putStrLn $ "   cursor: " <> T.pack (cursorPath root agentName) <> " @ " <> T.pack (show cursor)
-  tailLog path names cursor (fmap (\qc -> (qc, onQuiesce)) mQuiesce) $ \stored ->
-    controlFlow stored >>= \case
-      Just flow -> do
-        writeCursor root agentName (snd (stamp stored) + 1)
-        pure flow
-      Nothing -> do
-        -- F2: skip self-posts — an agent should never receive its own posts
-        if from (stamped stored) == agentName
-          then do
-            writeCursor root agentName (snd (stamp stored) + 1)
-            pure Continue
-          else do
-            ereplies <- try @SomeException (handlePost stored)
-            flow <- case ereplies of
-              Left e -> do
-                let p = stamped stored
-                    exc = T.pack (displayException e)
-                    recipients = from p : maybe [] (pure . qcPitboss) mQuiesce
-                hPutStrLn stderr $
-                  "🔴 "
-                    ++ T.unpack agentName
-                    ++ " handler failed on post "
-                    ++ show (snd (stamp stored))
-                    ++ ": "
-                    ++ T.unpack exc
-                _ <-
-                  postLocal root $
-                    (mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc))
-                      { thread = [snd (stamp stored)]
-                      }
-                -- handler failure: cursor advanced, seat keeps listening
-                pure Continue
-              Right replies -> do
-                let keep p =
-                      let b = T.strip (body p)
-                       in not (T.null b) && b /= "(empty)"
-                    nonEmpty = filter keep replies
-                    cite p = p {thread = sortNub (snd (stamp stored) : thread p)}
-                traverse_ (postLocal root . cite) nonEmpty
-                -- Self-halt: the seat's own 🔵, judged at commit time.
-                pure $
-                  if any ((== Just StandDown) . markOf) replies
-                    then Halt
-                    else Continue
-            writeCursor root agentName (snd (stamp stored) + 1)
-            pure flow
+  -- Heartbeats: wake on start, working around each delivered post, idle
+  -- after it, dead on clean exit. The file is the seat's only liveness
+  -- claim — `bus status --live` derives crash from staleness, never from
+  -- a claim, so the seat writes states and nothing else.
+  writeHeartbeat root agentName Wake
+  tailLog path names cursor (fmap (\qc -> (qc, onQuiesce)) mQuiesce) $ \stored -> do
+    writeHeartbeat root agentName Working
+    result <-
+      controlFlow stored >>= \case
+        Just flow -> do
+          writeCursor root agentName (snd (stamp stored) + 1)
+          pure flow
+        Nothing -> do
+          -- F2: skip self-posts — an agent should never receive its own posts
+          if from (stamped stored) == agentName
+            then do
+              writeCursor root agentName (snd (stamp stored) + 1)
+              pure Continue
+            else do
+              ereplies <- try @SomeException (handlePost stored)
+              flow <- case ereplies of
+                Left e -> do
+                  let p = stamped stored
+                      exc = T.pack (displayException e)
+                      recipients = from p : maybe [] (pure . qcPitboss) mQuiesce
+                  hPutStrLn stderr $
+                    "🔴 "
+                      ++ T.unpack agentName
+                      ++ " handler failed on post "
+                      ++ show (snd (stamp stored))
+                      ++ ": "
+                      ++ T.unpack exc
+                  _ <-
+                    postLocal root $
+                      (mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc))
+                        { thread = [snd (stamp stored)]
+                        }
+                  -- handler failure: cursor advanced, seat keeps listening
+                  pure Continue
+                Right replies -> do
+                  let keep p =
+                        let b = T.strip (body p)
+                         in not (T.null b) && b /= "(empty)"
+                      nonEmpty = filter keep replies
+                      cite p = p {thread = sortNub (snd (stamp stored) : thread p)}
+                  traverse_ (postLocal root . cite) nonEmpty
+                  -- Self-halt: the seat's own 🔵, judged at commit time.
+                  pure $
+                    if any ((== Just StandDown) . markOf) replies
+                      then Halt
+                      else Continue
+              writeCursor root agentName (snd (stamp stored) + 1)
+              pure flow
+    writeHeartbeat root agentName Idle
+    pure result
+  writeHeartbeat root agentName Dead

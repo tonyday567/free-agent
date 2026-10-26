@@ -29,7 +29,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time (NominalDiffTime)
 import Free.Agent.Acp (AcpConfig (..), acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, openAcp)
 import Free.Agent.Agent.Runner (runAgentLoop)
-import Free.Agent.Bus.Cli (BusCommand, busParser, runBusCommand, runStatus)
+import Free.Agent.Bus.Cli (BusCommand, Depth (..), busParser, depthOpt, liveOpt, runBusCommand, runStatus)
 import Free.Agent.Bus.File (QuiesceConfig (..), cursorPath)
 import Free.Agent.Cli (cleanCliOut)
 import Free.Agent.Cli.Config
@@ -69,7 +69,7 @@ import System.IO (BufferMode (LineBuffering), hSetBuffering, stderr, stdout)
 data Command
   = AgentCmd Backend
   | BusCmd BusCommand
-  | StatusCmd FilePath (Maybe NominalDiffTime)
+  | StatusCmd FilePath (Maybe NominalDiffTime) Bool Depth
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ commandParser =
         <> command "cmd" (info (AgentCmd . BackendCommand <$> parseCommandConfig <**> helper) (progDesc "External-command seat"))
         <> command "dsh" (info (AgentCmd . BackendDsh <$> parseDshConfig <**> helper) (progDesc "DSH / local ollama seat"))
         <> command "acp" (info (AgentCmd . BackendAcp <$> parseAcpConfig <**> helper) (progDesc "ACP seat (kimi acp — persistent repl)"))
-        <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <**> helper) (progDesc "Bus log statistics"))
+        <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <*> liveOpt <*> depthOpt (Depth 1) <**> helper) (progDesc "Bus log statistics"))
     )
     <|> defaultAgentParser
   where
@@ -193,7 +193,7 @@ main = do
   case cmd of
     AgentCmd backend -> runBackend backend
     BusCmd busCmd -> runBusCommand busCmd
-    StatusCmd root mthreshold -> runStatus root (fromMaybe 900 mthreshold)
+    StatusCmd root mthreshold live depth -> runStatus root (fromMaybe 900 mthreshold) live depth
 
 -- ---------------------------------------------------------------------------
 -- Backend dispatch
