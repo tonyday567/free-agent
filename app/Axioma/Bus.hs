@@ -9,7 +9,7 @@ module Axioma.Bus
 where
 
 import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
-import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, loop, tape, watch)
+import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, loop, mkChannelPost, tape, watch)
 import Circuit.Agent.Framing (parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
@@ -64,7 +64,7 @@ busTopic = do
 
   do
     let mkStored i ts f t body = case parseTimeText ts of
-          Just ts' -> Stamped (ts', i) (Post f t [] body)
+          Just ts' -> Stamped (ts', i) (Post f Nothing t [] body)
           Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
@@ -86,7 +86,7 @@ busTopic = do
 
   do
     let mkStored i ts f t body = case parseTimeText ts of
-          Just ts' -> Stamped (ts', i) (Post f t [] body)
+          Just ts' -> Stamped (ts', i) (Post f Nothing t [] body)
           Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
@@ -99,7 +99,7 @@ busTopic = do
 
   do
     let mkStored i ts f t body = case parseTimeText ts of
-          Just ts' -> Stamped (ts', i) (Post f t [] body)
+          Just ts' -> Stamped (ts', i) (Post f Nothing t [] body)
           Nothing -> error $ "bad timestamp: " <> show ts
         posts =
           [ mkStored 0 "2026-08-05T00:00:00" "a" ["b"] "hello",
@@ -265,26 +265,26 @@ busTopic = do
   -------------------------------------------------------------------------
   -- Reply audience: one spelling, branching factor 1 (R2b)
   --
-  -- The card's default: a seat's reply addresses the sender only — the
-  -- "all" magic top is localised by 'deliversTo', never propagated.  A
-  -- reply carrying "all" forward would re-broadcast (the amplifier the
-  -- design card flags), so a wire-preserving "convergence" of the
-  -- audience rule goes red here.
+  -- The card's default: a seat's reply lands in the channel it answers and
+  -- addresses the sender only — the channel is inherited, the recipient list
+  -- is not widened.  A reply carrying the channel's membership forward would
+  -- re-wake every member (the amplifier the design card flags), so a
+  -- wire-preserving "convergence" of the audience rule goes red here.
   -------------------------------------------------------------------------
   putStrLn "reply audience"
   do
     root <- tempRoot "free-agent-r2b-audience"
-    _ <- postLocal root (mkPost "human" ["all"] "ping")
+    _ <- postLocal root (mkChannelPost "human" "commons" ["human", "aud"] ("ping" :: Text))
     _ <- postLocal root (mkPost "human" ["aud"] (markGlyph Landed <> " done"))
     bus <- openBus root
-    runSeatBus bus "aud" ["aud"] (hostShard (mkHost "aud" (pure . map ("ack: " <>))))
+    runSeatBus bus "aud" ["commons", "aud"] (hostShard (mkHost "aud" (pure . map ("ack: " <>))))
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "aud"]
-    assert "R2b a reply to an all-post addresses the sender only (no amplifier)" $
+    assert "R2b a reply lands in the channel and addresses the sender only (no amplifier)" $
       case replies of
-        [r] -> body r == "ack: ping" && to r == ["human"]
+        [r] -> body r == "ack: ping" && to r == ["human"] && channel r == Just "commons"
         _ -> False
     removePathForcibly root
 

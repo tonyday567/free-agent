@@ -101,7 +101,7 @@ hostShard h =
       . traverse
         ( \p -> do
             outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
-            pure [mkPost (hostName h) [from p] o | o <- outs]
+            pure [(mkPost (hostName h) [from p] o) {channel = channel p} | o <- outs]
         )
 
 -- | A host backed by an external process.

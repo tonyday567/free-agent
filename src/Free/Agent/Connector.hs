@@ -130,7 +130,7 @@ runTurn cfg repl stored = do
   unless (T.null (body ask)) $ commitText stdio (body ask)
 
   mFirst <- timeout (connCommandTimeout cfg) (emitText stdio)
-  case mFirst of
+  rs <- case mFirst of
     Nothing -> pure [stampedPost name asker askId "<zero-frame>"]
     Just (Exited code) ->
       pure [stampedPost name asker askId ("<exited> " <> T.pack (show code))]
@@ -148,6 +148,9 @@ runTurn cfg repl stored = do
             [ replyPost name asker askId out,
               stampedPost name asker askId ("<exited> " <> T.pack (show code))
             ]
+  -- The reply lands in the channel it answers (bus-channels: the address is
+  -- the channel name, not a recipient list).
+  pure (map (\r -> r {channel = channel ask}) rs)
 
 replyPost :: Name -> Name -> PostId -> Text -> Post Text
 replyPost name asker askId bodyText =

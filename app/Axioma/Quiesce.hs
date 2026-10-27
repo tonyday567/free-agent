@@ -31,7 +31,7 @@ quiesceTopic = do
     root <- tempRoot "free-agent-tail-axioma"
     let path = root </> "log.jsonl"
         mkStored i ts f t b = case parseTimeText ts of
-          Just ts' -> Stamped (ts', i) (Post f t [] b)
+          Just ts' -> Stamped (ts', i) (Post f Nothing t [] b)
           Nothing -> error $ "bad timestamp: " <> show ts
         frame i ts f t b = frameStored @Text (mkStored i ts f t b)
     -- Write one complete line and one partial line (no trailing newline).

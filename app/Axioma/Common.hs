@@ -55,7 +55,7 @@ closeBusDurable bus = do
   assert "persister alive at close" $ isRight r
 
 mkPost :: Text -> [Text] -> Text -> Post Text
-mkPost a ds = Post a ds []
+mkPost a ds = Post a Nothing ds []
 
 -- | Per-run unique directory under the temp root: @TMPDIR/name-XXXXXX@,
 -- created fresh through 'openTempFile''s exclusive naming. Sibling suite
