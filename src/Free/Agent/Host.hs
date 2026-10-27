@@ -89,7 +89,8 @@ bodyArgs BodyWhole = (: [])
 -- The shard remembers the committed posts in its state.  On emit it runs the
 -- host on each post's body (prepared by 'hostBodyMode'), in order, and emits
 -- one reply post per output line per input post.  Each reply is addressed back
--- to the sender of its input post.
+-- to the sender of its input post, and lands in that post's channel — the
+-- address is the channel name, and the recipient list is not widened.
 --
 -- Note: a generic host has no access to stamped log ids, so emitted replies
 -- carry no thread edge.  Callers that need provenance should thread by id
