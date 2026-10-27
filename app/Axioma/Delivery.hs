@@ -60,6 +60,7 @@ deliveryTopic = do
             cliSessionFile = sessionFile,
             cliSessionId = parseSessionId,
             cliStale = \code _ -> code /= ExitSuccess,
+            cliExhausted = \_ _ -> False,
             cliScrub = cleanCliOut,
             cliStderr = StderrDrop,
             cliStderrTee = Nothing
@@ -134,6 +135,7 @@ deliveryTopic = do
             cliSessionFile = cancelRoot </> "session",
             cliSessionId = parseSessionId,
             cliStale = \code _ -> code /= ExitSuccess,
+            cliExhausted = \_ _ -> False,
             cliScrub = cleanCliOut,
             cliStderr = StderrMerge,
             cliStderrTee = Nothing

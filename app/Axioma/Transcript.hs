@@ -41,6 +41,7 @@ transcriptTopic = do
               cliSessionFile = dir </> "session",
               cliSessionId = parseSessionId,
               cliStale = \code _ -> code /= ExitSuccess,
+              cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
               cliStderrTee = Nothing
@@ -91,6 +92,7 @@ transcriptTopic = do
               cliSessionFile = dir </> "session",
               cliSessionId = parseSessionId,
               cliStale = \code _ -> code /= ExitSuccess,
+              cliExhausted = \_ _ -> False,
               cliScrub = cleanCliOut,
               cliStderr = StderrDrop,
               cliStderrTee = Nothing

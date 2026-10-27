@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | empty-reply drop (B2), empty-sentinel drop (B8), resume fix (B6).
+-- | empty-reply drop (B2), empty-sentinel drop (B8), resume fix (B6),
+-- failed-attempt evidence (stinky-dsh repair).
 module Axioma.Resume
   ( resumeTopic,
   )
@@ -10,6 +11,7 @@ import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (stamped, unframeStored)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
+import Control.Exception (SomeException, try)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -18,7 +20,7 @@ import Free.Agent.Bus (openBus, postLocal, runSeatBus)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliDeliverTo, parseSessionId)
 import Free.Agent.Delivery (TurnResult (..), awaitTurn)
 import Free.Agent.Host (hostShard, mkHost)
-import System.Directory (removePathForcibly)
+import System.Directory (doesFileExist, removePathForcibly)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 
@@ -181,6 +183,7 @@ resumeTopic = do
               cliStale = \_ out ->
                 "No session found matching" `T.isInfixOf` out
                   || "Session not found" `T.isInfixOf` out,
+              cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
               cliStderrTee = Nothing
@@ -222,6 +225,7 @@ resumeTopic = do
               cliStale = \_ out ->
                 "No session found matching" `T.isInfixOf` out
                   || "Session not found" `T.isInfixOf` out,
+              cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
               cliStderrTee = Nothing
@@ -275,6 +279,7 @@ resumeTopic = do
                 code /= ExitSuccess
                   || "No session found matching" `T.isInfixOf` out
                   || "Session not found" `T.isInfixOf` out,
+              cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
               cliStderrTee = Nothing
@@ -291,4 +296,195 @@ resumeTopic = do
     stored <- TIO.readFile sf
     assert "B6c: .sid updated to fresh session id" $
       T.strip stored == "fresh-b6c"
+    removePathForcibly dir
+
+  -------------------------------------------------------------------------
+  -- Failed-attempt evidence (stinky-dsh repair): a resumed session that
+  -- fails non-zero on every attempt leaves one bounded TranscriptFailed
+  -- record per attempt — attempt number, exit code, elapsed, session id,
+  -- post id — the raised error names the real failure with honest
+  -- accounting, and the stored session id is not clobbered.
+  --
+  -- Mutation guards:
+  --  (i) remove the failed-attempt write in Cli.hs → the record-count
+  --      assert fails (zero failed records).
+  --  (ii) revert the terminal message to the generic "exited non-zero
+  --       3 times" form → the real-failure assert fails (marker absent).
+  --  (iii) split the message wording from the actual invocation count
+  --       → the accounting assert fails.
+  -------------------------------------------------------------------------
+  putStrLn "Failed-attempt evidence (stinky-dsh)"
+
+  do
+    dir <- tempRoot "free-agent-stinky-evidence"
+    let script = dir </> "fake.sh"
+        sf = dir </> "session"
+    -- Seed the session file: a resumed session must exist for the
+    -- retry path to engage.
+    TIO.writeFile sf "stinky-sid-seed"
+    -- Fake CLI: fails (exit 1) on every call.  Emits a distinctive
+    -- root-cause marker and a 9000-char junk line so the oracle can
+    -- check both failure identification and raw bounding.
+    TIO.writeFile script $
+      T.pack $
+        unlines
+          [ "#!/bin/sh",
+            "echo 'session_id: fake-stinky'",
+            "printf 'STINKY-ROOT-CAUSE-MARKER\\n'",
+            "head -c 9000 /dev/zero | tr '\\000' 'x'",
+            "echo",
+            "exit 1"
+          ]
+    let cli =
+          Cli
+            { cliCommand = "/bin/sh",
+              cliArgv = \_ mSid -> [script] <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
+              cliStdin = T.unpack,
+              cliSessionFile = sf,
+              cliSessionId = parseSessionId,
+              cliStale = \_ out ->
+                "No session found matching" `T.isInfixOf` out
+                  || "Session not found" `T.isInfixOf` out,
+              cliExhausted = \_ _ -> False,
+              cliScrub = id,
+              cliStderr = StderrMerge,
+              cliStderrTee = Nothing
+            }
+    res <-
+      try (cliDeliverTo cli (dir </> "transcript.jsonl") 1 "hello-stinky" >>= awaitTurn) ::
+        IO (Either SomeException (TurnResult Text))
+    -- (1) The turn must raise — every attempt failed.
+    let raised = case res of
+          Left _ -> True
+          Right _ -> False
+    assert "stinky: turn raised after exhausting attempts" raised
+    -- (2) One bounded failed record per attempt (initial + 3 retries).
+    -- A missing transcript is empty evidence: the count assert fails
+    -- cleanly instead of throwing.
+    exists <- doesFileExist (dir </> "transcript.jsonl")
+    content <-
+      if exists
+        then TIO.readFile (dir </> "transcript.jsonl")
+        else pure ""
+    let failed = [l | l <- T.lines content, "\"outcome\":\"failed\"" `T.isInfixOf` l]
+    assert "stinky: one failed record per attempt (4 invocations)" $
+      length failed == 4
+    assert "stinky: attempt numbers 1..4 recorded" $
+      all
+        (\n -> any (T.isInfixOf ("\"attempt\":" <> T.pack (show n) <> ",")) failed)
+        [1 .. 4]
+    assert "stinky: every failed record names the real failure" $
+      all ("STINKY-ROOT-CAUSE-MARKER" `T.isInfixOf`) failed
+    assert "stinky: every failed record carries the session id" $
+      all ("\"session_id\":\"stinky-sid-seed\"" `T.isInfixOf`) failed
+    assert "stinky: every failed record carries exit code 1" $
+      all ("\"exit_code\":1" `T.isInfixOf`) failed
+    assert "stinky: failed raw bounded (9000-char junk truncated)" $
+      all (\l -> T.length l < 6000) failed
+    -- (3) The public error names the real failure with honest accounting.
+    let msg = case res of
+          Left err -> T.pack (show err)
+          Right _ -> ""
+    assert "stinky: error names the real failure" $
+      "STINKY-ROOT-CAUSE-MARKER" `T.isInfixOf` msg
+    assert "stinky: honest accounting (4 attempts, 1 initial + 3 retries)" $
+      "after 4 attempts" `T.isInfixOf` msg
+        && "1 initial + 3 retries" `T.isInfixOf` msg
+    -- (4) The stored session id is not clobbered by the failure.
+    stored <- TIO.readFile sf
+    assert "stinky: stored session id not clobbered" $
+      T.strip stored == "stinky-sid-seed"
+    removePathForcibly dir
+
+  -------------------------------------------------------------------------
+  -- Context-exhaustion honesty (stinky-dsh repair): a resumed session
+  -- whose window is full (dsh: terminal turn_end reason max-tokens,
+  -- empty final, exit 1) is detected, never retried, and raised with a
+  -- named error — one invocation, one bounded failed record, stored
+  -- session id intact.  A fresh session that exhausts the window is
+  -- named separately.
+  --
+  -- Mutation guards:
+  --  (i) remove the exhaustion branch in Cli.hs → the fake is retried
+  --      to full exhaustion (4 failed records) → the count assert fails.
+  --  (ii) move the branch below the retry step → same count failure.
+  --  (iii) revert the message to the generic accounting form → the
+  --      "context exhausted" assert fails.
+  --  (iv) remove the fresh-session guard → assert (b) fails (generic
+  --      "exited ExitFailure 1" message instead).
+  -------------------------------------------------------------------------
+  putStrLn "Context-exhaustion honesty (stinky-dsh)"
+
+  do
+    dir <- tempRoot "free-agent-stinky-exhausted"
+    let script = dir </> "fake.sh"
+        sf = dir </> "session"
+    TIO.writeFile sf "stinky-sid-full"
+    -- Fake CLI: every call emits dsh's terminal max-tokens marker and
+    -- exits 1 — the observed stinky failure shape, nothing else.
+    TIO.writeFile script $
+      T.pack $
+        unlines
+          [ "#!/bin/sh",
+            "echo 'session_id: fake-stinky-exhausted'",
+            "echo '{\"type\":\"status\",\"phase\":\"turn_end\",\"reason\":{\"kind\":\"max-tokens\"}}'",
+            "exit 1"
+          ]
+    let mkCli sessionFile =
+          Cli
+            { cliCommand = "/bin/sh",
+              cliArgv = \_ mSid -> [script] <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
+              cliStdin = T.unpack,
+              cliSessionFile = sessionFile,
+              cliSessionId = parseSessionId,
+              cliStale = \_ out ->
+                "No session found matching" `T.isInfixOf` out
+                  || "Session not found" `T.isInfixOf` out,
+              cliExhausted = \_ out -> "\"reason\":{\"kind\":\"max-tokens\"}" `T.isInfixOf` out,
+              cliScrub = id,
+              cliStderr = StderrMerge,
+              cliStderrTee = Nothing
+            }
+    -- (a) Resumed exhausted session: exactly one invocation, named error.
+    resA <-
+      try (cliDeliverTo (mkCli sf) (dir </> "transcript-a.jsonl") 1 "hello" >>= awaitTurn) ::
+        IO (Either SomeException (TurnResult Text))
+    let raisedA = case resA of
+          Left _ -> True
+          Right _ -> False
+        msgA = case resA of
+          Left err -> T.pack (show err)
+          Right _ -> ""
+    assert "stinky-exhausted: turn raised" raisedA
+    contentA <- TIO.readFile (dir </> "transcript-a.jsonl")
+    let failedA = [l | l <- T.lines contentA, "\"outcome\":\"failed\"" `T.isInfixOf` l]
+    assert "stinky-exhausted: exactly one invocation, no retries" $
+      length failedA == 1
+    assert "stinky-exhausted: single record is attempt 1" $
+      any ("\"attempt\":1," `T.isInfixOf`) failedA
+    assert "stinky-exhausted: record carries the session id" $
+      any ("\"session_id\":\"stinky-sid-full\"" `T.isInfixOf`) failedA
+    assert "stinky-exhausted: error names context exhaustion" $
+      "context exhausted" `T.isInfixOf` msgA
+    assert "stinky-exhausted: error says it is not retrying" $
+      "not retrying" `T.isInfixOf` msgA
+    storedA <- TIO.readFile sf
+    assert "stinky-exhausted: stored session id not clobbered" $
+      T.strip storedA == "stinky-sid-full"
+    -- (b) Fresh session exhausting the window: named, distinct error.
+    let sfB = dir </> "session-fresh"
+    resB <-
+      try (cliDeliverTo (mkCli sfB) (dir </> "transcript-b.jsonl") 2 "hello" >>= awaitTurn) ::
+        IO (Either SomeException (TurnResult Text))
+    let raisedB = case resB of
+          Left _ -> True
+          Right _ -> False
+        msgB = case resB of
+          Left err -> T.pack (show err)
+          Right _ -> ""
+    assert "stinky-exhausted: fresh turn raised" raisedB
+    assert "stinky-exhausted: fresh error names context exhaustion" $
+      "context exhausted" `T.isInfixOf` msgB
+    assert "stinky-exhausted: fresh error names the fresh path" $
+      "fresh session" `T.isInfixOf` msgB
     removePathForcibly dir

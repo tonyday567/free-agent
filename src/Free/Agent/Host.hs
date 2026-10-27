@@ -129,6 +129,7 @@ hermesCli model provider yolo sessionFile =
       cliStale = \_ out ->
         "No session found matching" `T.isInfixOf` out
           || "Session not found" `T.isInfixOf` out,
+      cliExhausted = \_ _ -> False,
       cliScrub = cleanCliOut,
       cliStderr = StderrMerge,
       cliStderrTee = Nothing

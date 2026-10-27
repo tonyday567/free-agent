@@ -96,8 +96,12 @@ data Cli = Cli
     -- | Scrape a session id from CLI output.  @const Nothing@ for CLIs
     -- without sessions; no session file is then ever written.
     cliSessionId :: Text -> Maybe Text,
-    -- | Is this (exit code, output) pair a stale-session response?
+    -- | Is this (exit code, output) a stale-session response?
     cliStale :: ExitCode -> Text -> Bool,
+    -- | Is this (exit code, output) a context-exhaustion response?
+    -- Detected attempts are never retried — the window is full and
+    -- each retry appends tokens to the same overfull session.
+    cliExhausted :: ExitCode -> Text -> Bool,
     -- | Noise filter applied to output before it becomes a reply body.
     cliScrub :: Text -> Text,
     -- | What to do with the process's stderr channel.
@@ -144,6 +148,7 @@ kimiCli model provider sessionFile =
       cliSessionId = kimiSessionId,
       cliStale = \_ out ->
         "Session \"" `T.isInfixOf` out && "not found" `T.isInfixOf` out,
+      cliExhausted = \_ _ -> False,
       cliScrub = kimiText,
       cliStderr = StderrDrop,
       -- Interiority log: NAME.sid -> NAME.stderr.log
@@ -181,6 +186,7 @@ grokCli model sessionFile =
       cliSessionId = jsonField "sessionId",
       cliStale = \code out ->
         code /= ExitSuccess || "Failed to restore session" `T.isInfixOf` out,
+      cliExhausted = \_ _ -> False,
       cliScrub = grokText,
       cliStderr = StderrMerge,
       cliStderrTee = Nothing
@@ -265,6 +271,11 @@ dshCli mCard basePatch mModelPatch sessionFile =
       cliSessionFile = sessionFile,
       cliSessionId = dshSessionId,
       cliStale = \_ out -> "does not exist; omit --session-id" `T.isInfixOf` out,
+      -- A turn on a session whose accumulated surface fills the context
+      -- window ends @turn_end@ with @reason {"kind":"max-tokens"}@,
+      -- an empty @final@, and exit 1.  Retrying appends tokens to the
+      -- same overfull session, so detected attempts are never retried.
+      cliExhausted = \_ out -> "\"reason\":{\"kind\":\"max-tokens\"}" `T.isInfixOf` out,
       cliScrub = dshText,
       cliStderr = StderrMerge,
       cliStderrTee = Nothing
@@ -305,6 +316,11 @@ parseSessionId out =
       let sid = T.strip (T.drop (T.length "session_id:") line)
        in if T.null sid then Nothing else Just sid
     [] -> Nothing
+
+-- | A non-zero, non-stale invocation of a resumed session, retained so
+-- the retry loop can record bounded evidence before deciding whether to
+-- retry or give up.
+data FailedAttempt = FailedAttempt Int ExitCode Text Int
 
 -- | Maximum retries for transient failures when resuming a session.
 -- A transient failure (non-zero exit, not stale) is retried with the
@@ -379,33 +395,69 @@ cliQueryWithDelivery delivery mControl cli prompt = do
             then fresh t0
             else
               if code /= ExitSuccess
-                then retryWithSession t0 sid 1
+                then retryWithSession t0 sid (FailedAttempt 1 code raw elapsed)
                 else settle t0 code raw routedOut elapsed
   where
-    retryWithSession t0' sid attempt
-      | attempt > cliMaxRetries = do
+    -- A non-zero, non-stale invocation of a resumed session.  n is the
+    -- 1-based attempt number (the initial invocation is attempt 1, each
+    -- retry increments).  cliMaxRetries retries follow the initial
+    -- attempt, so a fully-exhausted turn makes 1 + cliMaxRetries
+    -- invocations — the accounting the public error must carry.
+    --
+    -- Context exhaustion short-circuits the loop: a full window can
+    -- never be repaired by retrying, and each retry appends tokens to
+    -- the same session.  The failed-attempt record above retains the
+    -- bounded evidence either way.
+    retryWithSession t0' sid (FailedAttempt n code raw elapsed) = do
+      writeTranscript (TranscriptFailed, Just n) t0' code raw elapsed (Just sid)
+      if cliExhausted cli code raw
+        then do
           finishCli mControl
           fail
             ( "cliQuery: "
                 <> cliCommand cli
-                <> " exited non-zero "
-                <> show cliMaxRetries
-                <> " times; last attempt with session "
-                <> T.unpack (T.take 20 sid)
+                <> " session context exhausted at attempt "
+                <> show n
+                <> " (turn_end reason max-tokens); session "
+                <> T.unpack sid
+                <> "; not retrying — the window is full and each retry"
+                <> " appends tokens; evidence retained in the transcript;"
+                <> " last output: "
+                <> T.unpack (T.takeEnd 400 raw)
             )
-      | otherwise = do
-          threadDelay (100000 * attempt)
-          (code', raw', routedOut', elapsed') <- run t0' (Just sid)
-          cancelled <- isCliCancelled mControl
-          if cancelled
-            then cancelledTurn t0' code' raw' elapsed'
-            else
-              if cliStale cli code' raw'
-                then fresh t0'
+        else
+          if n > cliMaxRetries
+            then do
+              finishCli mControl
+              fail
+                ( "cliQuery: "
+                    <> cliCommand cli
+                    <> " resumed session failed after "
+                    <> show (1 + cliMaxRetries)
+                    <> " attempts (1 initial + "
+                    <> show cliMaxRetries
+                    <> " retries); last attempt "
+                    <> show n
+                    <> " exited "
+                    <> show code
+                    <> "; session "
+                    <> T.unpack sid
+                    <> "; last output: "
+                    <> T.unpack (T.take 400 raw)
+                )
+            else do
+              threadDelay (100000 * n)
+              (code', raw', routedOut', elapsed') <- run t0' (Just sid)
+              cancelled <- isCliCancelled mControl
+              if cancelled
+                then cancelledTurn t0' code' raw' elapsed'
                 else
-                  if code' /= ExitSuccess
-                    then retryWithSession t0' sid (attempt + 1)
-                    else settle t0' code' raw' routedOut' elapsed'
+                  if cliStale cli code' raw'
+                    then fresh t0'
+                    else
+                      if code' /= ExitSuccess
+                        then retryWithSession t0' sid (FailedAttempt (n + 1) code' raw' elapsed')
+                        else settle t0' code' raw' routedOut' elapsed'
     run t0' mSid = do
       cancelled <- isCliCancelled mControl
       if cancelled
@@ -463,27 +515,41 @@ cliQueryWithDelivery delivery mControl cli prompt = do
         else do
           when (code /= ExitSuccess) $ do
             finishCli mControl
-            fail
-              ( "cliQuery: "
-                  <> cliCommand cli
-                  <> " exited "
-                  <> show code
-                  <> ": "
-                  <> T.unpack (T.take 200 raw)
-              )
+            if cliExhausted cli code raw
+              then
+                fail
+                  ( "cliQuery: "
+                      <> cliCommand cli
+                      <> " context exhausted on a fresh session (turn_end"
+                      <> " reason max-tokens); the prompt exceeds the window;"
+                      <> " last output: "
+                      <> T.unpack (T.takeEnd 400 raw)
+                  )
+              else
+                fail
+                  ( "cliQuery: "
+                      <> cliCommand cli
+                      <> " exited "
+                      <> show code
+                      <> ": "
+                      <> T.unpack (T.take 200 raw)
+                  )
           settle t0' code raw routedOut elapsed
     settle t0' code raw routedOut elapsed = do
       finishCli mControl
       let mSid' = cliSessionId cli raw
       for_ mSid' (writeStoredSession (cliSessionFile cli))
-      writeTranscript TranscriptSettled t0' code raw elapsed mSid'
+      writeTranscript (TranscriptSettled, Nothing) t0' code raw elapsed mSid'
       pure (TurnResponse (cliScrub cli routedOut))
     cancelledTurn t0' code raw elapsed = do
       let mSid' = cliSessionId cli raw
       for_ mSid' (writeStoredSession (cliSessionFile cli))
-      writeTranscript TranscriptCancelled t0' code raw elapsed mSid'
+      writeTranscript (TranscriptCancelled, Nothing) t0' code raw elapsed mSid'
       pure TurnCancelled
-    writeTranscript outcome t0' code raw elapsed mSid' = do
+    -- Failed-attempt records are bounded: a crashed backend can stream
+    -- megabytes, and the transcript sink must stay inspectable.  Settled
+    -- and cancelled records keep the full raw stream.
+    writeTranscript (outcome, mAttempt) t0' code raw elapsed mSid' = do
       let writeAt pid path = do
             let rec =
                   TranscriptRecord
@@ -494,8 +560,11 @@ cliQueryWithDelivery delivery mControl cli prompt = do
                         ExitFailure n -> n,
                       trElapsedMs = elapsed,
                       trOutcome = outcome,
+                      trAttempt = mAttempt,
                       trSessionId = mSid',
-                      trRaw = raw
+                      trRaw = case outcome of
+                        TranscriptFailed -> T.take 4000 raw
+                        _ -> raw
                     }
                 line = encodeTranscriptLine rec <> "\n"
             catch
@@ -573,16 +642,20 @@ cleanCliOut =
         )
         t
 
-data TranscriptOutcome = TranscriptSettled | TranscriptCancelled
+data TranscriptOutcome = TranscriptSettled | TranscriptCancelled | TranscriptFailed
   deriving (Eq, Show)
 
 -- | One transcript record, as JSONL appended to the transcript log.
+-- A failed record carries the attempt number (1-based over all
+-- invocations of the turn, initial included) and its raw evidence is
+-- bounded — a crashed backend can stream unboundedly.
 data TranscriptRecord = TranscriptRecord
   { trPostId :: Int,
     trTimestamp :: UTCTime,
     trExitCode :: Int,
     trElapsedMs :: Int,
     trOutcome :: TranscriptOutcome,
+    trAttempt :: Maybe Int,
     trSessionId :: Maybe Text,
     trRaw :: Text
   }
@@ -599,7 +672,15 @@ encodeTranscriptLine r =
     <> ","
     <> kv "elapsed_ms" (T.pack (show (trElapsedMs r)))
     <> ","
-    <> kv "outcome" (case trOutcome r of TranscriptSettled -> "\"settled\""; TranscriptCancelled -> "\"cancelled\"")
+    <> kv
+      "outcome"
+      ( case trOutcome r of
+          TranscriptSettled -> "\"settled\""
+          TranscriptCancelled -> "\"cancelled\""
+          TranscriptFailed -> "\"failed\""
+      )
+    <> ","
+    <> kv "attempt" (maybe "null" (\n -> T.pack (show n)) (trAttempt r))
     <> ","
     <> kv "session_id" (maybe "null" (\t -> "\"" <> escapeText t <> "\"") (trSessionId r))
     <> ","

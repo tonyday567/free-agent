@@ -112,6 +112,7 @@ seatTopic = do
               cliSessionFile = sf,
               cliSessionId = parseSessionId,
               cliStale = \code _ -> code /= ExitSuccess,
+              cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
               cliStderrTee = Nothing
