@@ -163,20 +163,30 @@ busTopic = do
       idleDot == "🟢" && not ("crashed?" `T.isInfixOf` idleText)
     (legacyDot, _) <- hbVerdict 900 now (Just (Idle, old, Nothing))
     assert "an unverifiable stale legacy idle reads unknown, not live" $ legacyDot == "⚪"
-    (workingDot, _) <- hbVerdict 900 now (Just (Working, old, Just pid))
-    assert "a stale working seat still reads crashed" $ workingDot == "🔴"
-    (freshDot, _) <- hbVerdict 900 now (Just (Working, now, Just pid))
-    assert "a fresh working seat reads working" $ freshDot == "🟡"
+    (workingDot, workingText) <- hbVerdict 900 now (Just (Working, old, Just pid))
+    -- Mutation: restoring the stale-non-idle crash branch fails this oracle.
+    assert "a stale working seat with a live pid reads stale, not crashed" $
+      workingDot == "🟡" && "stale?" `T.isInfixOf` workingText && not ("crashed?" `T.isInfixOf` workingText)
+    (legacyWorkingDot, legacyWorkingText) <- hbVerdict 900 now (Just (Working, old, Nothing))
+    -- Mutation: treating missing pid evidence as a crash fails this oracle.
+    assert "a stale legacy working seat keeps liveness unknown" $
+      legacyWorkingDot == "⚪" && "stale?" `T.isInfixOf` legacyWorkingText && not ("crashed?" `T.isInfixOf` legacyWorkingText)
+    (freshDot, freshText) <- hbVerdict 900 now (Just (Working, now, Just pid))
+    -- Mutation: ignoring heartbeat age and warning on every live pid fails this.
+    assert "a fresh working seat reads working without a staleness warning" $
+      freshDot == "🟡" && not ("stale?" `T.isInfixOf` freshText) && not ("crashed?" `T.isInfixOf` freshText)
     (_, _, _, ph) <- createProcess (proc "sleep" ["0.01"])
     mpid <- getPid ph
     _ <- waitForProcess ph
     case mpid of
       Nothing -> assert "dead-pid oracle acquired a child pid" False
       Just deadPid -> do
-        (deadDot, deadText) <- hbVerdict 900 now (Just (Idle, old, Just deadPid))
-        assert "an idle heartbeat with a dead pid reads crashed" $
+        (deadDot, deadText) <- hbVerdict 900 now (Just (Working, old, Just deadPid))
+        -- Mutation: dropping dead-pid precedence turns this into a stale warning.
+        assert "a stale working heartbeat with a dead pid reads crashed" $
           deadDot == "🔴" && "crashed?" `T.isInfixOf` deadText
     (retiredDot, retiredText) <- hbVerdict 900 now (Just (Dead, old, Just pid))
+    -- Mutation: treating explicit dead as an ordinary stale live state fails this.
     assert "an explicit dead marker reads retired" $
       retiredDot == "🔴" && "retired" `T.isInfixOf` retiredText
     removePathForcibly root

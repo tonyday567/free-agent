@@ -23,8 +23,8 @@
 -- @--depth@ selects the cascade: 0 is a dot, 1 is one line, 2 is the
 -- verbatim evidence. The depth is always an explicit flag; the api never
 -- guesses the consumer. @status --live@ derives its dots from the seat
--- heartbeats (@.hb-NAME@, see "Free.Agent.Bus.Heartbeat"), so a stale
--- heartbeat reads as crashed instead of as live.
+-- heartbeats (@.hb-NAME@, see "Free.Agent.Bus.Heartbeat"): pid evidence
+-- separates a crash from a live but stale seat.
 module Free.Agent.Bus.Cli
   ( BusCommand (..),
     Depth (..),
@@ -578,6 +578,10 @@ runPingWatch root name = do
 data SeatStatus = CaughtUp | Done | Behind Integer
 
 -- | Liveness from state, age, and (for current files) a process probe.
+-- An explicit dead marker is retired and a dead pid is crashed. A stale
+-- wake/working state with a live pid is stale, not crashed; without a
+-- trustworthy probe its liveness stays unknown. Idle uses the pid probe
+-- without ageing out.
 hbVerdict :: NominalDiffTime -> UTCTime -> Maybe Heartbeat -> IO (Text, Text)
 hbVerdict threshold now mhb = case mhb of
   Nothing -> pure ("⚪", "no heartbeat")
@@ -591,7 +595,9 @@ hbVerdict threshold now mhb = case mhb of
         ordinary = (hbGlyph st, hbText st <> " " <> fmtAge age <> " ago")
         verdict
           | alive == Just False = ("🔴", "pid " <> maybe "?" (T.pack . show) mpid <> " is not running — crashed?")
-          | st /= Idle && stale = ("🔴", "no transition for " <> fmtAge age <> " — crashed?")
+          | st /= Idle && stale && alive == Just True =
+              ("🟡", hbText st <> " " <> fmtAge age <> " ago; pid " <> maybe "?" (T.pack . show) mpid <> " alive — stale?")
+          | st /= Idle && stale = ("⚪", hbText st <> " " <> fmtAge age <> " ago; liveness unknown — stale?")
           | legacyUnknown = ("⚪", "idle " <> fmtAge age <> " ago; no pid — liveness unknown")
           | probeUnknown = ("⚪", "idle " <> fmtAge age <> " ago; pid liveness unknown")
           | otherwise = ordinary
@@ -621,8 +627,10 @@ fmtAge s
 --
 -- With @--live@ the seat block is derived from the heartbeats instead: one
 -- dot per seat, a line of state, cursor and last post, and — at depth 2 —
--- the heartbeat file and the seat's last post verbatim. Wake and working
--- staleness reads as crashed; idle uses the heartbeat pid for liveness.
+-- the heartbeat file and the seat's last post verbatim. Stale wake and
+-- working states warn as stale when their pid is alive, or as unknown when
+-- the probe is inconclusive; a dead pid reads crashed. Idle uses the
+-- heartbeat pid for liveness and an explicit dead marker reads retired.
 runStatus :: FilePath -> NominalDiffTime -> Bool -> Depth -> IO ()
 runStatus root threshold live depth@(Depth d) = do
   let path = root </> "log.jsonl"
