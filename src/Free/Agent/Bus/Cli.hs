@@ -30,6 +30,7 @@ module Free.Agent.Bus.Cli
     Depth (..),
     busParser,
     depthOpt,
+    hbVerdict,
     liveOpt,
     readyPosts,
     runBusCommand,
@@ -42,10 +43,11 @@ import Circuit.Agent.Framing (Stamped, frameStored, parsePost, stamp, stamped, u
 import Circuit.Agent.Mark (isHalt, markOf)
 import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Exception (IOException, try)
 import Control.Monad (forM_, forever, guard, unless, when)
 import Data.Foldable (traverse_)
 import Data.List (isPrefixOf, sort, sortOn)
-import Data.Maybe (listToMaybe, mapMaybe, maybe)
+import Data.Maybe (isJust, listToMaybe, mapMaybe, maybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -55,7 +57,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Free.Agent.Bus (postLocal, readFileStrict)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (readCursor, writeCursor)
-import Free.Agent.Bus.Heartbeat (HbState (..), hbGlyph, hbText, readHeartbeat)
+import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbGlyph, hbText, readHeartbeat)
 import Free.Agent.BusStats (SliceMode (..), slicePosts)
 import Free.Agent.Cli.Config (rootOpt)
 import Options.Applicative
@@ -80,6 +82,9 @@ import System.IO
     stdout,
     withFile,
   )
+import System.IO.Error (isDoesNotExistError, isPermissionError)
+import System.Posix.Signals (nullSignal, signalProcess)
+import System.Posix.Types (CPid)
 import Text.Read (readMaybe)
 
 -- | Cascade depth: 0 is a dot, 1 is a line, 2 is the verbatim evidence.
@@ -572,6 +577,43 @@ runPingWatch root name = do
 -- | Seat status classification for the cursor report.
 data SeatStatus = CaughtUp | Done | Behind Integer
 
+-- | Liveness from state, age, and (for current files) a process probe.
+hbVerdict :: NominalDiffTime -> UTCTime -> Maybe Heartbeat -> IO (Text, Text)
+hbVerdict threshold now mhb = case mhb of
+  Nothing -> pure ("⚪", "no heartbeat")
+  Just (Dead, ts, _) -> pure ("🔴", "retired " <> fmtAge (diffUTCTime now ts) <> " ago")
+  Just (st, ts, mpid) -> do
+    alive <- maybe (pure Nothing) pidAlive mpid
+    let age = diffUTCTime now ts
+        stale = age > threshold
+        legacyUnknown = st == Idle && stale && mpid == Nothing && alive == Nothing
+        probeUnknown = st == Idle && isJust mpid && alive == Nothing
+        ordinary = (hbGlyph st, hbText st <> " " <> fmtAge age <> " ago")
+        verdict
+          | alive == Just False = ("🔴", "pid " <> maybe "?" (T.pack . show) mpid <> " is not running — crashed?")
+          | st /= Idle && stale = ("🔴", "no transition for " <> fmtAge age <> " — crashed?")
+          | legacyUnknown = ("⚪", "idle " <> fmtAge age <> " ago; no pid — liveness unknown")
+          | probeUnknown = ("⚪", "idle " <> fmtAge age <> " ago; pid liveness unknown")
+          | otherwise = ordinary
+    pure verdict
+
+pidAlive :: CPid -> IO (Maybe Bool)
+pidAlive pid = do
+  result <- try @IOException (signalProcess nullSignal pid)
+  pure $ case result of
+    Right () -> Just True
+    Left e
+      | isDoesNotExistError e -> Just False
+      | isPermissionError e -> Just True
+      | otherwise -> Nothing
+
+fmtAge :: NominalDiffTime -> Text
+fmtAge s
+  | s < 120 = T.pack (show (round s :: Int)) <> "s"
+  | s < 7200 = T.pack (show (round (s / 60) :: Int)) <> "m"
+  | s < 172800 = T.pack (show (round (s / 3600) :: Int)) <> "h"
+  | otherwise = T.pack (show (round (s / 86400) :: Int)) <> "d"
+
 -- | Print a bus status report.
 --
 -- A seat whose latest own post is a halt mark (🟢/🔵) is reported as @done@
@@ -579,8 +621,8 @@ data SeatStatus = CaughtUp | Done | Behind Integer
 --
 -- With @--live@ the seat block is derived from the heartbeats instead: one
 -- dot per seat, a line of state, cursor and last post, and — at depth 2 —
--- the heartbeat file and the seat's last post verbatim. A heartbeat with no
--- transition inside the threshold reads as crashed, never as live.
+-- the heartbeat file and the seat's last post verbatim. Wake and working
+-- staleness reads as crashed; idle uses the heartbeat pid for liveness.
 runStatus :: FilePath -> NominalDiffTime -> Bool -> Depth -> IO ()
 runStatus root threshold live depth@(Depth d) = do
   let path = root </> "log.jsonl"
@@ -670,8 +712,8 @@ runStatus root threshold live depth@(Depth d) = do
 
     -- One seat at the requested depth.
     renderSeat now posts (n, mcursor, mhb) = do
-      let (dot, stateText) = hbVerdict now mhb
-          cursorText = maybe "—" (T.pack . show) mcursor
+      (dot, stateText) <- hbVerdict threshold now mhb
+      let cursorText = maybe "—" (T.pack . show) mcursor
           lastText = case lastFor n posts of
             Nothing -> "no posts"
             Just s ->
@@ -687,20 +729,17 @@ runStatus root threshold live depth@(Depth d) = do
         else do
           TIO.putStrLn (dot <> " " <> n <> " — " <> stateText <> "; cursor " <> cursorText <> "; " <> lastText)
           when (d >= 2) $ do
-            forM_ mhb $ \(st, ts) ->
-              TIO.putStrLn ("    hb: " <> hbText st <> " " <> T.pack (iso8601Show ts))
+            forM_ mhb $ \(st, ts, mpid) ->
+              TIO.putStrLn
+                ( "    hb: "
+                    <> hbText st
+                    <> " "
+                    <> T.pack (iso8601Show ts)
+                    <> " pid="
+                    <> maybe "legacy" (T.pack . show) mpid
+                )
             forM_ (lastFor n posts) $ \s ->
               TIO.putStrLn ("    log: " <> frameStored s)
-
-    -- A seat's liveness: no file is unknown, a stale file is crashed, a
-    -- retire marker is retired, otherwise the state reads as written.
-    hbVerdict now mhb = case mhb of
-      Nothing -> ("⚪", "no heartbeat")
-      Just (Dead, ts) -> ("🔴", "retired " <> fmtAge (diffUTCTime now ts) <> " ago")
-      Just (st, ts)
-        | diffUTCTime now ts > threshold ->
-            ("🔴", "no transition for " <> fmtAge (diffUTCTime now ts) <> " — crashed?")
-        | otherwise -> (hbGlyph st, hbText st <> " " <> fmtAge (diffUTCTime now ts) <> " ago")
 
     -- The last post a seat was party to, in either direction.
     lastFor n posts =
@@ -727,10 +766,3 @@ runStatus root threshold live depth@(Depth d) = do
 
     latestBy :: Name -> [Stamped Text] -> Maybe (Stamped Text)
     latestBy n = listToMaybe . sortOn (Down . snd . stamp) . filter ((== n) . from . stamped)
-
-fmtAge :: NominalDiffTime -> Text
-fmtAge s
-  | s < 120 = T.pack (show (round s :: Int)) <> "s"
-  | s < 7200 = T.pack (show (round (s / 60) :: Int)) <> "m"
-  | s < 172800 = T.pack (show (round (s / 3600) :: Int)) <> "h"
-  | otherwise = T.pack (show (round (s / 86400) :: Int)) <> "d"

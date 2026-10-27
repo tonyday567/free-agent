@@ -102,9 +102,9 @@ runAgentLoop agentName names root mQuiesce grant handlePost = do
   cursor <- readCursor root agentName
   TIO.putStrLn $ "   cursor: " <> T.pack (cursorPath root agentName) <> " @ " <> T.pack (show cursor)
   -- Heartbeats: wake on start, working around each delivered post, idle
-  -- after it, dead on clean exit. The file is the seat's only liveness
-  -- claim — `bus status --live` derives crash from staleness, never from
-  -- a claim, so the seat writes states and nothing else.
+  -- after it, dead on clean exit. The file carries state, timestamp, and
+  -- pid. `bus status --live` probes the pid for idle liveness and uses
+  -- staleness only for states that promise another transition.
   writeHeartbeat root agentName Wake
   tailLog path names cursor (fmap (\qc -> (qc, onQuiesce)) mQuiesce) $ \stored -> do
     writeHeartbeat root agentName Working

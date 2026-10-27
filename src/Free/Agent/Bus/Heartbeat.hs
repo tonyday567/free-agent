@@ -5,19 +5,20 @@
 -- A seat writes @.hb-NAME@ in the bus root on every transition — wake,
 -- working, idle — and a final @dead@ when it exits. The file is one line:
 --
--- > <state> <utc-timestamp>
+-- > <state> <utc-timestamp> <pid>
 --
--- Nothing else is written, because a dot that lies is worse than no dot:
--- the file carries only what a seat can know about itself, and the reader
--- derives crash from staleness (no transition past the threshold) rather
--- than from a claim. A torn read parses to 'Nothing' and reads as unknown,
--- never as a wrong state.
+-- Legacy files without a pid still parse, but an old idle legacy file reads
+-- as unknown rather than live. A current file lets the reader probe the pid
+-- without polling or invoking the seat. Staleness remains meaningful for
+-- wake and working, which promise a later transition; idle is the parking
+-- state and uses pid liveness instead. A torn read parses to 'Nothing'.
 --
 -- The seat manager writes the same file with @dead@ when it retires a seat
 -- it launched; the seat writes @dead@ itself on a clean exit.
 module Free.Agent.Bus.Heartbeat
   ( -- * States
     HbState (..),
+    Heartbeat,
     hbGlyph,
     hbText,
 
@@ -37,6 +38,9 @@ import Data.Time (UTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import System.Directory (doesFileExist)
 import System.FilePath ((</>))
+import System.Posix.Process (getProcessID)
+import System.Posix.Types (CPid)
+import Text.Read (readMaybe)
 
 -- | The three live states plus the retire marker.
 --
@@ -50,6 +54,8 @@ data HbState
   | Idle
   | Dead
   deriving (Eq, Ord, Show, Enum, Bounded)
+
+type Heartbeat = (HbState, UTCTime, Maybe CPid)
 
 -- | The glyph a state renders as in a dot column: ready and starting are
 -- both 🟢 (there is a process and it is not busy), working is 🟡, retired
@@ -78,10 +84,11 @@ hbPath root name = root </> (".hb-" <> T.unpack name)
 writeHeartbeat :: FilePath -> Name -> HbState -> IO ()
 writeHeartbeat root name st = do
   ts <- getCurrentTime
-  TIO.writeFile (hbPath root name) (hbText st <> " " <> T.pack (iso8601Show ts) <> "\n")
+  pid <- getProcessID
+  TIO.writeFile (hbPath root name) (hbText st <> " " <> T.pack (iso8601Show ts) <> " " <> T.pack (show pid) <> "\n")
 
 -- | Read a seat's heartbeat, if the file exists and parses.
-readHeartbeat :: FilePath -> Name -> IO (Maybe (HbState, UTCTime))
+readHeartbeat :: FilePath -> Name -> IO (Maybe Heartbeat)
 readHeartbeat root name = do
   let path = hbPath root name
   exists <- doesFileExist path
@@ -89,10 +96,11 @@ readHeartbeat root name = do
     then pure Nothing
     else parseHb <$> TIO.readFile path
 
--- | Parse @state timestamp@.
-parseHb :: Text -> Maybe (HbState, UTCTime)
+-- | Parse current @state timestamp pid@ and legacy @state timestamp@ files.
+parseHb :: Text -> Maybe Heartbeat
 parseHb t = case T.words (T.strip t) of
-  (s : ts : _) -> (,) <$> stateOf s <*> iso8601ParseM (T.unpack ts)
+  [s, ts] -> (,,) <$> stateOf s <*> iso8601ParseM (T.unpack ts) <*> pure Nothing
+  [s, ts, pid] -> (,,) <$> stateOf s <*> iso8601ParseM (T.unpack ts) <*> (Just <$> readMaybe (T.unpack pid))
   _ -> Nothing
   where
     stateOf s = lookup s [(hbText st, st) | st <- [minBound .. maxBound]]

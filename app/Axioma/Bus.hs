@@ -19,10 +19,12 @@ import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.Time (addUTCTime, getCurrentTime)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (openBus, postLocal, readFileStrict, runSeatBus)
-import Free.Agent.Bus.Cli (readyPosts)
+import Free.Agent.Bus.Cli (hbVerdict, readyPosts)
 import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, writeCursor)
+import Free.Agent.Bus.Heartbeat (HbState (..), parseHb, readHeartbeat, writeHeartbeat)
 import Free.Agent.BusStats
   ( Classification (..),
     SliceMode (..),
@@ -37,6 +39,8 @@ import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, n
 import Free.Agent.Host (hostShard, mkHost)
 import System.Directory (removePathForcibly)
 import System.FilePath ((</>))
+import System.Posix.Process (getProcessID)
+import System.Process (createProcess, getPid, proc, waitForProcess)
 
 ioTurn :: IO [Post Text] -> IO (Turn [Post Text])
 ioTurn action =
@@ -134,6 +138,48 @@ busTopic = do
           let stats = computeStats defaultRules 1 "b" ps
            in statSignal stats == 1 && statNoise stats == 1
         _ -> False
+
+  -------------------------------------------------------------------------
+  -- Idle age is not a crash signal; pid evidence separates parked from dead.
+  -------------------------------------------------------------------------
+  putStrLn "bus heartbeat liveness"
+  do
+    root <- tempRoot "free-agent-heartbeat"
+    now <- getCurrentTime
+    pid <- getProcessID
+    let old = addUTCTime (-3600) now
+    writeHeartbeat root "live" Idle
+    current <- readHeartbeat root "live"
+    assert "heartbeat writer records the seat pid" $
+      case current of
+        Just (Idle, _, Just writtenPid) -> writtenPid == pid
+        _ -> False
+    assert "legacy heartbeat files still parse without a pid" $
+      case parseHb "idle 2026-10-28T00:00:00Z" of
+        Just (Idle, _, Nothing) -> True
+        _ -> False
+    (idleDot, idleText) <- hbVerdict 900 now (Just (Idle, old, Just pid))
+    assert "a live idle seat stays green beyond the staleness threshold" $
+      idleDot == "🟢" && not ("crashed?" `T.isInfixOf` idleText)
+    (legacyDot, _) <- hbVerdict 900 now (Just (Idle, old, Nothing))
+    assert "an unverifiable stale legacy idle reads unknown, not live" $ legacyDot == "⚪"
+    (workingDot, _) <- hbVerdict 900 now (Just (Working, old, Just pid))
+    assert "a stale working seat still reads crashed" $ workingDot == "🔴"
+    (freshDot, _) <- hbVerdict 900 now (Just (Working, now, Just pid))
+    assert "a fresh working seat reads working" $ freshDot == "🟡"
+    (_, _, _, ph) <- createProcess (proc "sleep" ["0.01"])
+    mpid <- getPid ph
+    _ <- waitForProcess ph
+    case mpid of
+      Nothing -> assert "dead-pid oracle acquired a child pid" False
+      Just deadPid -> do
+        (deadDot, deadText) <- hbVerdict 900 now (Just (Idle, old, Just deadPid))
+        assert "an idle heartbeat with a dead pid reads crashed" $
+          deadDot == "🔴" && "crashed?" `T.isInfixOf` deadText
+    (retiredDot, retiredText) <- hbVerdict 900 now (Just (Dead, old, Just pid))
+    assert "an explicit dead marker reads retired" $
+      retiredDot == "🔴" && "retired" `T.isInfixOf` retiredText
+    removePathForcibly root
 
   -------------------------------------------------------------------------
   -- READY is a pure reader over the log, not a second task store.
