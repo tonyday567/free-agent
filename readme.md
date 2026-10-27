@@ -62,6 +62,7 @@ Without the daemon, `bus say` and `bus post` self-stamp under the log lock. With
 free-agent bus say [-r ROOT] BODY... [--from NAME] [--to NAME]... [--thread ID]
 free-agent bus post [-r ROOT] [--from NAME] [--to NAME]... [--body TEXT] [--via-daemon]
 free-agent bus read [-r ROOT] [NAME...] [--since ID | --cursor NAME | --thread ID] [--depth 0|1|2]
+free-agent bus ready [-r ROOT] [--depth 0|1|2]
 free-agent bus watch [-r ROOT] NAME...
 free-agent bus cursor [-r ROOT] get NAME
 free-agent bus cursor [-r ROOT] set NAME ID
@@ -74,6 +75,7 @@ Useful entry points:
 
 - `say` is the short act path for humans; body words can also be piped on stdin.
 - `read` prints posts addressed to the named seats, a thread, or everything at and after a cursor.
+- `ready` lists unclaimed open TASK offers with no unresolved blocker. Directed TASKs are assigned at creation; first CLAIM owns an open offer, and only the owner's DONE completes it.
 - `watch` follows addressed posts as they arrive.
 - `cursor get` and `cursor set` inspect or repair a seat's resume position.
 - `ping-watch` waits for the next change to a seat's ping latch.

@@ -21,6 +21,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (openBus, postLocal, readFileStrict, runSeatBus)
+import Free.Agent.Bus.Cli (readyPosts)
 import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, writeCursor)
 import Free.Agent.BusStats
   ( Classification (..),
@@ -133,6 +134,58 @@ busTopic = do
           let stats = computeStats defaultRules 1 "b" ps
            in statSignal stats == 1 && statNoise stats == 1
         _ -> False
+
+  -------------------------------------------------------------------------
+  -- READY is a pure reader over the log, not a second task store.
+  -------------------------------------------------------------------------
+  putStrLn "bus task READY view"
+  do
+    let stored i f audience ancestors text = case parseTimeText "2026-10-28T00:00:00" of
+          Just ts -> Stamped (ts, i) (Post f Nothing audience ancestors text)
+          Nothing -> error "bad READY fixture timestamp"
+        readyIds = map (snd . stamp) . readyPosts
+        posts =
+          [ stored 0 "moka" [] [] "TASK · open offer",
+            stored 1 "moka" [] [] "TASK · claimed offer",
+            stored 2 "mucho" ["moka"] [1] "CLAIM · task 1",
+            stored 3 "moka" ["mucho"] [] "TASK · assigned work",
+            stored 4 "moka" [] [] "TASK · completed offer",
+            stored 5 "mucho" ["moka"] [4] "CLAIM · task 4",
+            stored 6 "mucho" ["moka"] [4] "DONE · task 4",
+            stored 7 "moka" [] [] "TASK · blocked offer",
+            stored 8 "moka" [] [] "LINK · 0 blocks 7",
+            stored 9 "moka" [] [] "TASK · resolved offer",
+            stored 10 "moka" ["mucho"] [] "TASK · assigned blocker",
+            stored 11 "mucho" ["moka"] [10] "DONE · task 10",
+            stored 12 "moka" [] [] "LINK · 10 blocks 9",
+            stored 13 "mucho" ["moka"] [0] "NOTE · unrelated reply",
+            stored 14 "moka" [] [] "TASKED · malformed prose",
+            stored 15 "moka" [] [] "LINK · malformed dependency"
+          ]
+    assert "READY contains only unclaimed open offers with resolved blockers" $ readyIds posts == [0, 9]
+    assert "a CLAIM removes an open offer" $ 1 `notElem` readyIds posts
+    assert "a directed TASK is assigned rather than READY" $ 3 `notElem` readyIds posts
+    assert "an owner DONE removes an open offer" $ 4 `notElem` readyIds posts
+    assert "an incomplete blocker withholds READY" $ 7 `notElem` readyIds posts
+    assert "a completed blocker releases READY" $ 9 `elem` readyIds posts
+    assert "unrelated replies and malformed prose do not change READY" $ readyIds posts == readyIds (take 13 posts)
+
+  do
+    let stored i f audience ancestors text = case parseTimeText "2026-10-28T00:00:00" of
+          Just ts -> Stamped (ts, i) (Post f Nothing audience ancestors text)
+          Nothing -> error "bad READY conflict fixture timestamp"
+        readyIds = map (snd . stamp) . readyPosts
+        posts =
+          [ stored 20 "moka" [] [] "TASK · contested blocker",
+            stored 21 "mucho" ["moka"] [20] "CLAIM · task 20",
+            stored 22 "stinky" ["moka"] [20] "CLAIM · task 20",
+            stored 23 "stinky" ["moka"] [20] "DONE · task 20",
+            stored 24 "moka" [] [] "TASK · dependent offer",
+            stored 25 "moka" [] [] "LINK · 20 blocks 24"
+          ]
+    assert "a later claimer cannot complete the first claimer's task" $ readyIds posts == []
+    assert "the first claimer's DONE resolves the dependent offer" $
+      readyIds (posts <> [stored 26 "mucho" ["moka"] [20] "DONE · task 20"]) == [24]
 
   -------------------------------------------------------------------------
   -- Bus seat: the in-process runner, decided quiet included

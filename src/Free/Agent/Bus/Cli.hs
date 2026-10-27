@@ -10,6 +10,7 @@
 --   post [ROOT] [--from NAME] [--to NAME]... [--body TEXT]
 --   watch [ROOT] NAME [NAME...]
 --   read [ROOT] [NAME...] [--since ID | --cursor NAME | --thread ID] [--depth 0|1|2]
+--   ready [ROOT] [--depth 0|1|2]
 --   cursor [ROOT] get NAME
 --   cursor [ROOT] set NAME ID
 --   ping-watch [ROOT] NAME
@@ -30,6 +31,7 @@ module Free.Agent.Bus.Cli
     busParser,
     depthOpt,
     liveOpt,
+    readyPosts,
     runBusCommand,
     runStatus,
   )
@@ -92,6 +94,7 @@ data BusCommand
   | PostCommand FilePath (Maybe Text) [Text] (Maybe Text) Bool
   | WatchCommand FilePath [Text]
   | ReadCommand FilePath [Text] (Maybe Since) (Maybe PostId) Depth
+  | ReadyCommand FilePath Depth
   | CursorGetCommand FilePath Text
   | CursorSetCommand FilePath Text PostId
   | PingWatchCommand FilePath Text
@@ -202,6 +205,9 @@ readCmd = do
   depth <- depthOpt (Depth 2)
   pure (ReadCommand root names since thr depth)
 
+readyCmd :: Parser BusCommand
+readyCmd = ReadyCommand <$> rootOpt <*> depthOpt (Depth 1)
+
 sinceParser :: Parser Since
 sinceParser =
   (SinceId <$> option auto (long "since" <> metavar "ID" <> help "Only posts with id >= ID"))
@@ -264,6 +270,7 @@ busParser =
         <> command "post" (info (postCmd <**> helper) (progDesc "Post a message to the bus (flags or JSON on stdin)"))
         <> command "watch" (info (watchCmd <**> helper) (progDesc "Watch the log for posts addressed to NAMEs"))
         <> command "read" (info (readCmd <**> helper) (progDesc "Read posts addressed to NAMEs, or a thread by id"))
+        <> command "ready" (info (readyCmd <**> helper) (progDesc "List unclaimed open TASKs with no unresolved blocker"))
         <> command "cursor" (info (cursorCmd <**> helper) (progDesc "Read or write agent cursor"))
         <> command "ping-watch" (info (pingWatchCmd <**> helper) (progDesc "Watch the ping file for NAME and exit on change"))
         <> command "status" (info (statusCmd <**> helper) (progDesc "Bus health: post count, last post, seats, seat liveness"))
@@ -279,6 +286,7 @@ runBusCommand (SayCommand root fromName toNames thr body) = runSay root fromName
 runBusCommand (PostCommand root mfrom mto mbody viaDaemon) = runPost root mfrom mto mbody viaDaemon
 runBusCommand (WatchCommand root names) = runWatch root names
 runBusCommand (ReadCommand root names since thr depth) = runRead root names since thr depth
+runBusCommand (ReadyCommand root depth) = runReady root depth
 runBusCommand (CursorGetCommand root name) = runCursorGet root name
 runBusCommand (CursorSetCommand root name pid) = runCursorSet root name pid
 runBusCommand (PingWatchCommand root name) = runPingWatch root name
@@ -429,6 +437,68 @@ runRead root names since mThread depth = do
 postsOf :: Text -> [Stamped Text]
 postsOf content = mapMaybe (unframeStored @Text) (filter (not . T.null) (T.lines content))
 
+runReady :: FilePath -> Depth -> IO ()
+runReady root depth = do
+  let path = root </> "log.jsonl"
+  exists <- doesFileExist path
+  content <- if exists then readFileStrict path else pure ""
+  traverse_ (TIO.putStrLn . renderStored depth) (readyPosts (postsOf content))
+
+-- | Open TASK offers that have no claim, owner DONE, or unresolved blocker.
+-- A directed TASK is assigned at creation and is therefore not an open offer.
+readyPosts :: [Stamped Text] -> [Stamped Text]
+readyPosts posts = filter isReady [task | task <- posts, isRootTask task, null (to (stamped task))]
+  where
+    isReady task =
+      let component = componentOf task
+          owner = taskOwner task component
+          blockers = blockersFor (snd (stamp task))
+       in owner == Nothing
+            && not (taskComplete owner component)
+            && all blockerResolved blockers
+
+    componentOf task =
+      case [vs | (_, vs) <- slicePosts ByThread posts, any ((== snd (stamp task)) . snd . stamp) vs] of
+        (vs : _) -> sortOn (snd . stamp) vs
+        [] -> [task]
+
+    taskOwner task component =
+      case to (stamped task) of
+        [assignee] -> Just assignee
+        [] -> listToMaybe [from (stamped reply) | reply <- component, hasKind "CLAIM" reply]
+        _ -> Nothing
+
+    taskComplete owner component =
+      maybe False (\name -> any (\reply -> hasKind "DONE" reply && from (stamped reply) == name) component) owner
+
+    blockersFor taskId =
+      [ blocker
+      | stored <- posts,
+        Just (blocker, target) <- pure (parseBlockLink (body (stamped stored))),
+        target == taskId
+      ]
+
+    blockerResolved blocker =
+      any
+        ( \task ->
+            let component = componentOf task
+             in snd (stamp task) == blocker
+                  && isRootTask task
+                  && taskComplete (taskOwner task component) component
+        )
+        posts
+
+    isRootTask stored = null (thread (stamped stored)) && hasKind "TASK" stored
+
+    hasKind kind stored = case T.words (body (stamped stored)) of
+      (actual : _) -> actual == kind
+      [] -> False
+
+    parseBlockLink text = case T.words text of
+      ("LINK" : "·" : blocker : "blocks" : target : _) ->
+        (,) <$> readMaybe (T.unpack blocker) <*> readMaybe (T.unpack target)
+      _ -> Nothing
+
 -- | The thread view: the connected component of the given id under the
 -- schema's @thread@ field. Roots carry @thread = []@, replies cite their
 -- ancestors, so the root of a post is the least ancestor present in the
@@ -461,7 +531,7 @@ renderStored (Depth d) stored
     headLine = pid <> " " <> from p <> "→" <> route
     pid = T.pack (show (snd (stamp stored)))
     route = case [n | n <- to p, not (T.null n)] of
-      [] -> "all"
+      [] -> "public"
       ns -> T.intercalate "," ns
     excerpt = T.take 72 (T.takeWhile (/= '\n') (T.strip (body p)))
 
