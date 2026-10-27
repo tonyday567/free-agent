@@ -1,38 +1,27 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | transcript oracle (B1): a JSONL record per cliQuery, scrub agreement,
--- silent failure when the directory is missing.
+-- | Transcript oracle: per-delivery causation, raw/scrub agreement, and
+-- non-fatal transcript sink failure.
 module Axioma.Transcript
   ( transcriptTopic,
   )
 where
 
-import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (AgentShard, Post (..), closeShardIO)
-import Data.IORef (newIORef, writeIORef)
-import Data.Text (Text)
+import Axioma.Common (assert, tempRoot)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
-import Free.Agent.Host (cliHost, hostShard)
-import System.Directory (doesFileExist, removePathForcibly)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliDeliverTo, parseSessionId)
+import Free.Agent.Delivery (TurnResult (..), awaitTurn)
+import System.Directory (removePathForcibly)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 
 transcriptTopic :: IO ()
 transcriptTopic = do
-  -------------------------------------------------------------------------
-  -- Transcript oracle (B1): cliQuery appends a JSONL record when
-  -- cliTranscript is set, and scrubbing the recorded raw reproduces the
-  -- posted reply body.  Failure is silent — a missing directory does not
-  -- prevent the seat from working.
-  -------------------------------------------------------------------------
   putStrLn "Transcript oracle"
-
   do
     dir <- tempRoot "free-agent-transcript-axioma"
     let script = dir </> "fake-cli.sh"
-        sf = dir </> "session"
         transcriptLog = dir </> "transcripts" </> "fake.jsonl"
         badTranscriptLog = script </> "transcripts" </> "fake.jsonl"
     TIO.writeFile script $
@@ -49,55 +38,41 @@ transcriptTopic = do
             { cliCommand = "/bin/sh",
               cliArgv = \_ mSid -> [script] <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
               cliStdin = T.unpack,
-              cliSessionFile = sf,
+              cliSessionFile = dir </> "session",
               cliSessionId = parseSessionId,
               cliStale = \code _ -> code /= ExitSuccess,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing,
-              cliTranscript = Nothing
+              cliStderrTee = Nothing
             }
-    -- Part 1: transcript disabled → no file written, cliQuery still works
-    result1 <- cliQuery cli "hello"
-    exists1 <- doesFileExist transcriptLog
-    assert "transcript not written when cliTranscript is Nothing" (not exists1)
-    assert "cliQuery still works without transcript" $ "stdin:hello" `T.isInfixOf` result1
-
-    -- Part 2: transcript enabled → one record written per cliQuery call
-    postRef <- newIORef 42
-    let cliEnabled = cli {cliTranscript = Just (postRef, transcriptLog)}
-    result2 <- cliQuery cliEnabled "hi there"
-    assert "cliQuery with transcript still produces reply" $ "stdin:hi there" `T.isInfixOf` result2
-    -- Check transcript file exists and has one valid JSONL record
+    result <- cliDeliverTo cli transcriptLog 42 "hi there" >>= awaitTurn
+    assert "delivery returns the response and writes its transcript" $
+      case result of
+        TurnResponse response -> "stdin:hi there" `T.isInfixOf` response
+        TurnCancelled -> False
     tlog <- TIO.readFile transcriptLog
-    let tlines = filter (not . T.null) (T.lines tlog)
-    assert "transcript has exactly one record" $ length tlines == 1
-    line <- case tlines of
-      [x] -> pure x
-      _ -> error "expected exactly one transcript record"
-    assert "transcript record has post_id:42" $ "\"post_id\":42" `T.isInfixOf` line
-    assert "transcript record has exit_code:0" $ "\"exit_code\":0" `T.isInfixOf` line
-    assert "transcript record has session_id" $ "\"session_id\":\"fake-tid\"" `T.isInfixOf` line
-    assert "transcript record contains raw" $ "\"raw\":\"" `T.isInfixOf` line
-    assert "transcript raw has stdout content" $ "stdin:hi there" `T.isInfixOf` line
-    assert "transcript raw has stderr content" $ "hello from stderr" `T.isInfixOf` line
+    let records = filter (not . T.null) (T.lines tlog)
+    assert "transcript has exactly one record" $ length records == 1
+    case records of
+      [line] -> do
+        assert "transcript record has explicit post_id:42" $ "\"post_id\":42" `T.isInfixOf` line
+        assert "transcript record has exit_code:0" $ "\"exit_code\":0" `T.isInfixOf` line
+        assert "transcript record has settled outcome" $ "\"outcome\":\"settled\"" `T.isInfixOf` line
+        assert "transcript record has session_id" $ "\"session_id\":\"fake-tid\"" `T.isInfixOf` line
+        assert "transcript raw has stdout and stderr" $
+          "stdin:hi there" `T.isInfixOf` line && "hello from stderr" `T.isInfixOf` line
+      _ -> assert "expected one transcript record" False
 
-    -- Part 3: silent failure — write to an impossible path
-    let cliBad = cli {cliTranscript = Just (postRef, badTranscriptLog)}
-    result3 <- cliQuery cliBad "still works"
-    assert "cliQuery works despite broken transcript path" $ "stdin:still works" `T.isInfixOf` result3
-
-  -- Part 4: full-path test through cliHost + hostShard with transcript
-  -- enabled.  Two posts → two cliQuery invocations → two transcript records.
-  -- Verify cliScrub(raw) reproduces the reply body.
-  --
-  -- Mutation guard: if someone drops writeTranscript from cliQuery, the
-  -- transcript log stays empty and this test fails at the length check.
+    badResult <- cliDeliverTo cli badTranscriptLog 43 "still works" >>= awaitTurn
+    assert "delivery works despite a broken transcript path" $
+      case badResult of
+        TurnResponse response -> "stdin:still works" `T.isInfixOf` response
+        TurnCancelled -> False
+    removePathForcibly dir
 
   do
     dir <- tempRoot "free-agent-transcript-host-axioma"
     let script = dir </> "fake-echo.sh"
-        sf = dir </> "session"
         transcriptLog = dir </> "transcripts" </> "fake.jsonl"
     TIO.writeFile script $
       T.pack $
@@ -108,55 +83,30 @@ transcriptTopic = do
             "printf 'echo:'",
             "cat"
           ]
-    let p1 = mkPost "human" ["fake"] "hello"
-        p2 = mkPost "human" ["fake"] "world"
-    postRef <- newIORef 0
     let cli =
           Cli
             { cliCommand = "/bin/sh",
               cliArgv = \_ mSid -> [script] <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
               cliStdin = T.unpack,
-              cliSessionFile = sf,
+              cliSessionFile = dir </> "session",
               cliSessionId = parseSessionId,
               cliStale = \code _ -> code /= ExitSuccess,
               cliScrub = cleanCliOut,
               cliStderr = StderrDrop,
-              cliStderrTee = Nothing,
-              cliTranscript = Just (postRef, transcriptLog)
+              cliStderrTee = Nothing
             }
-        h = cliHost "fake" cli
-        sh :: AgentShard [Post Text] [Post Text]
-        sh = hostShard h
-    -- Post 1
-    writeIORef postRef 1
-    (outs1, st1) <- closeShardIO sh [p1] []
-    assert "hostShard single post emits 1 reply" $ length outs1 == 1
-    assert "hostShard buffer cleared after single" $ st1 == []
-    -- Post 2
-    writeIORef postRef 2
-    (outs2, st2) <- closeShardIO sh [p2] []
-    assert "hostShard second post emits 1 reply" $ length outs2 == 1
-    assert "hostShard buffer cleared after second" $ st2 == []
-    -- Transcript: 2 records, one per post
+    result1 <- cliDeliverTo cli transcriptLog 1 "hello" >>= awaitTurn
+    result2 <- cliDeliverTo cli transcriptLog 2 "world" >>= awaitTurn
+    assert "two deliveries return independently scrubbed responses" $
+      result1 == TurnResponse "echo:hello" && result2 == TurnResponse "echo:world"
     tlog <- TIO.readFile transcriptLog
-    let tlines = filter (not . T.null) (T.lines tlog)
-    assert "transcript has 2 records (one per post)" $ length tlines == 2
-    let line1 = tlines !! 0
-        line2 = tlines !! 1
-    assert "record 1 has post_id:1" $ "\"post_id\":1" `T.isInfixOf` line1
-    assert "record 2 has post_id:2" $ "\"post_id\":2" `T.isInfixOf` line2
-    assert "record 1 raw has reply content" $ "echo:hello" `T.isInfixOf` line1
-    assert "record 2 raw has reply content" $ "echo:world" `T.isInfixOf` line2
-    -- raw contains what cleanCliOut strips (session_id line, stderr noise)
-    assert "record 1 raw has session_id line" $ "session_id:" `T.isInfixOf` line1
-    assert "record 1 raw has stderr noise" $ "diagnostic noise" `T.isInfixOf` line1
-    -- replies are scrubbed: no session_id, no stderr noise
-    case (outs1, outs2) of
-      ([reply1], [reply2]) -> do
-        assert "reply 1 body is echo:hello" $ body reply1 == "echo:hello"
-        assert "reply 2 body is echo:world" $ body reply2 == "echo:world"
-        assert "reply 1 has no session_id line" $
-          not ("session_id:" `T.isInfixOf` body reply1)
-        assert "reply 1 has no stderr noise" $
-          not ("diagnostic noise" `T.isInfixOf` body reply1)
-      _ -> assert "expected one reply per post" False
+    let records = filter (not . T.null) (T.lines tlog)
+    assert "two deliveries write two transcript records" $ length records == 2
+    case records of
+      [line1, line2] -> do
+        assert "record post ids follow their deliveries" $
+          "\"post_id\":1" `T.isInfixOf` line1 && "\"post_id\":2" `T.isInfixOf` line2
+        assert "raw evidence retains content stripped from responses" $
+          "session_id:" `T.isInfixOf` line1 && "diagnostic noise" `T.isInfixOf` line1
+      _ -> assert "expected two transcript records" False
+    removePathForcibly dir

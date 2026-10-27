@@ -3,21 +3,17 @@
 -- | One-shot host algebra over circuits-agent seats.
 --
 -- A 'Host' is a named effectful seat that receives arguments drawn from the
--- body of an incoming post and produces lines of output.  Live CLI agents
--- are 'Cli' recipes from 'Circuit.Agent.Cli' — session management (scrape,
--- resume, stale fallback) lives there, not here.
+-- body of an incoming post and produces lines of output. CLI delivery lives
+-- in 'Free.Agent.Cli'; generic host execution and response mapping live here.
 module Free.Agent.Host
   ( BodyMode (..),
     Host (..),
     BareConfig (..),
     mkHost,
+    hostResponse,
     hostShard,
     processHost,
-    cliHost,
-    hermesHostBatch,
     hermesCli,
-    kimiHost,
-    dshHost,
     bareHost,
     defaultBareConfig,
   )
@@ -27,17 +23,15 @@ import Circuit.Agent (AgentShard, Post (..), ioShard, mkPost)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL
-import Data.IORef (IORef)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, dshCli, kimiCli, parseSessionId)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, parseSessionId)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
-import System.FilePath (takeDirectory, (</>))
-import System.Process (proc, readCreateProcessWithExitCode, readProcess)
+import System.Process (readProcess)
 
 -- $setup
 -- >>> :set -XOverloadedStrings
@@ -84,26 +78,17 @@ bodyArgs BodyWords = T.words
 bodyArgs BodyLines = T.lines
 bodyArgs BodyWhole = (: [])
 
+-- | Run a host on one post and apply the default reply-to-sender mapping.
+-- Generic hosts have no stamped id; callers add ancestry where it exists.
+hostResponse :: Host -> Post Text -> IO [Post Text]
+hostResponse h p = do
+  outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
+  pure [(mkPost (hostName h) [from p] o) {channel = channel p} | o <- outs]
+
 -- | Turn a host into a stateful shard that consumes every committed post.
---
--- The shard remembers the committed posts in its state.  On emit it runs the
--- host on each post's body (prepared by 'hostBodyMode'), in order, and emits
--- one reply post per output line per input post.  Each reply is addressed back
--- to the sender of its input post, and lands in that post's channel — the
--- address is the channel name, and the recipient list is not widened.
---
--- Note: a generic host has no access to stamped log ids, so emitted replies
--- carry no thread edge.  Callers that need provenance should thread by id
--- outside the host.
+-- The shard remembers committed posts and emits 'hostResponse' batches.
 hostShard :: Host -> AgentShard [Post Text] [Post Text]
-hostShard h =
-  ioShard $
-    fmap concat
-      . traverse
-        ( \p -> do
-            outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
-            pure [(mkPost (hostName h) [from p] o) {channel = channel p} | o <- outs]
-        )
+hostShard h = ioShard (fmap concat . traverse (hostResponse h))
 
 -- | A host backed by an external process.
 --
@@ -127,79 +112,9 @@ processHost name cmd args =
         pure (map T.pack (lines out))
     }
 
--- | A host backed by a live CLI agent recipe ('Circuit.Agent.Cli').
---
--- Each prepared body becomes one 'cliQuery'; session scrape/resume/stale
--- fallback happens inside the recipe.  One reply text per body (multi-line
--- bodies and replies are preserved).
-cliHost ::
-  -- | Host name (used as the 'from' field of reply posts).
-  Text ->
-  -- | Invocation recipe.
-  Cli ->
-  Host
-cliHost name cli =
-  Host
-    { hostName = name,
-      hostBodyMode = BodyWhole,
-      hostRun = traverse (cliQuery cli)
-    }
-
--- | Kimi host on the shared 'Cli' seat.
---
--- Runs @kimi -p@ per body (see 'kimiCli'), with optional @-m <model>@,
--- @--provider <provider>@, and session resume via @sessionFile@.  A stale
--- session falls back to fresh.
---
--- When @mTranscript@ is 'Just', one JSONL transcript record is appended to
--- the given file per invocation.  The caller writes the post id to the
--- 'IORef' before each call; see 'Free.Agent.Cli.cliQuery' for details.
-kimiHost ::
-  -- | Host name (used as the 'from' field of reply posts).
-  Text ->
-  -- | Model name passed to @kimi -m@, if any.
-  Maybe Text ->
-  -- | Provider passed to @kimi --provider@, if any.
-  Maybe Text ->
-  -- | Session file for cross-call context.
-  FilePath ->
-  -- | Optional transcript sink.
-  Maybe (IORef Int, FilePath) ->
-  Host
-kimiHost name model provider sessionFile mTranscript =
-  cliHost name (kimiCli model provider sessionFile) {cliTranscript = mTranscript}
-
--- | DSH host on the local deepseek-harness seat.
---
--- Rides the shared 'Cli' recipe ('dshCli'): runs
--- @dsh headless --patch BASE [--patch MODEL] --json [--session-id SID] TASK@
--- per body, with session resume via the session file (a stale session
--- falls back to fresh), the seat card as the fresh-session preamble, and
--- the NDJSON stream scrubbed to the final text for the reply.  The
--- transcript sink records one JSONL line per invocation, raw stream
--- preserved.
-dshHost ::
-  -- | Host name (used as the 'from' field of reply posts).
-  Text ->
-  -- | Seat card: the fresh-session preamble, if any.
-  Maybe Text ->
-  -- | Base patch file (e.g. @etc/dsh/ollama.patch.yml@).
-  FilePath ->
-  -- | Optional model-override patch file.
-  Maybe FilePath ->
-  -- | Session file for cross-call context.
-  FilePath ->
-  -- | Optional transcript sink. The caller writes the post id to the 'IORef'
-  -- before each call.
-  Maybe (IORef Int, FilePath) ->
-  Host
-dshHost name mCard basePatch mModelPatch sessionFile mTranscript =
-  cliHost name (dshCli mCard basePatch mModelPatch sessionFile) {cliTranscript = mTranscript}
-
 -- | Shared CLI recipe for hermes backends.
--- When @cliTranscript@ is 'Just', one JSONL record is appended per invocation.
-hermesCli :: Maybe Text -> Maybe Text -> Bool -> FilePath -> Maybe (IORef Int, FilePath) -> Cli
-hermesCli model provider yolo sessionFile mTranscript =
+hermesCli :: Maybe Text -> Maybe Text -> Bool -> FilePath -> Cli
+hermesCli model provider yolo sessionFile =
   Cli
     { cliCommand = "hermes",
       cliArgv = \prompt mSid ->
@@ -216,42 +131,8 @@ hermesCli model provider yolo sessionFile mTranscript =
           || "Session not found" `T.isInfixOf` out,
       cliScrub = cleanCliOut,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing,
-      cliTranscript = mTranscript
+      cliStderrTee = Nothing
     }
-
--- | Batch variant of 'hermesHost'. Joins all post bodies into a single user
--- message and makes one @hermes chat -q@ call, returning one reply. Use when
--- multiple posts may arrive in a single wake cycle and the agent should see
--- them as a combined conversation turn.
-hermesHostBatch ::
-  -- | Host name (used as the 'from' field of reply posts).
-  Text ->
-  -- | System prompt text prepended to every body.
-  Text ->
-  -- | Model name passed to @hermes -m@, if any.
-  Maybe Text ->
-  -- | Provider passed to @hermes --provider@, if any.
-  Maybe Text ->
-  -- | Pass @--yolo -Q@ to hermes.
-  Bool ->
-  -- | Session file for cross-call context.
-  FilePath ->
-  -- | Optional transcript sink.
-  Maybe (IORef Int, FilePath) ->
-  Host
-hermesHostBatch name systemPrompt model provider yolo sessionFile mTranscript =
-  Host
-    { hostName = name,
-      hostBodyMode = BodyWhole,
-      hostRun = \bodies -> do
-        let userMessage = T.unlines bodies
-            prompt = systemPrompt <> "\n\nUser messages:\n" <> userMessage
-        rsp <- cliQuery cli prompt
-        pure [cleanCliOut rsp]
-    }
-  where
-    cli = hermesCli model provider yolo sessionFile mTranscript
 
 -- | Connection configuration for a direct API host.
 data BareConfig = BareConfig

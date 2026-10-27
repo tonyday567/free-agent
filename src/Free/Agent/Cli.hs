@@ -3,8 +3,8 @@
 -- | Live CLI agents as opaque shards.
 --
 -- A 'Cli' recipe describes how to invoke an external CLI agent (hermes, kimi,
--- grok, or any shell command). 'cliQuery' runs the recipe with session
--- resume / stale fallback.
+-- grok, or any shell command). 'cliDeliverTo' runs one interruptible turn with
+-- session resume / stale fallback and explicit transcript causation.
 module Free.Agent.Cli
   ( -- * Invocation recipe
     Cli (..),
@@ -16,11 +16,12 @@ module Free.Agent.Cli
     cleanCliOut,
 
     -- * Query
-    cliQuery,
+    cliDeliverTo,
 
     -- * Shard adapters
 
     -- * Transcript
+    TranscriptOutcome (..),
     TranscriptRecord (..),
     encodeTranscriptLine,
 
@@ -36,6 +37,7 @@ module Free.Agent.Cli
   )
 where
 
+import Circuit.Agent (PostId)
 import Circuit.Agent.Query
   ( echoShard,
     queryShard,
@@ -46,21 +48,36 @@ import Circuit.Agent.Query
     synthShard,
     synthesisPosts,
   )
-import Control.Concurrent (threadDelay)
-import Control.Exception (SomeException, catch, try)
-import Control.Monad (when)
+import Control.Concurrent
+  ( MVar,
+    forkIO,
+    modifyMVar,
+    modifyMVar_,
+    newEmptyMVar,
+    newMVar,
+    putMVar,
+    readMVar,
+    threadDelay,
+  )
+import Control.Exception (IOException, SomeException, catch, onException, try)
+import Control.Monad (void, when)
+import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.Foldable (for_)
-import Data.IORef (IORef, readIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (-<.>))
-import System.Process (proc, readCreateProcessWithExitCode)
+import System.IO (hClose, hPutStr)
+import System.Process (ProcessHandle, StdStream (CreatePipe), createProcess, proc, terminateProcess, waitForProcess)
+import System.Process qualified as Process
 
 -- | Invocation recipe for a CLI agent.
 --
@@ -88,12 +105,7 @@ data Cli = Cli
     -- | Optional tee: raw stderr appended to this log file on every call,
     -- regardless of the policy (interiority stays searchable, never
     -- silently dropped).
-    cliStderrTee :: Maybe FilePath,
-    -- | Optional transcript sink: @(post_id_ref, transcript_jsonl_path)@.
-    -- The 'IORef' carries the current post id, set externally before each
-    -- query.  One JSONL record is appended per invocation; failure to write
-    -- is silent (tee failure is never fatal).
-    cliTranscript :: Maybe (IORef Int, FilePath)
+    cliStderrTee :: Maybe FilePath
   }
 
 -- | stderr routing for a CLI agent's output channels.
@@ -135,8 +147,7 @@ kimiCli model provider sessionFile =
       cliScrub = kimiText,
       cliStderr = StderrDrop,
       -- Interiority log: NAME.sid -> NAME.stderr.log
-      cliStderrTee = Just (sessionFile -<.> "stderr.log"),
-      cliTranscript = Nothing
+      cliStderrTee = Just (sessionFile -<.> "stderr.log")
     }
 
 -- | Scrape the @To resume this session: kimi -r \<id\>@ hint line.
@@ -172,8 +183,7 @@ grokCli model sessionFile =
         code /= ExitSuccess || "Failed to restore session" `T.isInfixOf` out,
       cliScrub = grokText,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing,
-      cliTranscript = Nothing
+      cliStderrTee = Nothing
     }
 
 -- | Reply text is the JSON @text@ field, unescaped; if there is no such
@@ -257,8 +267,7 @@ dshCli mCard basePatch mModelPatch sessionFile =
       cliStale = \_ out -> "does not exist; omit --session-id" `T.isInfixOf` out,
       cliScrub = dshText,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing,
-      cliTranscript = Nothing
+      cliStderrTee = Nothing
     }
   where
     taskFor mSid prompt = case (mCard, mSid) of
@@ -303,35 +312,79 @@ parseSessionId out =
 cliMaxRetries :: Int
 cliMaxRetries = 3
 
--- | One query against a CLI agent.
+data CliControl = CliControl
+  { cliActive :: MVar Bool,
+    cliCancelled :: IORef Bool,
+    cliProcess :: IORef (Maybe ProcessHandle)
+  }
+
+newCliControl :: IO CliControl
+newCliControl =
+  CliControl
+    <$> newMVar True
+    <*> newIORef False
+    <*> newIORef Nothing
+
+cancelCli :: CliControl -> IO Bool
+cancelCli control =
+  modifyMVar (cliActive control) $ \isActive ->
+    if not isActive
+      then pure (False, False)
+      else do
+        writeIORef (cliCancelled control) True
+        mProcess <- readIORef (cliProcess control)
+        catch
+          (for_ mProcess terminateProcess)
+          (\(_ :: IOException) -> pure ())
+        pure (False, True)
+
+finishCli :: Maybe CliControl -> IO ()
+finishCli Nothing = pure ()
+finishCli (Just control) =
+  modifyMVar_ (cliActive control) (const (pure False))
+
+isCliCancelled :: Maybe CliControl -> IO Bool
+isCliCancelled Nothing = pure False
+isCliCancelled (Just control) = readIORef (cliCancelled control)
+
+-- | Deliver one bus-caused prompt without publishing its response. The
+-- existing transcript record carries the supplied post id directly.
+cliDeliverTo :: Cli -> FilePath -> PostId -> Text -> IO (Turn Text)
+cliDeliverTo cli transcriptPath =
+  deliverTo $ \postId prompt -> do
+    control <- newCliControl
+    pure
+      Invocation
+        { runInvocation = cliQueryWithDelivery (postId, transcriptPath) (Just control) cli prompt,
+          cancelInvocation = cancelCli control
+        }
+
 -- First call (or no stored session) runs fresh; subsequent calls resume the
--- stored session id.  A stale session falls back to fresh and records the
--- new id.  Scraped ids are re-persisted on every successful call, so
--- server-side session rotation is followed.
-cliQuery :: Cli -> Text -> IO Text
-cliQuery cli prompt = do
+-- stored session id. A stale session falls back to fresh and records the new
+-- id. Scraped ids are re-persisted on every settled call, so server-side
+-- session rotation is followed.
+cliQueryWithDelivery :: (PostId, FilePath) -> Maybe CliControl -> Cli -> Text -> IO (TurnResult Text)
+cliQueryWithDelivery delivery mControl cli prompt = do
   t0 <- getCurrentTime
   mSid <- readStoredSession (cliSessionFile cli)
   case mSid of
     Nothing -> fresh t0
     Just sid -> do
       (code, raw, routedOut, elapsed) <- run t0 (Just sid)
-      if cliStale cli code raw
-        then fresh t0
+      cancelled <- isCliCancelled mControl
+      if cancelled
+        then cancelledTurn t0 code raw elapsed
         else
-          if code /= ExitSuccess
-            then retryWithSession t0 sid 1
-            else do
-              let mSid' = cliSessionId cli raw
-              for_ mSid' (writeStoredSession (cliSessionFile cli))
-              writeTranscript t0 code raw elapsed mSid'
-              pure (cliScrub cli routedOut)
+          if cliStale cli code raw
+            then fresh t0
+            else
+              if code /= ExitSuccess
+                then retryWithSession t0 sid 1
+                else settle t0 code raw routedOut elapsed
   where
-    -- Retry a transient failure with the same session id.  After
-    -- 'cliMaxRetries' attempts without success the error is propagated
-    -- upward to the seat loop (which posts 🔴 to pitboss).
     retryWithSession t0' sid attempt
-      | attempt > cliMaxRetries =
+      | attempt > cliMaxRetries = do
+          finishCli mControl
           fail
             ( "cliQuery: "
                 <> cliCommand cli
@@ -341,36 +394,61 @@ cliQuery cli prompt = do
                 <> T.unpack (T.take 20 sid)
             )
       | otherwise = do
-          -- Linear back-off: 100ms * attempt.
           threadDelay (100000 * attempt)
           (code', raw', routedOut', elapsed') <- run t0' (Just sid)
-          if cliStale cli code' raw'
-            then fresh t0'
+          cancelled <- isCliCancelled mControl
+          if cancelled
+            then cancelledTurn t0' code' raw' elapsed'
             else
-              if code' /= ExitSuccess
-                then retryWithSession t0' sid (attempt + 1)
-                else do
-                  let mSid' = cliSessionId cli raw'
-                  for_ mSid' (writeStoredSession (cliSessionFile cli))
-                  writeTranscript t0' code' raw' elapsed' mSid'
-                  pure (cliScrub cli routedOut')
-    -- (exit code, raw merged out<>err pre-policy, policy-routed output, elapsed ms).
-    -- cliStale and scrape act on the raw merged stream: stale notices and
-    -- resume hints live on stderr for some CLIs, and 'StderrDrop' must not
-    -- hide them — it only filters the reply body.
+              if cliStale cli code' raw'
+                then fresh t0'
+                else
+                  if code' /= ExitSuccess
+                    then retryWithSession t0' sid (attempt + 1)
+                    else settle t0' code' raw' routedOut' elapsed'
     run t0' mSid = do
-      (code, out, err) <-
-        readCreateProcessWithExitCode
-          (proc (cliCommand cli) (cliArgv cli prompt mSid))
-          (cliStdin cli prompt)
-      t1 <- getCurrentTime
-      let elapsed = floor (realToFrac (diffUTCTime t1 t0') * (1000 :: Double))
-      tee err
-      pure (code, T.pack out <> T.pack err, T.pack out <> routed (T.pack err), elapsed)
+      cancelled <- isCliCancelled mControl
+      if cancelled
+        then do
+          t1 <- getCurrentTime
+          pure (ExitFailure 130, "", "", elapsedMs t0' t1)
+        else do
+          created <-
+            createProcess
+              (proc (cliCommand cli) (cliArgv cli prompt mSid))
+                { Process.std_in = CreatePipe,
+                  Process.std_out = CreatePipe,
+                  Process.std_err = CreatePipe
+                }
+          case created of
+            (Just stdinH, Just stdoutH, Just stderrH, process) ->
+              flip onException (terminateProcess process >> void (waitForProcess process)) $ do
+                for_ mControl $ \(CliControl _ cancelledRef processRef) -> do
+                  writeIORef processRef (Just process)
+                  cancelledNow <- readIORef cancelledRef
+                  when cancelledNow (terminateProcess process)
+                outVar <- newEmptyMVar
+                errVar <- newEmptyMVar
+                _ <- forkIO (BS.hGetContents stdoutH >>= putMVar outVar)
+                _ <- forkIO (BS.hGetContents stderrH >>= putMVar errVar)
+                _ <-
+                  forkIO $
+                    catch
+                      (hPutStr stdinH (cliStdin cli prompt) >> hClose stdinH)
+                      (\(_ :: IOException) -> pure ())
+                code <- waitForProcess process
+                out <- TE.decodeUtf8 <$> readMVar outVar
+                err <- TE.decodeUtf8 <$> readMVar errVar
+                for_ mControl $ \(CliControl _ _ processRef) -> writeIORef processRef Nothing
+                t1 <- getCurrentTime
+                tee err
+                pure (code, out <> err, out <> routed err, elapsedMs t0' t1)
+            _ -> fail "cliQuery: createProcess did not return all requested pipes"
+    elapsedMs t0' t1 = floor (realToFrac (diffUTCTime t1 t0') * (1000 :: Double))
     tee err =
       for_ (cliStderrTee cli) $ \path -> do
         createDirectoryIfMissing True (takeDirectory path)
-        TIO.appendFile path (T.pack err)
+        TIO.appendFile path err
     routed err = case cliStderr cli of
       StderrDrop -> ""
       StderrMerge -> err
@@ -379,40 +457,55 @@ cliQuery cli prompt = do
         | otherwise -> "\n-- stderr --\n" <> err
     fresh t0' = do
       (code, raw, routedOut, elapsed) <- run t0' Nothing
-      when (code /= ExitSuccess) $
-        fail
-          ( "cliQuery: "
-              <> cliCommand cli
-              <> " exited "
-              <> show code
-              <> ": "
-              <> T.unpack (T.take 200 raw)
-          )
+      cancelled <- isCliCancelled mControl
+      if cancelled
+        then cancelledTurn t0' code raw elapsed
+        else do
+          when (code /= ExitSuccess) $ do
+            finishCli mControl
+            fail
+              ( "cliQuery: "
+                  <> cliCommand cli
+                  <> " exited "
+                  <> show code
+                  <> ": "
+                  <> T.unpack (T.take 200 raw)
+              )
+          settle t0' code raw routedOut elapsed
+    settle t0' code raw routedOut elapsed = do
+      finishCli mControl
       let mSid' = cliSessionId cli raw
       for_ mSid' (writeStoredSession (cliSessionFile cli))
-      writeTranscript t0' code raw elapsed mSid'
-      pure (cliScrub cli routedOut)
-    writeTranscript t0' code raw elapsed mSid' =
-      for_ (cliTranscript cli) $ \(ref, path) -> do
-        pid <- readIORef ref
-        let rec =
-              TranscriptRecord
-                { trPostId = pid,
-                  trTimestamp = t0',
-                  trExitCode = case code of
-                    ExitSuccess -> 0
-                    ExitFailure n -> n,
-                  trElapsedMs = elapsed,
-                  trSessionId = mSid',
-                  trRaw = raw
-                }
-            line = encodeTranscriptLine rec <> "\n"
-        catch
-          ( do
-              createDirectoryIfMissing True (takeDirectory path)
-              TIO.appendFile path line
-          )
-          (\(_ :: SomeException) -> pure ())
+      writeTranscript TranscriptSettled t0' code raw elapsed mSid'
+      pure (TurnResponse (cliScrub cli routedOut))
+    cancelledTurn t0' code raw elapsed = do
+      let mSid' = cliSessionId cli raw
+      for_ mSid' (writeStoredSession (cliSessionFile cli))
+      writeTranscript TranscriptCancelled t0' code raw elapsed mSid'
+      pure TurnCancelled
+    writeTranscript outcome t0' code raw elapsed mSid' = do
+      let writeAt pid path = do
+            let rec =
+                  TranscriptRecord
+                    { trPostId = pid,
+                      trTimestamp = t0',
+                      trExitCode = case code of
+                        ExitSuccess -> 0
+                        ExitFailure n -> n,
+                      trElapsedMs = elapsed,
+                      trOutcome = outcome,
+                      trSessionId = mSid',
+                      trRaw = raw
+                    }
+                line = encodeTranscriptLine rec <> "\n"
+            catch
+              ( do
+                  createDirectoryIfMissing True (takeDirectory path)
+                  TIO.appendFile path line
+              )
+              (\(_ :: SomeException) -> pure ())
+      let (pid, path) = delivery
+      writeAt (fromIntegral pid) path
 
 readStoredSession :: FilePath -> IO (Maybe Text)
 readStoredSession path = do
@@ -480,12 +573,16 @@ cleanCliOut =
         )
         t
 
+data TranscriptOutcome = TranscriptSettled | TranscriptCancelled
+  deriving (Eq, Show)
+
 -- | One transcript record, as JSONL appended to the transcript log.
 data TranscriptRecord = TranscriptRecord
   { trPostId :: Int,
     trTimestamp :: UTCTime,
     trExitCode :: Int,
     trElapsedMs :: Int,
+    trOutcome :: TranscriptOutcome,
     trSessionId :: Maybe Text,
     trRaw :: Text
   }
@@ -501,6 +598,8 @@ encodeTranscriptLine r =
     <> kv "exit_code" (T.pack (show (trExitCode r)))
     <> ","
     <> kv "elapsed_ms" (T.pack (show (trElapsedMs r)))
+    <> ","
+    <> kv "outcome" (case trOutcome r of TranscriptSettled -> "\"settled\""; TranscriptCancelled -> "\"cancelled\"")
     <> ","
     <> kv "session_id" (maybe "null" (\t -> "\"" <> escapeText t <> "\"") (trSessionId r))
     <> ","

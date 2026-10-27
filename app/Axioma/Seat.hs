@@ -14,8 +14,9 @@ import Control.Monad (when)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
-import Free.Agent.Host (BodyMode (..), Host (..), cliHost, hostShard, mkHost, processHost)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliDeliverTo, parseSessionId)
+import Free.Agent.Delivery (TurnResult (..), awaitTurn)
+import Free.Agent.Host (BodyMode (..), Host (..), hostShard, mkHost, processHost)
 import System.Directory (doesFileExist, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -113,23 +114,18 @@ seatTopic = do
               cliStale = \code _ -> code /= ExitSuccess,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing,
-              cliTranscript = Nothing
+              cliStderrTee = Nothing
             }
-        h = cliHost "fake" cli
-        sh :: AgentShard [Post Text] [Post Text]
-        sh = hostShard h
-        p = mkPost "human" ["fake"] "hello\nworld"
-    (outs, st) <- closeShardIO sh [p] []
-    assert "cli host preserves multi-line body verbatim" $
-      case outs of
-        [o] -> "stdin:hello\nworld" `T.isInfixOf` body o && to o == ["human"]
-        _ -> False
-    assert "cli host buffer cleared after emit" $ st == []
+        transcriptLog = dir </> "transcript.jsonl"
+    result1 <- cliDeliverTo cli transcriptLog 1 "hello\nworld" >>= awaitTurn
+    assert "cli delivery preserves multi-line input verbatim" $
+      case result1 of
+        TurnResponse response -> "stdin:hello\nworld" `T.isInfixOf` response
+        TurnCancelled -> False
     stored <- TIO.readFile sf
-    assert "cli host session id persisted" $ T.strip stored == "free-fake"
-    (outs2, _) <- closeShardIO sh [p] []
-    assert "cli host second close resumes stored session" $
-      case outs2 of
-        [o] -> "argv:--resume free-fake" `T.isInfixOf` body o
-        _ -> False
+    assert "cli delivery session id persisted" $ T.strip stored == "free-fake"
+    result2 <- cliDeliverTo cli transcriptLog 2 "hello\nworld" >>= awaitTurn
+    assert "cli delivery resumes the stored session" $
+      case result2 of
+        TurnResponse response -> "argv:--resume free-fake" `T.isInfixOf` response
+        TurnCancelled -> False

@@ -9,6 +9,7 @@ module Main (main) where
 import Axioma.Acp (acpTopic)
 import Axioma.Bus (busTopic)
 import Axioma.Connector (connectorTopic)
+import Axioma.Delivery (deliveryTopic)
 import Axioma.Diagram (diagramTopic)
 import Axioma.Lifecycle (lifecycleTopic)
 import Axioma.Meeting (meetingTopic)
@@ -24,6 +25,7 @@ data Topic
   = All
   | Seat
   | Transcript
+  | Delivery
   | Diagram
   | Meeting
   | Bus
@@ -40,6 +42,7 @@ topicName :: Topic -> String
 topicName All = "all"
 topicName Seat = "seat"
 topicName Transcript = "transcript"
+topicName Delivery = "delivery"
 topicName Diagram = "diagram"
 topicName Meeting = "meeting"
 topicName Bus = "bus"
@@ -55,6 +58,7 @@ topicDesc :: Topic -> String
 topicDesc All = "run all topics"
 topicDesc Seat = "host shard round-trips: echo/process/CLI host sketches, BodyLines split, session resume"
 topicDesc Transcript = "transcript oracle (B1): JSONL records, scrub agreement, silent failure"
+topicDesc Delivery = "delivery settlement: quiet response, exactly-once await, explicit root and reply posts"
 topicDesc Diagram = "diagram bridge + bend with delay: machine bodies as string diagrams"
 topicDesc Meeting = "meeting skeletons, panel meeting, replay, derivations as 2-cells"
 topicDesc Bus = "bus stats + seats: supervision, self-halt, card meetings, M1a ancestry, the seam (Q7)"
@@ -95,6 +99,7 @@ runTopic :: Topic -> IO ()
 runTopic All = mapM_ runTopic (filter (/= All) [minBound .. maxBound])
 runTopic Seat = seatTopic
 runTopic Transcript = transcriptTopic
+runTopic Delivery = deliveryTopic
 runTopic Diagram = diagramTopic
 runTopic Meeting = meetingTopic
 runTopic Bus = busTopic

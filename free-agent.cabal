@@ -61,6 +61,7 @@ library
     Free.Agent.Cli
     Free.Agent.Cli.Config
     Free.Agent.Connector
+    Free.Agent.Delivery
     Free.Agent.Diagram
     Free.Agent.Fare.Cli
     Free.Agent.Fare.Config
@@ -110,6 +111,7 @@ executable free-agent-axioma
     Axioma.Bus
     Axioma.Common
     Axioma.Connector
+    Axioma.Delivery
     Axioma.Diagram
     Axioma.Lifecycle
     Axioma.Meeting

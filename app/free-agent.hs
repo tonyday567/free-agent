@@ -15,13 +15,10 @@
 --   free-agent status [ROOT] [--threshold SECS]
 module Main (main) where
 
-import Circuit.Agent (AgentShard, Name, Post (..), closeShardIO, mkPost, sortNub)
+import Circuit.Agent (Name, Post (..), mkPost)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
-import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (forM_, unless)
-import Data.Foldable (traverse_)
-import Data.IORef (IORef, newIORef, writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -30,8 +27,8 @@ import Data.Time (NominalDiffTime)
 import Free.Agent.Acp (AcpConfig (..), acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, openAcp)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus.Cli (BusCommand, Depth (..), busParser, depthOpt, liveOpt, runBusCommand, runStatus)
-import Free.Agent.Bus.File (QuiesceConfig (..), cursorPath)
-import Free.Agent.Cli (cleanCliOut)
+import Free.Agent.Bus.File (QuiesceConfig (..))
+import Free.Agent.Cli (cliDeliverTo, dshCli, kimiCli)
 import Free.Agent.Cli.Config
   ( AcpCliConfig (..),
     Backend (..),
@@ -47,6 +44,7 @@ import Free.Agent.Cli.Config
     parseHermesConfig,
     parseLlmConfig,
   )
+import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurn, newDeliveryGrant, replyAct)
 import Free.Agent.Gateway
   ( GatewayClient (..),
     GatewayConfig (..),
@@ -54,7 +52,7 @@ import Free.Agent.Gateway
     gatewayHost,
     openGateway,
   )
-import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, dshHost, hermesHostBatch, hostShard, kimiHost, processHost)
+import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesCli, hostResponse, processHost)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (lookupEnv)
@@ -67,7 +65,7 @@ import System.IO (BufferMode (LineBuffering), hSetBuffering, stderr, stdout)
 -- ---------------------------------------------------------------------------
 
 data Command
-  = AgentCmd Backend
+  = AgentCmd Int Backend
   | BusCmd BusCommand
   | StatusCmd FilePath (Maybe NominalDiffTime) Bool Depth
   deriving (Show)
@@ -124,10 +122,23 @@ toGatewayConfig h =
       gcwPitboss = hcPitboss h
     }
 
+deliveryBudgetOpt :: Parser Int
+deliveryBudgetOpt =
+  option
+    auto
+    ( long "delivery-budget"
+        <> metavar "N"
+        <> value 1_000_000
+        <> showDefault
+        <> help "Maximum backend deliveries before this seat stands down"
+    )
+
 -- | Parse the default agent command. Defaults to Hermes; --backend switches.
 defaultAgentParser :: Parser Command
 defaultAgentParser =
-  (\tag cfg -> AgentCmd (mkBackend tag cfg)) <$> backendFlag <*> parseHermesConfig
+  AgentCmd
+    <$> deliveryBudgetOpt
+    <*> ((\tag cfg -> mkBackend tag cfg) <$> backendFlag <*> parseHermesConfig)
   where
     mkBackend HermesTag cfg = BackendHermes cfg
     mkBackend KimiTag cfg = BackendKimi (toKimiConfig cfg)
@@ -141,10 +152,10 @@ commandParser :: Parser Command
 commandParser =
   subparser
     ( command "bus" (info (BusCmd <$> busParser <**> helper) (progDesc "Bus subcommands"))
-        <> command "llm" (info (AgentCmd . BackendLlm <$> parseLlmConfig <**> helper) (progDesc "Direct API seat (old bus-bare)"))
-        <> command "cmd" (info (AgentCmd . BackendCommand <$> parseCommandConfig <**> helper) (progDesc "External-command seat"))
-        <> command "dsh" (info (AgentCmd . BackendDsh <$> parseDshConfig <**> helper) (progDesc "DSH / local ollama seat"))
-        <> command "acp" (info (AgentCmd . BackendAcp <$> parseAcpConfig <**> helper) (progDesc "ACP seat (kimi acp — persistent repl)"))
+        <> command "llm" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendLlm <$> parseLlmConfig) <**> helper) (progDesc "Direct API seat (old bus-bare)"))
+        <> command "cmd" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendCommand <$> parseCommandConfig) <**> helper) (progDesc "External-command seat"))
+        <> command "dsh" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendDsh <$> parseDshConfig) <**> helper) (progDesc "DSH / local ollama seat"))
+        <> command "acp" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendAcp <$> parseAcpConfig) <**> helper) (progDesc "ACP seat (kimi acp — persistent repl)"))
         <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <*> liveOpt <*> depthOpt (Depth 1) <**> helper) (progDesc "Bus log statistics"))
     )
     <|> defaultAgentParser
@@ -191,7 +202,7 @@ main = do
   hSetBuffering stdout LineBuffering
   cmd <- execParser opts
   case cmd of
-    AgentCmd backend -> runBackend backend
+    AgentCmd budget backend -> runBackend budget backend
     BusCmd busCmd -> runBusCommand busCmd
     StatusCmd root mthreshold live depth -> runStatus root (fromMaybe 900 mthreshold) live depth
 
@@ -199,14 +210,14 @@ main = do
 -- Backend dispatch
 -- ---------------------------------------------------------------------------
 
-runBackend :: Backend -> IO ()
-runBackend (BackendHermes cfg) = runHermes cfg
-runBackend (BackendKimi cfg) = runKimi cfg
-runBackend (BackendDsh cfg) = runDsh cfg
-runBackend (BackendAcp cfg) = runAcp cfg
-runBackend (BackendLlm cfg) = runLlm cfg
-runBackend (BackendCommand cfg) = runCommand cfg
-runBackend (BackendGateway cfg) = runGateway cfg
+runBackend :: Int -> Backend -> IO ()
+runBackend budget (BackendHermes cfg) = runHermes budget cfg
+runBackend budget (BackendKimi cfg) = runKimi budget cfg
+runBackend budget (BackendDsh cfg) = runDsh budget cfg
+runBackend budget (BackendAcp cfg) = runAcp budget cfg
+runBackend budget (BackendLlm cfg) = runLlm budget cfg
+runBackend budget (BackendCommand cfg) = runCommand budget cfg
+runBackend budget (BackendGateway cfg) = runGateway budget cfg
 
 -- ---------------------------------------------------------------------------
 -- Hermes / Kimi helpers
@@ -248,102 +259,90 @@ decorateSender stored =
   let p = stamped stored
    in stored {stamped = p {body = from p <> ": " <> body p}}
 
--- | Run one stored post through an agent shard and produce reply posts with
--- thread edges.
-runOneSeat :: AgentShard [Post Text] [Post Text] -> Stamped Text -> IO [Post Text]
-runOneSeat sh stored = do
-  let stored' = decorateSender stored
-      p = stamped stored'
-      parentId = snd (stamp stored)
-  (outs, _st) <- closeShardIO sh [p] []
-  pure [routeReply out {body = cleanCliOut (body out), thread = sortNub (parentId : thread out)} | out <- outs]
+runSeat :: Int -> Text -> [Name] -> FilePath -> Maybe QuiesceConfig -> (Stamped Text -> IO (Turn [Post Text])) -> IO ()
+runSeat budget agentName names root mQuiesce handle = do
+  grant <- newDeliveryGrant budget
+  runAgentLoop agentName names root mQuiesce grant handle
 
-keepReplyHermes :: Post Text -> Bool
-keepReplyHermes p =
-  let b = T.strip (body p)
-   in not (T.null b) && not ("⚠️" `T.isPrefixOf` b)
+hostTurn :: Host -> Stamped Text -> IO (Turn [Post Text])
+hostTurn host =
+  deliverTo
+    ( \cause _ ->
+        pure
+          Invocation
+            { runInvocation = TurnResponse <$> hostResponse host (stamped cause),
+              cancelInvocation = pure False
+            }
+    )
+    <*> pure ""
 
-runHermes :: HermesConfig -> IO ()
-runHermes cfg = do
+defaultReply :: Text -> Stamped Text -> Text -> [Post Text]
+defaultReply agentName stored response =
+  let cause = stamped stored
+   in [routeReply ((mkPost agentName [from cause] response) {channel = channel cause})]
+
+runHermes :: Int -> HermesConfig -> IO ()
+runHermes budget cfg = do
   validatePrompt (hcPromptFile cfg)
   systemPrompt <- TIO.readFile (hcPromptFile cfg)
   let names = hcNames cfg
       agentName = agentNameOf names
       sessionFile = fromMaybe (defaultSessionFile (hcRoot cfg) names) (hcSessionFile cfg)
-      -- F3: inject agent name so the LLM knows its posting identity
-      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ". Use this name for all --from fields and cursor checks.\n\n" <> systemPrompt
+      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
       transcriptPath = hcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
-  createDirectoryIfMissing True (takeDirectory sessionFile)
-  transcriptRef <- newIORef 0
-  let host = hermesHostBatch agentName framedPrompt (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile (Just (transcriptRef, transcriptPath))
-      sh = hostShard host
+      cli = hermesCli (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
-      handle stored = do
-        writeIORef transcriptRef (fromIntegral (snd (stamp stored)))
-        filter keepReplyHermes <$> runOneSeat sh stored
+      handle stored =
+        let delivered = decorateSender stored
+            prompt = framedPrompt <> "\n\nUser messages:\n" <> body (stamped delivered)
+         in mapTurn (replyAct agentName stored)
+              <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
+  createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
-  runAgentLoop agentName names (hcRoot cfg) mQuiesce handle
+  runSeat budget agentName names (hcRoot cfg) mQuiesce handle
 
-runKimi :: KimiConfig -> IO ()
-runKimi cfg = do
+runKimi :: Int -> KimiConfig -> IO ()
+runKimi budget cfg = do
   validatePrompt (kcPromptFile cfg)
   systemPrompt <- TIO.readFile (kcPromptFile cfg)
   let names = kcNames cfg
       agentName = agentNameOf names
       sessionFile = fromMaybe (defaultSessionFile (kcRoot cfg) names) (kcSessionFile cfg)
       transcriptPath = kcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
-  createDirectoryIfMissing True (takeDirectory sessionFile)
-  transcriptRef <- newIORef 0
-  let host0 = kimiHost agentName (kcModel cfg) (kcProvider cfg) sessionFile (Just (transcriptRef, transcriptPath))
-      host =
-        host0
-          { hostRun =
-              hostRun host0 . map (\b -> systemPrompt <> "\n\nUser message:\n" <> b)
-          }
-      sh = hostShard host
+      cli = kimiCli (kcModel cfg) (kcProvider cfg) sessionFile
       mQuiesce = buildQuiesce (kcQuiesce cfg) (kcPitboss cfg)
-      handle stored = do
-        writeIORef transcriptRef (fromIntegral (snd (stamp stored)))
-        filter keepReplyHermes <$> runOneSeat sh stored
+      handle stored =
+        let delivered = decorateSender stored
+            prompt = systemPrompt <> "\n\nUser message:\n" <> body (stamped delivered)
+         in mapTurn (defaultReply agentName stored)
+              <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
+  createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
-  runAgentLoop agentName names (kcRoot cfg) mQuiesce handle
+  runSeat budget agentName names (kcRoot cfg) mQuiesce handle
 
 -- ---------------------------------------------------------------------------
 -- DSH / local ollama seat
 -- ---------------------------------------------------------------------------
 
-keepReplyDsh :: Post Text -> Bool
-keepReplyDsh p =
-  let b = T.strip (body p)
-   in not (T.null b) && b /= "(empty)"
-
-runDsh :: DshConfig -> IO ()
-runDsh cfg = do
+runDsh :: Int -> DshConfig -> IO ()
+runDsh budget cfg = do
   validatePrompt (dcPromptFile cfg)
   systemPrompt <- TIO.readFile (dcPromptFile cfg)
   let names = dcNames cfg
       agentName = agentNameOf names
       transcriptPath = dcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
       sessionPath = dcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".sid"
-  createDirectoryIfMissing True (takeDirectory transcriptPath)
-  transcriptRef <- newIORef 0
-  let host =
-        dshHost
-          agentName
-          (Just systemPrompt)
-          (dcDshPatch cfg)
-          (dcDshModelPatch cfg)
-          sessionPath
-          (Just (transcriptRef, transcriptPath))
-      sh = hostShard host
+      cli = dshCli (Just systemPrompt) (dcDshPatch cfg) (dcDshModelPatch cfg) sessionPath
       mQuiesce = buildQuiesce (dcQuiesce cfg) (dcPitboss cfg)
-      handle stored = do
-        writeIORef transcriptRef (fromIntegral (snd (stamp stored)))
-        filter keepReplyDsh <$> runOneSeat sh stored
+      handle stored =
+        let delivered = decorateSender stored
+         in mapTurn (replyAct agentName stored)
+              <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) (body (stamped delivered))
+  createDirectoryIfMissing True (takeDirectory transcriptPath)
   TIO.putStrLn $ "   patch: " <> T.pack (dcDshPatch cfg)
   forM_ (dcDshModelPatch cfg) $ \p ->
     TIO.putStrLn $ "   model patch: " <> T.pack p
-  runAgentLoop agentName names (dcRoot cfg) mQuiesce handle
+  runSeat budget agentName names (dcRoot cfg) mQuiesce handle
 
 -- ---------------------------------------------------------------------------
 -- ACP seat (persistent repl)
@@ -353,14 +352,13 @@ runDsh cfg = do
 acpTurnMicros :: Int
 acpTurnMicros = 600_000_000
 
-runAcp :: AcpCliConfig -> IO ()
-runAcp cfg = do
+runAcp :: Int -> AcpCliConfig -> IO ()
+runAcp budget cfg = do
   validatePrompt (acPromptFile cfg)
   systemPrompt <- TIO.readFile (acPromptFile cfg)
   let names = acNames cfg
       agentName = agentNameOf names
-      -- F3: inject agent name so the LLM knows its posting identity
-      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ". Use this name for all --from fields and cursor checks.\n\n" <> systemPrompt
+      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
       mQuiesce = buildQuiesce (acQuiesce cfg) (acPitboss cfg)
   client <-
     openAcp
@@ -376,20 +374,18 @@ runAcp cfg = do
       Nothing -> do
         TIO.hPutStrLn stderr "🔴 acp: session/new returned no session id"
         exitFailure
-    let sh = hostShard (acpHost agentName acpTurnMicros framedPrompt client sid)
-        handle stored = do
-          outs <- runOneSeat sh stored
-          pure [out | out <- outs, not (T.null (T.strip (body out)))]
+    let host = acpHost agentName acpTurnMicros framedPrompt client sid
+        handle = fmap (mapTurn (map routeReply)) . hostTurn host . decorateSender
     TIO.putStrLn $ "   protocol: acp (" <> T.pack (acAcpCommand cfg) <> ")"
     TIO.putStrLn $ "   session: " <> sid
-    runAgentLoop agentName names (acRoot cfg) mQuiesce handle
+    runSeat budget agentName names (acRoot cfg) mQuiesce handle
 
 -- ---------------------------------------------------------------------------
 -- Direct API (llm)
 -- ---------------------------------------------------------------------------
 
-runLlm :: LlmConfig -> IO ()
-runLlm cfg = do
+runLlm :: Int -> LlmConfig -> IO ()
+runLlm budget cfg = do
   validatePrompt (lcPromptFile cfg)
   systemPrompt <- TIO.readFile (lcPromptFile cfg)
   key <- lookupEnv (lcKeyEnv cfg)
@@ -408,57 +404,40 @@ runLlm cfg = do
                 key = T.pack k
               }
           host = bareHost bareCfg systemPrompt
-          sh = hostShard host
           mQuiesce = buildQuiesce (lcQuiesce cfg) (lcPitboss cfg)
-          handle stored = do
-            let p = stamped stored
-                parentId = snd (stamp stored)
-            (outs, _st) <- closeShardIO sh [p] []
-            pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
       TIO.putStrLn $ "   base: " <> baseUrl bareCfg
       TIO.putStrLn $ "   model: " <> model bareCfg
-      runAgentLoop agentName names (lcRoot cfg) mQuiesce handle
+      runSeat budget agentName names (lcRoot cfg) mQuiesce (hostTurn host)
 
 -- ---------------------------------------------------------------------------
 -- Gateway seat (hermes api_server)
 -- ---------------------------------------------------------------------------
 
-runGateway :: GatewayCliConfig -> IO ()
-runGateway cfg = do
+runGateway :: Int -> GatewayCliConfig -> IO ()
+runGateway budget cfg = do
   validatePrompt (gcwPromptFile cfg)
   systemPrompt <- TIO.readFile (gcwPromptFile cfg)
   let names = gcwNames cfg
       agentName = agentNameOf names
-      -- F3: inject agent name so the LLM knows its posting identity
-      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ". Use this name for all --from fields and cursor checks.\n\n" <> systemPrompt
+      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
       gwCfg = defaultGatewayConfig {gwBaseUrl = gcwBaseUrl cfg, gwKeyEnv = gcwKeyEnv cfg}
   client <- openGateway gwCfg
-  let sh = hostShard (gatewayHost agentName framedPrompt client)
+  let host = gatewayHost agentName framedPrompt client
       mQuiesce = buildQuiesce (gcwQuiesce cfg) (gcwPitboss cfg)
-      handle stored = do
-        let p = stamped stored
-            parentId = snd (stamp stored)
-        (outs, _st) <- closeShardIO sh [p] []
-        pure [routeReply out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
+      handle = fmap (mapTurn (map routeReply)) . hostTurn host
   TIO.putStrLn $ "   gateway: " <> gwBaseUrl gwCfg
   TIO.putStrLn $ "   session: " <> gcSessionId client
-  runAgentLoop agentName names (gcwRoot cfg) mQuiesce handle
+  runSeat budget agentName names (gcwRoot cfg) mQuiesce handle
 
 -- ---------------------------------------------------------------------------
 -- External command seat
 -- ---------------------------------------------------------------------------
 
-runCommand :: CommandConfig -> IO ()
-runCommand cfg = do
+runCommand :: Int -> CommandConfig -> IO ()
+runCommand budget cfg = do
   let names = ccNames cfg
       agentName = agentNameOf names
       host = (processHost agentName (ccCmd cfg) (ccArgs cfg)) {hostBodyMode = BodyWhole}
-      sh = hostShard host
       mQuiesce = buildQuiesce (ccQuiesce cfg) (ccPitboss cfg)
-      handle stored = do
-        let p = stamped stored
-            parentId = snd (stamp stored)
-        (outs, _st) <- closeShardIO sh [p] []
-        pure [out {thread = sortNub (parentId : thread out)} | out <- outs, not (T.null (T.strip (body out)))]
   TIO.putStrLn $ "   command: " <> T.pack (ccCmd cfg) <> " " <> T.intercalate " " (map T.pack (ccArgs cfg))
-  runAgentLoop agentName names (ccRoot cfg) mQuiesce handle
+  runSeat budget agentName names (ccRoot cfg) mQuiesce (hostTurn host)

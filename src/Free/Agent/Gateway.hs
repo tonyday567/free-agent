@@ -171,9 +171,8 @@ gatewayChat c msg = do
 -- Host seat
 -- ---------------------------------------------------------------------------
 
--- | A 'Host' backed by the gateway session.  All post bodies of a wake
--- cycle join into one user message (the 'Free.Agent.Host.hermesHostBatch'
--- convention); the reply is one text.
+-- | A 'Host' backed by the gateway session. Each delivered post becomes one
+-- user message and produces one response text.
 gatewayHost ::
   -- | Host name (used as the 'from' field of reply posts).
   Text ->

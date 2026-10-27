@@ -15,11 +15,19 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (openBus, postLocal, runSeatBus)
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliQuery, parseSessionId)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliDeliverTo, parseSessionId)
+import Free.Agent.Delivery (TurnResult (..), awaitTurn)
 import Free.Agent.Host (hostShard, mkHost)
 import System.Directory (removePathForcibly)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+
+queryDelivery :: Cli -> FilePath -> Text -> IO Text
+queryDelivery cli dir prompt = do
+  result <- cliDeliverTo cli (dir </> "transcript.jsonl") 1 prompt >>= awaitTurn
+  pure $ case result of
+    TurnResponse response -> response
+    TurnCancelled -> ""
 
 resumeTopic :: IO ()
 resumeTopic = do
@@ -109,7 +117,7 @@ resumeTopic = do
       T.null (T.strip result)
 
   -- Test (b): handler returning (empty) → scrubbed to empty → B2 drop → no post.
-  -- Uses cleanCliOut to simulate the cliHost scrubbing path.
+  -- Uses cleanCliOut to simulate the CLI response scrubbing path.
   do
     root <- tempRoot "free-agent-b8-empty"
     _ <- postLocal root (mkPost "human" ["hermes"] "ping")
@@ -175,10 +183,9 @@ resumeTopic = do
                   || "Session not found" `T.isInfixOf` out,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing,
-              cliTranscript = Nothing
+              cliStderrTee = Nothing
             }
-    result <- cliQuery cli "hello-b6a"
+    result <- queryDelivery cli dir "hello-b6a"
     -- Second invocation must carry the --resume flag with our seeded id.
     assert "B6a: retry preserves session id in --resume" $
       "--resume test-sid-b6a" `T.isInfixOf` result
@@ -217,10 +224,9 @@ resumeTopic = do
                   || "Session not found" `T.isInfixOf` out,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing,
-              cliTranscript = Nothing
+              cliStderrTee = Nothing
             }
-    result <- cliQuery cli "hello-b6b"
+    result <- queryDelivery cli dir "hello-b6b"
     -- Must NOT carry the old --resume flag (it was a fresh call).
     assert "B6b: stale session does NOT resume old sid" $
       not ("--resume old-stale-sid" `T.isInfixOf` result)
@@ -271,10 +277,9 @@ resumeTopic = do
                   || "Session not found" `T.isInfixOf` out,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing,
-              cliTranscript = Nothing
+              cliStderrTee = Nothing
             }
-    result <- cliQuery cli "hello-b6c"
+    result <- queryDelivery cli dir "hello-b6c"
     -- With code-is-stale, the first invocation's exit 1 triggers stale →
     -- fresh.  The second call (fresh) must NOT carry --resume.
     assert "B6c: code-is-stale triggers fresh, old sid dropped" $

@@ -31,6 +31,7 @@ import Free.Agent.Bus.File
     writeCursor,
   )
 import Free.Agent.Bus.Heartbeat (HbState (..), writeHeartbeat)
+import Free.Agent.Delivery (DeliveryGrant, Turn, TurnResult (..), awaitTurn, useDeliveryGrant)
 import System.FilePath ((</>))
 import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
 import System.Posix.Process (getProcessID)
@@ -38,9 +39,9 @@ import System.Posix.Process (getProcessID)
 -- | Start a seat loop.
 --
 -- The caller supplies the subscription names, the bus root, an optional
--- quiescence config, and a handler that turns one incoming 'Stamped Text' into
--- zero or more reply posts. The handler is responsible for decoration,
--- scrubbing, routing, and filtering; this function handles the bus plumbing.
+-- quiescence config, a finite delivery grant, and a handler that turns one
+-- incoming 'Stamped Text' into a live turn of explicit post acts. The handler
+-- is responsible for decoration, scrubbing, and response interpretation.
 --
 -- Ancestry: every post produced in response to a delivery cites that
 -- delivery — the delivered post's stamped id is prepended to each reply's
@@ -68,10 +69,12 @@ runAgentLoop ::
   FilePath ->
   -- | Optional quiescence config.
   Maybe QuiesceConfig ->
-  -- | Handler: incoming post -> reply posts.
-  (Stamped Text -> IO [Post Text]) ->
+  -- | Finite authority to invoke this seat.
+  DeliveryGrant ->
+  -- | Handler: incoming post -> turn of explicit post acts.
+  (Stamped Text -> IO (Turn [Post Text])) ->
   IO ()
-runAgentLoop agentName names root mQuiesce handlePost = do
+runAgentLoop agentName names root mQuiesce grant handlePost = do
   hSetBuffering stdout LineBuffering
   pid <- getProcessID
   TIO.putStrLn $ "🟢 free-agent seat starting: " <> T.intercalate "," names <> " (pid=" <> T.pack (show pid) <> ")"
@@ -117,40 +120,51 @@ runAgentLoop agentName names root mQuiesce handlePost = do
               writeCursor root agentName (snd (stamp stored) + 1)
               pure Continue
             else do
-              ereplies <- try @SomeException (handlePost stored)
-              flow <- case ereplies of
-                Left e -> do
-                  let p = stamped stored
-                      exc = T.pack (displayException e)
-                      recipients = from p : maybe [] (pure . qcPitboss) mQuiesce
+              granted <- useDeliveryGrant grant
+              case granted of
+                Left refusal -> do
                   hPutStrLn stderr $
-                    "🔴 "
+                    "delivery refused for "
                       ++ T.unpack agentName
-                      ++ " handler failed on post "
+                      ++ " on post "
                       ++ show (snd (stamp stored))
                       ++ ": "
-                      ++ T.unpack exc
-                  _ <-
-                    postLocal root $
-                      (mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc))
-                        { thread = [snd (stamp stored)]
-                        }
-                  -- handler failure: cursor advanced, seat keeps listening
-                  pure Continue
-                Right replies -> do
-                  let keep p =
-                        let b = T.strip (body p)
-                         in not (T.null b) && b /= "(empty)"
-                      nonEmpty = filter keep replies
-                      cite p = p {thread = sortNub (snd (stamp stored) : thread p)}
-                  traverse_ (postLocal root . cite) nonEmpty
-                  -- Self-halt: the seat's own 🔵, judged at commit time.
-                  pure $
-                    if any ((== Just StandDown) . markOf) replies
-                      then Halt
-                      else Continue
-              writeCursor root agentName (snd (stamp stored) + 1)
-              pure flow
+                      ++ show refusal
+                  pure Halt
+                Right () -> do
+                  eresult <- try @SomeException (handlePost stored >>= awaitTurn)
+                  flow <- case eresult of
+                    Left e -> do
+                      let p = stamped stored
+                          exc = T.pack (displayException e)
+                          recipients = from p : maybe [] (pure . qcPitboss) mQuiesce
+                      hPutStrLn stderr $
+                        "🔴 "
+                          ++ T.unpack agentName
+                          ++ " handler failed on post "
+                          ++ show (snd (stamp stored))
+                          ++ ": "
+                          ++ T.unpack exc
+                      _ <-
+                        postLocal root $
+                          (mkPost agentName recipients (markGlyph Escalate <> " handler failed: " <> exc))
+                            { thread = [snd (stamp stored)]
+                            }
+                      pure Continue
+                    Right TurnCancelled -> pure Continue
+                    Right (TurnResponse replies) -> do
+                      let keep p =
+                            let b = T.strip (body p)
+                             in not (T.null b) && b /= "(empty)"
+                          nonEmpty = filter keep replies
+                          cite p = p {thread = sortNub (snd (stamp stored) : thread p)}
+                      traverse_ (postLocal root . cite) nonEmpty
+                      pure $
+                        if any ((== Just StandDown) . markOf) replies
+                          then Halt
+                          else Continue
+                  writeCursor root agentName (snd (stamp stored) + 1)
+                  pure flow
     writeHeartbeat root agentName Idle
     pure result
   writeHeartbeat root agentName Dead

@@ -10,17 +10,18 @@ where
 
 import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
 import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, loop, mkChannelPost, tape, watch)
-import Circuit.Agent.Framing (parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
+import Circuit.Agent.Framing (Stamped, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Data.Foldable (traverse_)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (openBus, postLocal, readFileStrict, runSeatBus)
-import Free.Agent.Bus.File (QuiesceConfig (..), writeCursor)
+import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, writeCursor)
 import Free.Agent.BusStats
   ( Classification (..),
     SliceMode (..),
@@ -31,9 +32,22 @@ import Free.Agent.BusStats
     isDoneClaim,
     slicePosts,
   )
+import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, newDeliveryGrant, replyAct)
 import Free.Agent.Host (hostShard, mkHost)
 import System.Directory (removePathForcibly)
 import System.FilePath ((</>))
+
+ioTurn :: IO [Post Text] -> IO (Turn [Post Text])
+ioTurn action =
+  deliverTo
+    (\_ _ -> pure Invocation {runInvocation = TurnResponse <$> action, cancelInvocation = pure False})
+    ()
+    ""
+
+runTestAgent :: Text -> [Text] -> FilePath -> Maybe QuiesceConfig -> (Stamped Text -> IO (Turn [Post Text])) -> IO ()
+runTestAgent agentName names root mQuiesce handle = do
+  grant <- newDeliveryGrant 100
+  runAgentLoop agentName names root mQuiesce grant handle
 
 busTopic :: IO ()
 busTopic = do
@@ -312,13 +326,13 @@ busTopic = do
     done <- newEmptyMVar
     _ <-
       forkIO $
-        runAgentLoop
+        runTestAgent
           "m1a"
           ["m1a"]
           root
           Nothing
           ( \stored ->
-              pure [mkPost "m1a" [from (stamped stored)] ("ack: " <> body (stamped stored))]
+              ioTurn (pure [mkPost "m1a" [from (stamped stored)] ("ack: " <> body (stamped stored))])
           )
           >> putMVar done ()
     _ <- plant
@@ -344,7 +358,7 @@ busTopic = do
     done <- newEmptyMVar
     _ <-
       forkIO $
-        runAgentLoop "m1x" ["m1x"] root Nothing (\_ -> error "handler exploded")
+        runTestAgent "m1x" ["m1x"] root Nothing (\_ -> ioTurn (error "handler exploded"))
           >> putMVar done ()
     _ <- plant
     takeMVar done
@@ -373,13 +387,13 @@ busTopic = do
     -- post a second escalation, breaking the singleton assertion below).
     _ <-
       forkIO $
-        runAgentLoop
+        runTestAgent
           "m1r"
           ["m1r"]
           root
           (Just (QuiesceConfig 3 "boss" 1_000_000))
           ( \_ ->
-              error "handler should never run on an escalation mark"
+              ioTurn (error "handler should never run on an escalation mark")
           )
           >> putMVar done ()
     _ <- postLocal root (mkPost "human" ["m1r"] (markGlyph Escalate <> " help"))
@@ -462,13 +476,13 @@ busTopic = do
     _ <-
       forkIO $ do
         takeMVar planted
-        runAgentLoop
+        runTestAgent
           seatName
           [seatName]
           root
           Nothing
           ( \stored ->
-              pure [mkPost seatName [from (stamped stored)] ("ack: " <> body (stamped stored))]
+              ioTurn (pure [mkPost seatName [from (stamped stored)] ("ack: " <> body (stamped stored))])
           )
         putMVar done ()
     _ <- postLocal root b
@@ -482,4 +496,61 @@ busTopic = do
       length fileLog == 7 && length pureTimeline == 7
     assert "Q7 the seam: loop and runAgentLoop give the same final log modulo stamps" $
       pureTimeline == fileLog
+    removePathForcibly root
+
+  putStrLn "explicit reply acts"
+  do
+    root <- tempRoot "free-agent-reply-act"
+    writeCursor root "quiet" 0
+    done <- newEmptyMVar
+    _ <-
+      forkIO $
+        runTestAgent
+          "quiet"
+          ["quiet"]
+          root
+          Nothing
+          (\stored -> ioTurn (pure (replyAct "quiet" stored "plain local response")))
+          >> putMVar done ()
+    causing <- postLocal root (mkPost "human" ["quiet"] "*(no post)*")
+    _ <- postLocal root (mkPost "human" ["quiet"] (markGlyph Landed <> " done"))
+    takeMVar done
+    content <- TIO.readFile (root </> "log.jsonl")
+    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+        replies = [stamped s | s <- parsed, from (stamped s) == "quiet"]
+    assert "plain response text publishes no reply act" $ replies == []
+    let acts = replyAct "quiet" causing "@human: acknowledged"
+    assert "an addressed response is a cited explicit reply" $
+      case acts of
+        [reply] ->
+          to reply == ["human"]
+            && body reply == "acknowledged"
+            && thread reply == [snd (stamp causing)]
+            && channel reply == channel (stamped causing)
+        _ -> False
+    removePathForcibly root
+
+  putStrLn "runner delivery refusal"
+  do
+    root <- tempRoot "free-agent-runner-refusal"
+    writeCursor root "bounded" 0
+    grant <- newDeliveryGrant 0
+    invocations <- newIORef (0 :: Int)
+    done <- newEmptyMVar
+    _ <-
+      forkIO $
+        runAgentLoop
+          "bounded"
+          ["bounded"]
+          root
+          Nothing
+          grant
+          (\_ -> ioTurn (modifyIORef' invocations (+ 1) >> pure []))
+          >> putMVar done ()
+    _ <- postLocal root (mkPost "human" ["bounded"] "must not invoke")
+    takeMVar done
+    invocationCount <- readIORef invocations
+    cursor <- readCursor root "bounded"
+    assert "an exhausted runner grant invokes no backend and leaves the cursor" $
+      invocationCount == 0 && cursor == 0
     removePathForcibly root
