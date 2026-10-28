@@ -13,6 +13,7 @@ import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, loop, mkChannelPost
 import Circuit.Agent.Framing (Stamped, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (bracket)
 import Data.Foldable (traverse_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (mapMaybe)
@@ -20,11 +21,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time.Format.ISO8601 (iso8601Show)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (openBus, postLocal, readFileStrict, runSeatBus)
-import Free.Agent.Bus.Cli (hbVerdict, readyPosts)
+import Free.Agent.Bus.Cli (Depth (..), hbVerdict, readyPosts, runStatus)
 import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, writeCursor)
-import Free.Agent.Bus.Heartbeat (HbState (..), parseHb, readHeartbeat, writeHeartbeat)
+import Free.Agent.Bus.Heartbeat (HbState (..), hbPath, parseHb, readHeartbeat, writeHeartbeat)
 import Free.Agent.BusStats
   ( Classification (..),
     SliceMode (..),
@@ -37,8 +39,10 @@ import Free.Agent.BusStats
   )
 import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, newDeliveryGrant, replyAct)
 import Free.Agent.Host (hostShard, mkHost)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory (removePathForcibly)
 import System.FilePath ((</>))
+import System.IO (IOMode (WriteMode), hClose, hFlush, stdout, withFile)
 import System.Posix.Process (getProcessID)
 import System.Process (createProcess, getPid, proc, waitForProcess)
 
@@ -53,6 +57,21 @@ runTestAgent :: Text -> [Text] -> FilePath -> Maybe QuiesceConfig -> (Stamped Te
 runTestAgent agentName names root mQuiesce handle = do
   grant <- newDeliveryGrant 100
   runAgentLoop agentName names root mQuiesce grant handle
+
+captureLiveStatus :: FilePath -> IO Text
+captureLiveStatus root = do
+  hFlush stdout
+  bracket (hDuplicate stdout) restore $ \_ -> do
+    withFile (root </> "status.out") WriteMode $ \h -> do
+      hDuplicateTo h stdout
+      runStatus root 0 True (Depth 1)
+      hFlush stdout
+    readFileStrict (root </> "status.out")
+  where
+    restore saved = do
+      hFlush stdout
+      hDuplicateTo saved stdout
+      hClose saved
 
 busTopic :: IO ()
 busTopic = do
@@ -189,6 +208,67 @@ busTopic = do
     -- Mutation: treating explicit dead as an ordinary stale live state fails this.
     assert "an explicit dead marker reads retired" $
       retiredDot == "🔴" && "retired" `T.isInfixOf` retiredText
+    removePathForcibly root
+
+  -------------------------------------------------------------------------
+  -- Active live status: only explicit retirement leaves the projection.
+  -------------------------------------------------------------------------
+  putStrLn "bus active live status"
+  do
+    root <- tempRoot "free-agent-active-status"
+    _ <- postLocal root (mkPost "retired" [] "retired historical evidence")
+    _ <- postLocal root (mkPost "participant" [] "participant historical evidence")
+    writeHeartbeat root "idle" Idle
+    writeHeartbeat root "stale" Working
+    writeHeartbeat root "retired" Dead
+    writeCursor root "unknown" 0
+    now <- getCurrentTime
+    (_, _, _, ph) <- createProcess (proc "sleep" ["0.01"])
+    mpid <- getPid ph
+    _ <- waitForProcess ph
+    case mpid of
+      Nothing -> assert "active-status oracle acquired a child pid" False
+      Just deadPid ->
+        TIO.writeFile
+          (hbPath root "crashed")
+          ("working " <> T.pack (iso8601Show now) <> " " <> T.pack (show deadPid) <> "\n")
+    before <- readFileStrict (root </> "log.jsonl")
+    report <- captureLiveStatus root
+    after <- readFileStrict (root </> "log.jsonl")
+    let seatLines name = [line | line <- T.lines report, (" " <> name <> " —") `T.isInfixOf` line]
+    -- Mutation: dropping the explicit-dead filter fails this oracle.
+    assert "an explicitly retired seat leaves the default live view" $ null (seatLines "retired")
+    -- Mutation: filtering idle seats or dropping live-pid evidence fails this oracle.
+    assert "a live idle seat stays visible and green" $
+      case seatLines "idle" of
+        [line] -> "🟢" `T.isPrefixOf` line && not ("stale?" `T.isInfixOf` line)
+        _ -> False
+    -- Mutation: treating stale work as retirement or a crash fails this oracle.
+    assert "a stale working seat with a live pid stays visible as stale" $
+      case seatLines "stale" of
+        [line] -> "🟡" `T.isPrefixOf` line && "stale?" `T.isInfixOf` line && not ("crashed?" `T.isInfixOf` line)
+        _ -> False
+    -- Mutation: filtering every dead pid rather than only explicit retirement fails this oracle.
+    assert "a dead pid without explicit retirement stays visible as crashed" $
+      case seatLines "crashed" of
+        [line] -> "🔴" `T.isPrefixOf` line && "crashed?" `T.isInfixOf` line && not ("retired" `T.isInfixOf` line)
+        _ -> False
+    -- Mutation: requiring a heartbeat for inclusion fails this oracle.
+    assert "a cursor-only unknown seat stays visible" $
+      case seatLines "unknown" of
+        [line] -> "⚪" `T.isPrefixOf` line && "no heartbeat" `T.isInfixOf` line
+        _ -> False
+    -- Mutation: dropping historical participants indiscriminately fails this oracle.
+    assert "a participant without heartbeat or cursor stays visible" $
+      case seatLines "participant" of
+        [line] -> "⚪" `T.isPrefixOf` line && "no heartbeat" `T.isInfixOf` line
+        _ -> False
+    assert "the presentational filter leaves historical log evidence untouched" $ before == after
+    retiredHeartbeat <- readHeartbeat root "retired"
+    assert "the presentational filter leaves the explicit-dead heartbeat untouched" $
+      case retiredHeartbeat of
+        Just (Dead, _, _) -> True
+        _ -> False
     removePathForcibly root
 
   -------------------------------------------------------------------------

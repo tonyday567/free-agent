@@ -261,9 +261,9 @@ statusCmd = do
   depth <- depthOpt (Depth 1)
   pure (StatusCommand root threshold live depth)
 
--- | The @--live@ view selector: seat dots-and-lines from the heartbeats.
+-- | The @--live@ view selector: active-seat dots-and-lines from the heartbeats.
 liveOpt :: Parser Bool
-liveOpt = switch (long "live" <> help "Seat dots-and-lines: heartbeat state, cursor, last post id")
+liveOpt = switch (long "live" <> help "Active seat dots-and-lines: heartbeat state, cursor, last post id")
 
 daemonCmd :: Parser BusCommand
 daemonCmd = DaemonCommand <$> rootOpt
@@ -625,12 +625,13 @@ fmtAge s
 -- A seat whose latest own post is a halt mark (🟢/🔵) is reported as @done@
 -- rather than @behind@: decided quiet is a read, not an inference.
 --
--- With @--live@ the seat block is derived from the heartbeats instead: one
--- dot per seat, a line of state, cursor and last post, and — at depth 2 —
--- the heartbeat file and the seat's last post verbatim. Stale wake and
--- working states warn as stale when their pid is alive, or as unknown when
--- the probe is inconclusive; a dead pid reads crashed. Idle uses the
--- heartbeat pid for liveness and an explicit dead marker reads retired.
+-- With @--live@ the active seat block is derived from the heartbeats instead:
+-- one dot per seat, a line of state, cursor and last post, and — at depth 2 —
+-- the heartbeat file and the seat's last post verbatim. Explicitly retired
+-- seats leave this view; their heartbeats and log evidence stay on disk. Stale
+-- wake and working states warn as stale when their pid is alive, or as unknown
+-- when the probe is inconclusive; a dead pid reads crashed and stays visible.
+-- Idle uses the heartbeat pid for liveness.
 runStatus :: FilePath -> NominalDiffTime -> Bool -> Depth -> IO ()
 runStatus root threshold live depth@(Depth d) = do
   let path = root </> "log.jsonl"
@@ -661,7 +662,7 @@ runStatus root threshold live depth@(Depth d) = do
               pure (n, mcursor, mhb)
           )
           seats
-      traverse_ (renderSeat now posts) rows
+      traverse_ (renderSeat now posts) (filter (\(_, _, mhb) -> activeSeat mhb) rows)
     else when (d >= 1) $ do
       cursors <- traverse (\n -> (n,) <$> readCursor root n) cursorNames
       let statuses = map (seatStatus posts maxId) cursors
@@ -688,6 +689,9 @@ runStatus root threshold live depth@(Depth d) = do
           traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " done")) dones
           traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " caught up")) caughtUps
   where
+    activeSeat (Just (Dead, _, _)) = False
+    activeSeat _ = True
+
     cursorPrefix = ".cursor-"
     hbPrefix = ".hb-"
 
