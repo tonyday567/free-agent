@@ -17,13 +17,15 @@ module Main (main) where
 
 import Circuit.Agent (Name, Post (..), mkPost)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
+import Circuit.Agent.Mark (Mark (StandDown), markGlyph)
 import Control.Exception (finally)
 import Control.Monad (forM_, unless)
-import Data.Maybe (fromMaybe)
+import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Data.Time (NominalDiffTime)
+import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
 import Free.Agent.Acp (AcpConfig (..), acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, openAcp)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus.Cli (BusCommand, Depth (..), busParser, depthOpt, liveOpt, runBusCommand, runStatus)
@@ -44,7 +46,7 @@ import Free.Agent.Cli.Config
     parseHermesConfig,
     parseLlmConfig,
   )
-import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurn, newDeliveryGrant, replyAct)
+import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurn, mapTurnIO, newDeliveryGrant, replyAct)
 import Free.Agent.Gateway
   ( GatewayClient (..),
     GatewayConfig (..),
@@ -53,12 +55,15 @@ import Free.Agent.Gateway
     openGateway,
   )
 import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesCli, hostResponse, processHost)
+import Free.Agent.Refresh (preserveForRefresh, refreshDue, refreshRequestPath, writeRefreshRequest)
+import Free.Agent.Usage (readHermesUsage)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.Environment (lookupEnv)
-import System.Exit (exitFailure)
+import System.Environment (getExecutablePath, lookupEnv)
+import System.Exit (ExitCode (..), exitFailure, exitWith)
 import System.FilePath (takeDirectory, (</>))
-import System.IO (BufferMode (LineBuffering), hSetBuffering, stderr, stdout)
+import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
+import System.Process (spawnProcess, waitForProcess)
 
 -- ---------------------------------------------------------------------------
 -- Top-level command type
@@ -68,6 +73,9 @@ data Command
   = AgentCmd Int Backend
   | BusCmd BusCommand
   | StatusCmd FilePath (Maybe NominalDiffTime) Bool Depth
+  | UsageCmd FilePath
+  | RefreshCmd Int Int HermesConfig
+  | RefreshChildCmd Int Int (Maybe FilePath) HermesConfig
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -133,6 +141,28 @@ deliveryBudgetOpt =
         <> help "Maximum backend deliveries before this seat stands down"
     )
 
+refreshTokensOpt :: Parser Int
+refreshTokensOpt =
+  option
+    auto
+    ( long "refresh-tokens"
+        <> metavar "N"
+        <> value 150_000
+        <> showDefault
+        <> help "Refresh after a settled turn at or above N latest-prompt tokens"
+    )
+
+rebootNoteOpt :: Parser (Maybe FilePath)
+rebootNoteOpt =
+  optional
+    ( strOption
+        ( long "reboot-note"
+            <> metavar "FILE"
+            <> internal
+            <> help "One-time reboot note injected by the refresh supervisor"
+        )
+    )
+
 -- | Parse the default agent command. Defaults to Hermes; --backend switches.
 defaultAgentParser :: Parser Command
 defaultAgentParser =
@@ -157,6 +187,30 @@ commandParser =
         <> command "dsh" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendDsh <$> parseDshConfig) <**> helper) (progDesc "DSH / local ollama seat"))
         <> command "acp" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendAcp <$> parseAcpConfig) <**> helper) (progDesc "ACP seat (kimi acp — persistent repl)"))
         <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <*> liveOpt <*> depthOpt (Depth 1) <**> helper) (progDesc "Bus log statistics"))
+        <> command
+          "usage"
+          ( info
+              ( subparser
+                  ( command
+                      "hermes"
+                      (info (UsageCmd <$> argument str (metavar "SESSION_FILE") <**> helper) (progDesc "Latest-prompt tokens for a Hermes session file"))
+                  )
+                  <**> helper
+              )
+              (progDesc "Seat usage measurements")
+          )
+        <> command
+          "refresh"
+          ( info
+              (RefreshCmd <$> deliveryBudgetOpt <*> refreshTokensOpt <*> parseHermesConfig <**> helper)
+              (progDesc "Supervise a Hermes seat with automatic same-name session refresh")
+          )
+        <> command
+          "refresh-child"
+          ( info
+              (RefreshChildCmd <$> deliveryBudgetOpt <*> refreshTokensOpt <*> rebootNoteOpt <*> parseHermesConfig <**> helper)
+              (progDesc "Internal refresh-supervised Hermes child")
+          )
     )
     <|> defaultAgentParser
   where
@@ -205,6 +259,12 @@ main = do
     AgentCmd budget backend -> runBackend budget backend
     BusCmd busCmd -> runBusCommand busCmd
     StatusCmd root mthreshold live depth -> runStatus root (fromMaybe 900 mthreshold) live depth
+    UsageCmd sessionFile ->
+      readHermesUsage sessionFile >>= \case
+        Left err -> TIO.putStrLn ("🔴 " <> err) >> exitFailure
+        Right (sid, tokens) -> TIO.putStrLn ("🟢 session=" <> sid <> " prompt_tokens=" <> T.pack (show tokens))
+    RefreshCmd budget threshold cfg -> runRefreshSupervisor budget threshold cfg
+    RefreshChildCmd budget threshold note cfg -> runHermesAuto (Just threshold) note budget cfg
 
 -- ---------------------------------------------------------------------------
 -- Backend dispatch
@@ -282,24 +342,97 @@ defaultReply agentName stored response =
    in [routeReply ((mkPost agentName [from cause] response) {channel = channel cause})]
 
 runHermes :: Int -> HermesConfig -> IO ()
-runHermes budget cfg = do
+runHermes = runHermesAuto Nothing Nothing
+
+runHermesAuto :: Maybe Int -> Maybe FilePath -> Int -> HermesConfig -> IO ()
+runHermesAuto threshold rebootFile budget cfg = do
   validatePrompt (hcPromptFile cfg)
   systemPrompt <- TIO.readFile (hcPromptFile cfg)
+  rebootNote <- maybe (pure "") TIO.readFile rebootFile
+  firstDelivery <- newIORef True
   let names = hcNames cfg
       agentName = agentNameOf names
-      sessionFile = fromMaybe (defaultSessionFile (hcRoot cfg) names) (hcSessionFile cfg)
+      root = hcRoot cfg
+      sessionFile = fromMaybe (defaultSessionFile root names) (hcSessionFile cfg)
       framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
-      transcriptPath = hcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
+      transcriptPath = root </> ".transcripts" </> T.unpack agentName <> ".jsonl"
       cli = hermesCli (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
-      handle stored =
+      automaticRefresh stored =
+        case threshold of
+          Nothing -> pure []
+          Just limit ->
+            readHermesUsage sessionFile >>= \case
+              Left err -> do
+                hPutStrLn stderr ("refresh usage unavailable: " <> T.unpack err)
+                pure []
+              Right (_, tokens)
+                | not (refreshDue limit tokens) -> pure []
+                | otherwise -> do
+                    writeRefreshRequest root agentName tokens
+                    let cause = stamped stored
+                    pure
+                      [ ( mkPost
+                            agentName
+                            [from cause]
+                            (markGlyph StandDown <> " automatic refresh at " <> T.pack (show tokens) <> " prompt tokens")
+                        )
+                          { channel = channel cause
+                          }
+                      ]
+      handle stored = do
+        isFirst <- readIORef firstDelivery
+        writeIORef firstDelivery False
         let delivered = decorateSender stored
-            prompt = framedPrompt <> "\n\nUser messages:\n" <> body (stamped delivered)
-         in mapTurn (replyAct agentName stored)
-              <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
+            note = if isFirst then rebootNote else ""
+            prompt = framedPrompt <> note <> "\n\nUser messages:\n" <> body (stamped delivered)
+        turn <- cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
+        pure $
+          mapTurnIO
+            ( \response -> do
+                refreshPosts <- automaticRefresh stored
+                pure (replyAct agentName stored response <> refreshPosts)
+            )
+            turn
   createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
-  runSeat budget agentName names (hcRoot cfg) mQuiesce handle
+  runSeat budget agentName names root mQuiesce handle
+  requested <- doesFileExist (refreshRequestPath root agentName)
+  if isJust threshold && requested then exitWith (ExitFailure 75) else pure ()
+
+runRefreshSupervisor :: Int -> Int -> HermesConfig -> IO ()
+runRefreshSupervisor budget threshold cfg = supervise Nothing []
+  where
+    names = hcNames cfg
+    agentName = agentNameOf names
+    sessionFile = fromMaybe (defaultSessionFile (hcRoot cfg) names) (hcSessionFile cfg)
+    childArgs rebootFile =
+      ["refresh-child", "--delivery-budget", show budget, "--refresh-tokens", show threshold]
+        <> maybe [] (\path -> ["--reboot-note", path]) rebootFile
+        <> ["--root", hcRoot cfg]
+        <> concatMap (\name -> ["--name", T.unpack name]) names
+        <> ["--prompt", hcPromptFile cfg]
+        <> maybe [] (\path -> ["--session", path]) (hcSessionFile cfg)
+        <> maybe [] (\model -> ["--model", T.unpack model]) (hcModel cfg)
+        <> maybe [] (\provider -> ["--provider", T.unpack provider]) (hcProvider cfg)
+        <> ["--no-yolo" | not (hcYolo cfg)]
+        <> maybe [] (\seconds -> ["--quiesce", show seconds]) (hcQuiesce cfg)
+        <> maybe [] (\pitboss -> ["--pitboss", T.unpack pitboss]) (hcPitboss cfg)
+    supervise rebootFile recent = do
+      executable <- getExecutablePath
+      child <- spawnProcess executable (childArgs rebootFile)
+      code <- waitForProcess child
+      case code of
+        ExitFailure 75 -> do
+          now <- getCurrentTime
+          let current = now : filter (addUTCTime (-60) now <) recent
+          if length current > 10
+            then hPutStrLn stderr "refresh supervisor stopped: more than 10 refreshes within 60 seconds" >> exitFailure
+            else do
+              notePath <- preserveForRefresh (hcRoot cfg) agentName sessionFile
+              supervise (Just notePath) current
+        ExitSuccess -> pure ()
+        ExitFailure _ -> exitWith code
 
 runKimi :: Int -> KimiConfig -> IO ()
 runKimi budget cfg = do

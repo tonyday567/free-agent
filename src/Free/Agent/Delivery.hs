@@ -8,6 +8,7 @@ module Free.Agent.Delivery
     TurnMetrics (..),
     deliverTo,
     mapTurn,
+    mapTurnIO,
     DeliveryGrant,
     DeliveryRefusal (..),
     newDeliveryGrant,
@@ -70,6 +71,16 @@ data Turn a = Turn
 
 mapTurn :: (a -> b) -> Turn a -> Turn b
 mapTurn f turn = turn {awaitTurn = fmap (fmap f) (awaitTurn turn)}
+
+-- | Run an effect after settlement, never during turn construction or on cancellation.
+mapTurnIO :: (a -> IO b) -> Turn a -> Turn b
+mapTurnIO f turn =
+  turn
+    { awaitTurn =
+        awaitTurn turn >>= \case
+          TurnResponse a -> TurnResponse <$> f a
+          TurnCancelled -> pure TurnCancelled
+    }
 
 -- | Invoke a backend for one open-caused input. Publication is not part of
 -- delivery: a caller may settle quietly or explicitly use 'postTo' afterwards.

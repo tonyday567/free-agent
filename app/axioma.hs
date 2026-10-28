@@ -15,10 +15,12 @@ import Axioma.Lifecycle (lifecycleTopic)
 import Axioma.Meeting (meetingTopic)
 import Axioma.Persist (persistTopic)
 import Axioma.Quiesce (quiesceTopic)
+import Axioma.Refresh (refreshTopic)
 import Axioma.Resume (resumeTopic)
 import Axioma.Seat (seatTopic)
 import Axioma.Tensor (tensorTopic)
 import Axioma.Transcript (transcriptTopic)
+import Axioma.Usage (usageTopic)
 import Options.Applicative
 
 data Topic
@@ -31,11 +33,13 @@ data Topic
   | Bus
   | Quiesce
   | Persist
+  | Refresh
   | Resume
   | Tensor
   | Connector
   | Acp
   | Lifecycle
+  | Usage
   deriving (Show, Eq, Bounded, Enum)
 
 topicName :: Topic -> String
@@ -48,11 +52,13 @@ topicName Meeting = "meeting"
 topicName Bus = "bus"
 topicName Quiesce = "quiesce"
 topicName Persist = "persist"
+topicName Refresh = "refresh"
 topicName Resume = "resume"
 topicName Tensor = "tensor"
 topicName Connector = "connector"
 topicName Acp = "acp"
 topicName Lifecycle = "lifecycle"
+topicName Usage = "usage"
 
 topicDesc :: Topic -> String
 topicDesc All = "run all topics"
@@ -64,11 +70,13 @@ topicDesc Meeting = "meeting skeletons, panel meeting, replay, derivations as 2-
 topicDesc Bus = "bus stats + seats: supervision, self-halt, card meetings, M1a ancestry, the seam (Q7)"
 topicDesc Quiesce = "tailLog draining + the quiescence Moore (Q1-Q5)"
 topicDesc Persist = "watermark persister (B1-B3), anti-pollution (B4), stamping daemon"
+topicDesc Refresh = "automatic same-name session refresh and durable handoff"
 topicDesc Resume = "empty-reply drop (B2), empty-sentinel drop (B8), resume fix (B6)"
 topicDesc Tensor = "tensor/par probe: the stamping office as a connective toggle"
 topicDesc Connector = "connector turn grammar (B7): zero/one/two-frame turns"
 topicDesc Acp = "ACP seat (R2a): scripted double + wired-binary integration"
 topicDesc Lifecycle = "lifecycle hygiene (H): lock stress, daemon liveness, death honesty (L1-L5)"
+topicDesc Usage = "Hermes latest-prompt usage anchor"
 
 topicParser :: Parser Topic
 topicParser =
@@ -105,11 +113,13 @@ runTopic Meeting = meetingTopic
 runTopic Bus = busTopic
 runTopic Quiesce = quiesceTopic
 runTopic Persist = persistTopic
+runTopic Refresh = refreshTopic
 runTopic Resume = resumeTopic
 runTopic Tensor = tensorTopic
 runTopic Connector = connectorTopic
 runTopic Acp = acpTopic
 runTopic Lifecycle = lifecycleTopic
+runTopic Usage = usageTopic
 
 main :: IO ()
 main = do
