@@ -11,10 +11,18 @@
 ;;   *free-agent-bus-ready*   open unclaimed TASKs         (bus ready)
 ;;   *free-agent-bus-thread*  ancestry of one post         (bus read --thread ID)
 ;;   *free-agent-bus-log*     tail of the log, depth-aware
+;;   *free-agent-bus-inbox*   unread mail for this name    (bus inbox NAME)
 ;;   *free-agent-bus-post*    composition buffer           (bus say)
 ;;
 ;; Cascade depth is explicit everywhere: 0 dot, 1 one-line excerpt, 2 verbatim.
 ;; No view advances an agent delivery cursor and no view invokes a model.
+;;
+;; The human: `free-agent-bus-name' is a durable bus name like any other, and
+;; its unread state is `.cursor-NAME' in the root, read through `bus inbox'.
+;; The `.human-NAME' marker that `bus attach' writes is evidence that the name
+;; is a person, not a seat: the inbox header prints it, and nothing in this
+;; deck claims privilege from it. The inbox browser never writes a cursor; only
+;; the explicit mark-read action does, through `bus inbox --mark-read'.
 ;;
 ;; Audience: a post with `to: []' is public and is always shown. There is no
 ;; broadcast token: the retired `"all"' convention is gone from composition and
@@ -27,6 +35,7 @@
 ;;   SPC y s                 live status
 ;;   SPC y r                 READY tasks
 ;;   SPC y t                 thread at point (or prompt for a post id)
+;;   SPC y i                 inbox: unread mail for this name
 ;;   SPC y f                 set the audience filter (empty = show everything)
 ;;   SPC y b                 open the board file
 ;;   SPC y d                 deck: status + log + compose in one frame
@@ -34,6 +43,9 @@
 ;; In *free-agent-bus-log* and the view buffers:
 ;;   RET  open the thread of the post at point      TAB  cycle cascade depth
 ;;   g    refresh        q  quit window      t/f  timestamps / filter (log only)
+;; In *free-agent-bus-inbox*:
+;;   m    mark read (bus inbox NAME --mark-read)  r  reply into the thread at
+;;   g    refresh (never marks)  RET/t  thread     point (composition buffer)
 
 ;;; Code:
 
@@ -105,6 +117,16 @@ recipients and no `free-agent-bus-post-public'."
 (defcustom free-agent-bus-thread-buffer-name "*free-agent-bus-thread*"
   "Name of the thread view buffer."
   :type 'string
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-inbox-buffer-name "*free-agent-bus-inbox*"
+  "Name of the inbox buffer: unread mail for `free-agent-bus-name'."
+  :type 'string
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-inbox-depth 2
+  "Cascade depth of the inbox buffer: 0 dot, 1 one-line excerpt, 2 verbatim."
+  :type '(choice (const 0) (const 1) (const 2))
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-board-file "~/coffee/loom/board.md"
@@ -210,6 +232,34 @@ command stays visible to the runner instead of being hidden by an error."
           free-agent-bus-name
           (format-time-string "%Y-%m-%d %H:%M:%S")))
 
+(defun free-agent-bus--human-marker-file ()
+  "Path to the attached-human marker for `free-agent-bus-name'."
+  (expand-file-name (format ".human-%s" free-agent-bus-name)
+                    (free-agent-bus--expand-root)))
+
+(defun free-agent-bus--attached-line ()
+  "The explicit attached-human line: who this deck is, and where.
+Reads the `.human-NAME' marker that `bus attach' writes, so detachment is
+never ambiguous.  The marker is evidence, never authority: this line reports
+it and no act in this deck depends on it."
+  (let* ((root (free-agent-bus--expand-root))
+         (file (free-agent-bus--human-marker-file))
+         (marker (and (file-readable-p file)
+                      (ignore-errors (json-read-file file)))))
+    (cond
+     (marker
+      (format "attached as %s on %s (cursor %s, since %s)"
+              (or (alist-get 'name marker) free-agent-bus-name)
+              (or (alist-get 'root marker) root)
+              (or (alist-get 'cursor marker) "?")
+              (or (alist-get 'attached_at marker) "?")))
+     ((file-readable-p file)
+      (format "attached as %s on %s (marker present, unreadable)"
+              free-agent-bus-name root))
+     (t
+      (format "not attached: run `%s bus attach %s --root %s'"
+              free-agent-bus-executable free-agent-bus-name root)))))
+
 (defun free-agent-bus--audience-string (to)
   "Render a post's TO field (a vector or list) as an audience string."
   (let ((names (append to nil)))
@@ -230,6 +280,21 @@ view (raw JSONL), and text mentioning `id=<n>'."
              ((looking-at "\\([0-9]+\\)[ \t]") (string-to-number (match-string 1)))
              ((re-search-forward "id=\\([0-9]+\\)" (line-end-position) t)
               (string-to-number (match-string 1))))))))
+
+(defun free-agent-bus--sender-at-point ()
+  "Return the sender name on the current line, or nil.
+Understands the same shapes `free-agent-bus--id-at-point' does: a raw JSONL
+line (\"from\"), a log-tail head line (`[id@ts] from→audience'), and a CLI
+view head line (`id from→audience')."
+  (save-excursion
+    (beginning-of-line)
+    (let ((line (buffer-substring-no-properties (point) (line-end-position))))
+      (or (and (string-match "\"from\"[ \t]*:[ \t]*\"\\([^\"]+\\)\"" line)
+               (match-string 1 line))
+          (and (string-match "\\`\\[[0-9]+@[^]]*\\][ \t]+\\([^ \t]+\\)→" line)
+               (match-string 1 line))
+          (and (string-match "\\`[0-9]+[ \t]+\\([^ \t]+\\)→" line)
+               (match-string 1 line))))))
 
 ;;; Failures stay visible
 
@@ -438,12 +503,17 @@ buffer is never left silently stale."
   "Cycle the cascade depth of the current view: 0 → 1 → 2 → 0."
   (interactive)
   (let* ((current (cond ((derived-mode-p 'free-agent-bus-log-mode) free-agent-bus-log-depth)
+                        ((derived-mode-p 'free-agent-bus-inbox-mode) free-agent-bus-inbox-depth)
                         ((derived-mode-p 'free-agent-bus-view-mode) free-agent-bus-view-depth)
                         (t 1)))
          (next (cond ((= current 0) 1) ((= current 1) 2) (t 0))))
     (cond ((derived-mode-p 'free-agent-bus-log-mode)
            (setq free-agent-bus-log-depth next)
            (free-agent-bus-log-refresh t)
+           (message "Depth %s" next))
+          ((derived-mode-p 'free-agent-bus-inbox-mode)
+           (setq free-agent-bus-inbox-depth next)
+           (free-agent-bus-inbox-refresh)
            (message "Depth %s" next))
           ((derived-mode-p 'free-agent-bus-status-mode)
            (message "Status rows use depth 1"))
@@ -841,6 +911,149 @@ retelling: a task's body, its claim, and its DONE read in log order."
         (free-agent-bus-thread id)
       (call-interactively #'free-agent-bus-thread))))
 
+;;; Inbox: unread mail for the human
+
+(defvar-local free-agent-bus-inbox--watch nil
+  "Async `bus ping-watch NAME' process owned by this inbox buffer.")
+
+(defun free-agent-bus-inbox--header ()
+  "Header for the inbox buffer: identity, root, and the attached line."
+  (format "bus inbox %s · depth %s\n%s\n%s\n\n"
+          free-agent-bus-name
+          free-agent-bus-inbox-depth
+          (free-agent-bus--context-line)
+          (free-agent-bus--attached-line)))
+
+(defun free-agent-bus-inbox-refresh ()
+  "Re-run `bus inbox NAME' and rerender this buffer.  Writes no cursor.
+The buffer shows the unread set exactly as the CLI reports it; marking read
+is the separate, explicit `free-agent-bus-inbox-mark-read' action, so a
+refresh — including one a ping triggers — cannot consume mail the runner has
+not seen."
+  (interactive)
+  (free-agent-bus--check-root)
+  (let* ((result (free-agent-bus--cli "inbox" free-agent-bus-name
+                                      "--depth" (number-to-string free-agent-bus-inbox-depth)))
+         (status (car result))
+         (output (cdr result))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (insert (propertize (free-agent-bus-inbox--header) 'face 'bold))
+    (insert (if (string-empty-p output)
+                (propertize "(no unread mail)\n" 'face 'shadow)
+              (concat output "\n")))
+    (when (/= status 0)
+      (insert (propertize (format "\n⛔ free-agent bus inbox exited %d\n" status) 'face 'error)))
+    (goto-char (point-min))
+    (set-buffer-modified-p nil)))
+
+;;;###autoload
+(defun free-agent-bus-inbox-mark-read ()
+  "Mark this name's unread mail read: `bus inbox NAME --mark-read'.
+The CLI advances `.cursor-NAME' to the id after the highest post printed and
+never past one, so anything arriving after this run stays unread."
+  (interactive)
+  (free-agent-bus--check-root)
+  (let* ((result (free-agent-bus--cli "inbox" free-agent-bus-name "--mark-read"
+                                      "--depth" (number-to-string free-agent-bus-inbox-depth)))
+         (status (car result))
+         (output (cdr result)))
+    (if (/= status 0)
+        (free-agent-bus--report-failure "bus inbox --mark-read" status output)
+      (message "free-agent bus inbox: marked read (%s)"
+               (if (string-empty-p output)
+                   "no unread mail"
+                 (car (split-string output "\n"))))
+      (free-agent-bus-inbox-refresh))))
+
+(defun free-agent-bus-inbox--watch-sentinel (proc _event)
+  "Refresh this inbox when its ping-watch fires, then wait again."
+  (when (memq (process-status proc) '(exit signal closed failed))
+    (let ((buf (process-get proc 'free-agent-bus-buffer)))
+      (when (and (buffer-live-p buf)
+                 (eq proc (buffer-local-value 'free-agent-bus-inbox--watch buf)))
+        (with-current-buffer buf
+          (setq-local free-agent-bus-inbox--watch nil)
+          (ignore-errors (free-agent-bus-inbox-refresh))
+          (message "free-agent bus inbox: mail for %s" free-agent-bus-name)
+          (ignore-errors (free-agent-bus-inbox-start-watch)))))))
+
+(defun free-agent-bus-inbox-stop-watch ()
+  "Stop this inbox buffer's ping-watch process."
+  (when (process-live-p free-agent-bus-inbox--watch)
+    (delete-process free-agent-bus-inbox--watch))
+  (setq-local free-agent-bus-inbox--watch nil))
+
+(defun free-agent-bus-inbox-start-watch ()
+  "Wait for the next ping for this name, without polling.
+`bus ping-watch NAME' blocks until the name's ping file changes and exits;
+its sentinel refreshes the buffer and waits again.  No timer, no polling."
+  (free-agent-bus-inbox-stop-watch)
+  (let* ((buf (current-buffer))
+         (proc (make-process
+                :name (format "free-agent-ping-watch-%s" free-agent-bus-name)
+                :buffer nil
+                :command (list (free-agent-bus--executable) "bus" "ping-watch"
+                               "--root" (free-agent-bus--expand-root)
+                               free-agent-bus-name)
+                :noquery t
+                :sentinel #'free-agent-bus-inbox--watch-sentinel)))
+    (process-put proc 'free-agent-bus-buffer buf)
+    (setq-local free-agent-bus-inbox--watch proc)))
+
+(defvar free-agent-bus-inbox-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'free-agent-bus-thread-at-point)
+    (define-key map (kbd "t") #'free-agent-bus-thread-at-point)
+    (define-key map (kbd "r") #'free-agent-bus-reply-at-point)
+    (define-key map (kbd "m") #'free-agent-bus-inbox-mark-read)
+    (define-key map (kbd "g") #'free-agent-bus-inbox-refresh)
+    (define-key map (kbd "<tab>") #'free-agent-bus-cycle-depth)
+    map)
+  "Keymap for `free-agent-bus-inbox-mode'.")
+
+(define-derived-mode free-agent-bus-inbox-mode special-mode "FAB-Inbox"
+  "Major mode for the human's unread-mail buffer.
+\\{free-agent-bus-inbox-mode-map}"
+  (setq-local revert-buffer-function (lambda (&rest _) (free-agent-bus-inbox-refresh)))
+  (add-hook 'kill-buffer-hook #'free-agent-bus-inbox-stop-watch nil t))
+
+;;;###autoload
+(defun free-agent-bus-reply-at-point ()
+  "Reply into the thread of the post at point.
+Sets the composition buffer's ancestry to that post id and its audience to
+the post's sender, then opens the composition buffer.  Sending goes through
+`bus say --thread ID', so the reply lands in the thread component rather
+than beside every open offer."
+  (interactive)
+  (let ((id (free-agent-bus--id-at-point))
+        (sender (free-agent-bus--sender-at-point)))
+    (unless id
+      (user-error "No post id at point — move to a post line first"))
+    (setq free-agent-bus-post-thread id)
+    (when sender
+      (setq free-agent-bus-post-public nil)
+      (setq free-agent-bus-post-to (list sender)))
+    (free-agent-bus-post)
+    (message "Reply into thread %s%s" id
+             (if sender (format " to %s" sender) " (no recipients set)"))))
+
+;;;###autoload
+(defun free-agent-bus-inbox ()
+  "Open the human's inbox: unread posts addressed to `free-agent-bus-name'.
+The header carries the explicit attached line.  Freshness waits on
+`bus ping-watch NAME' rather than polling.  Opening and refreshing never move
+`.cursor-NAME'; `m' marks read."
+  (interactive)
+  (free-agent-bus--check-root)
+  (let ((buf (get-buffer-create free-agent-bus-inbox-buffer-name)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'free-agent-bus-inbox-mode)
+        (free-agent-bus-inbox-mode))
+      (free-agent-bus-inbox-refresh)
+      (free-agent-bus-inbox-start-watch))
+    (pop-to-buffer buf)))
+
 ;;; Auto refresh (visible views only; never a model, never a cursor)
 
 (defvar free-agent-bus--auto-timer nil
@@ -1153,10 +1366,13 @@ One frame, one rail: notice live work, read the evidence, post the next act."
   (interactive)
   (free-agent-bus-log-stop-watch)
   (free-agent-bus--stop-auto-refresh)
+  (when-let ((b (get-buffer free-agent-bus-inbox-buffer-name)))
+    (with-current-buffer b (free-agent-bus-inbox-stop-watch)))
   (dolist (buf (list free-agent-bus-post-buffer-name
                      free-agent-bus-log-buffer-name
                      free-agent-bus-status-buffer-name
                      free-agent-bus-ready-buffer-name
+                     free-agent-bus-inbox-buffer-name
                      free-agent-bus-thread-buffer-name))
     (when-let ((b (get-buffer buf)))
       (kill-buffer b))))
@@ -1168,6 +1384,7 @@ One frame, one rail: notice live work, read the evidence, post the next act."
   (dolist (pair '(("yf" . free-agent-bus-log-set-filter)
                   ("ys" . free-agent-bus-status)
                   ("yr" . free-agent-bus-ready)
+                  ("yi" . free-agent-bus-inbox)
                   ("yt" . free-agent-bus-thread-at-point)))
     (define-key doom-leader-map (kbd (car pair)) (cdr pair))))
 
