@@ -158,6 +158,26 @@ busTopic = do
            in statSignal stats == 1 && statNoise stats == 1
         _ -> False
 
+  do
+    let stored i ancestors = case parseTimeText "2026-10-28T00:00:00" of
+          Just ts -> Stamped (ts, i) (Post "moka" Nothing [] ancestors "cycle fixture")
+          Nothing -> error "bad thread-cycle fixture timestamp"
+        posts =
+          [ stored 1 [2],
+            stored 2 [3],
+            stored 3 [2],
+            stored 7 [],
+            stored 8 [7],
+            stored 9 [9]
+          ]
+        slices = slicePosts ByThread posts
+        componentIds label = maybe [] (map (snd . stamp)) (lookup label slices)
+    -- Mutation: removing cycle detection makes this oracle non-terminating.
+    assert "a two-post ancestry cycle keeps its child in one component" $ componentIds "2" == [3, 2, 1]
+    assert "ordinary ancestry still resolves to its root" $ componentIds "7" == [8, 7]
+    assert "a self-ancestor is its own root" $ componentIds "9" == [9]
+    assert "thread slicing accounts for every cyclic and ordinary post" $ length slices == 3
+
   -------------------------------------------------------------------------
   -- Idle age is not a crash signal; pid evidence separates parked from dead.
   -------------------------------------------------------------------------

@@ -122,6 +122,9 @@ data SliceMode
   | -- | Fixed-width time buckets in minutes.
     WindowMinutes Int
   | -- | One slice per thread tree (grouped by root post id).
+    --
+    -- Cyclic ancestry resolves to the least post id in the cycle, so a
+    -- self-ancestor is its own root.
     ByThread
   | -- | One slice per authoring agent.
     ByAgent
@@ -149,11 +152,17 @@ slicePosts ByThread posts =
   sortOn fst [(showt k, v) | (k, v) <- Map.toList roots]
   where
     idx = Map.fromList [(snd (stamp p), p) | p <- posts]
-    rootOf p = case thread (stamped p) of
-      [] -> snd (stamp p)
-      ts -> case mapMaybe (`Map.lookup` idx) ts of
-        [] -> minimum ts
-        ps -> rootOf (minimumBy (comparing (snd . stamp)) ps)
+    rootOf = go []
+      where
+        go seen p
+          | pid `elem` seen = minimum (pid : takeWhile (/= pid) seen)
+          | otherwise = case thread (stamped p) of
+              [] -> pid
+              ts -> case mapMaybe (`Map.lookup` idx) ts of
+                [] -> minimum ts
+                ps -> go (pid : seen) (minimumBy (comparing (snd . stamp)) ps)
+          where
+            pid = snd (stamp p)
     roots = Map.fromListWith (++) [(rootOf p, [p]) | p <- posts]
 slicePosts ByAgent posts =
   sortOn fst [(k, v) | (k, v) <- Map.toList byAuthor]
