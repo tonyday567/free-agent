@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | lifecycle hygiene (wave H): the log lock, the stamping daemon, and
 -- death honesty. L1-L5.
@@ -9,7 +10,7 @@ where
 
 import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Agent (Post (..), ioShard)
-import Circuit.Agent.Framing (stamp, stamped, unLog, unframeStored)
+import Circuit.Agent.Framing (stamp, stamped, unLog, unframeStored, pattern Stamped)
 import Control.Concurrent (forkFinally, forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.STM (atomically)
 import Control.Exception (SomeException, displayException, try)
@@ -30,16 +31,54 @@ import Free.Agent.Bus
     readFileStrict,
     runSeatBus,
     scribeIO,
+    withBusFiles,
+    writePings,
   )
 import Free.Agent.Bus.Daemon (ensureFifo, fifoPath, postViaDaemon, runDaemon)
 import System.Directory (removeFile, removePathForcibly)
 import System.FilePath ((</>))
+import System.IO (IOMode (AppendMode), withFile)
 import System.Mem (performGC)
 import System.Posix.Files (getFileStatus, isNamedPipe)
 import System.Timeout (timeout)
 
 lifecycleTopic :: IO ()
 lifecycleTopic = do
+  -------------------------------------------------------------------------
+  -- L1a: a ping write must wait for a same-process holder of its handle.
+  -- The holder is explicit so the pre-repair IOException is deterministic;
+  -- the stress test below exercises the same race between postLocal writers.
+  -------------------------------------------------------------------------
+  putStrLn "ping write exclusion"
+
+  do
+    root <- tempRoot "free-agent-l1-ping-lock"
+    let path = root </> "log.jsonl"
+        pingPath = root </> ".ping-hub"
+    now <- getCurrentTime
+    let stored = Stamped (now, 0) (mkPost "writer" ["hub"] "ping")
+    started <- newEmptyMVar
+    result <- newEmptyMVar
+    early <- withBusFiles $ withFile pingPath AppendMode $ \_ -> do
+      _ <- forkIO $ do
+        putMVar started ()
+        r <- try @SomeException (writePings path [stored])
+        putMVar result r
+      takeMVar started
+      threadDelay 50_000
+      timeout 1_000_000 (takeMVar result)
+    settled <- case early of
+      Just r -> pure (Just r)
+      Nothing -> timeout 5_000_000 (takeMVar result)
+    case early of
+      Just (Left e) -> putStrLn (displayException e)
+      _ -> pure ()
+    assert "L1 ping write waits for a same-process file holder" $
+      case (early, settled) of
+        (Nothing, Just (Right ())) -> True
+        _ -> False
+    removePathForcibly root
+
   -------------------------------------------------------------------------
   -- L1: lock stress — forked writers hammer postLocal against a live
   -- persister while a feeder keeps the persistLoop inside the lock.

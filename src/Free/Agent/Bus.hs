@@ -516,7 +516,7 @@ persistLoop path logVar durVar = loop
               | let delta = drop (fromIntegral d) (unLog image),
                 not (null delta) -> do
                   appendStoredPostsUnlocked path delta
-                  writePings path delta
+                  writePingsUnlocked path delta
                   atomically (writeTVar durVar (d + fromIntegral (length delta)))
             _ -> pure ()
           GT -> do
@@ -533,7 +533,7 @@ persistLoop path logVar durVar = loop
               writeTVar durVar m
               pure renum
             appendStoredPostsUnlocked path renumbered
-            writePings path renumbered
+            writePingsUnlocked path renumbered
             atomically (writeTVar durVar (m + fromIntegral (length renumbered)))
       loop
 
@@ -544,9 +544,17 @@ countLines path = fromIntegral . BS.count 0x0A <$> BS.readFile path
 -- | Write a @.ping-NAME@ file for each named recipient of each post.
 --
 -- The file contains the latest post id addressed to that recipient. Agents can
--- watch this file cheaply instead of re-parsing the log on every wake.
+-- watch this file cheaply instead of re-parsing the log on every wake. Ping
+-- writes share the process-wide bus-file mutex: concurrent 'postLocal' calls
+-- have released the log lock before writing pings, but their handles still
+-- conflict in GHC's per-process file table.
 writePings :: FilePath -> [Stamped a] -> IO ()
-writePings path posts = traverse_ writeOne recipients
+writePings path posts = withBusFiles (writePingsUnlocked path posts)
+
+-- | Raw ping writes for the persister, which already holds 'withLogLock' and
+-- therefore 'logWriteMutex'.
+writePingsUnlocked :: FilePath -> [Stamped a] -> IO ()
+writePingsUnlocked path posts = traverse_ writeOne recipients
   where
     root = takeDirectory path
     pingFile name = root </> printf ".ping-%s" (T.unpack name)
