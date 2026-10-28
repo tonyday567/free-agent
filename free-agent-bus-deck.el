@@ -898,10 +898,12 @@ retelling: a task's body, its claim, and its DONE read in log order."
 \\{free-agent-bus-log-mode-map}"
   (add-hook 'kill-buffer-hook #'free-agent-bus-log-stop-watch nil t))
 
-(defun free-agent-bus-log--read-file ()
-  "Read the bus log file as UTF-8 text."
+(defun free-agent-bus-log--read-file (&optional start end)
+  "Read the bus log file as UTF-8 text, optionally from START to END.
+START and END are byte offsets, allowing an append to be read without
+re-reading the log prefix."
   (with-temp-buffer
-    (insert-file-contents-literally (free-agent-bus--log-file))
+    (insert-file-contents-literally (free-agent-bus--log-file) nil start end)
     (set-buffer-file-coding-system 'utf-8)
     (decode-coding-region (point-min) (point-max) 'utf-8)
     (buffer-string)))
@@ -948,31 +950,89 @@ whose audience does not match is dropped."
                      (mapconcat (lambda (l) (concat "│ " l))
                                 (split-string body "\n") "\n")))))))))
 
+(defvar-local free-agent-bus-log--raw-offset nil
+  "Byte offset of the log snapshot used for the current render.")
+
+(defvar-local free-agent-bus-log--newline-complete nil
+  "Whether the rendered log snapshot ends with a complete newline.")
+
+(defun free-agent-bus-log--format-lines (raw)
+  "Format RAW log text using the current buffer's display settings."
+  (mapconcat #'identity
+             (delq nil (mapcar #'free-agent-bus-log--format-line
+                               (split-string raw "\n")))
+             "\n"))
+
+(defun free-agent-bus-log--window-states (buf)
+  "Capture window points for BUF and whether each point was at the end."
+  (mapcar (lambda (w)
+            (let ((pt (window-point w)))
+              (list w pt (= pt (point-max)))))
+          (get-buffer-window-list buf nil t)))
+
+(defun free-agent-bus-log--restore-window-states (states)
+  "Restore window STATES, keeping only formerly at-end windows at the end."
+  (dolist (state states)
+    (let* ((w (nth 0 state))
+           (old-pt (nth 1 state))
+           (was-at-end (nth 2 state))
+           (new-pt (if was-at-end (point-max) (min old-pt (point-max)))))
+      (set-window-point w new-pt))))
+
+(defun free-agent-bus-log--replace-contents (contents)
+  "Replace the log buffer with CONTENTS, preserving scroll positions."
+  (let ((window-states
+         (free-agent-bus-log--window-states (current-buffer))))
+    (erase-buffer)
+    (insert contents)
+    (free-agent-bus-log--restore-window-states window-states)))
+
+(defun free-agent-bus-log--append-contents (contents)
+  "Append CONTENTS to the log buffer, preserving scroll positions."
+  (let ((window-states
+         (free-agent-bus-log--window-states (current-buffer)))
+        (old-point (point))
+        (was-at-end (= (point) (point-max))))
+    (save-excursion
+      (goto-char (point-max))
+      (insert contents))
+    (goto-char (if was-at-end (point-max) (min old-point (point-max))))
+    (free-agent-bus-log--restore-window-states window-states)))
+
 (defun free-agent-bus-log-refresh (&optional force)
   "Refresh the log buffer from the file, preserving scroll position.
-When FORCE is non-nil, re-render even when the rendered text is unchanged."
+A newline-complete append is formatted and inserted without reading or
+rendering the log prefix.  FORCE, truncation, and partial-line appends use
+a full rebuild."
   (when-let ((buf (get-buffer free-agent-bus-log-buffer-name)))
     (with-current-buffer buf
       (let* ((inhibit-read-only t)
-             (raw (free-agent-bus-log--read-file))
-             (contents (mapconcat #'identity
-                                  (delq nil (mapcar #'free-agent-bus-log--format-line
-                                                    (split-string raw "\n")))
-                                  "\n")))
-        (when (or force (not (string= contents (buffer-string))))
-          (let ((window-states
-                 (mapcar (lambda (w)
-                           (let ((pt (window-point w)))
-                             (list w pt (= pt (point-max)))))
-                         (get-buffer-window-list buf nil t))))
-            (erase-buffer)
-            (insert contents)
-            (dolist (state window-states)
-              (let* ((w (nth 0 state))
-                     (old-pt (nth 1 state))
-                     (was-at-end (nth 2 state))
-                     (new-pt (if was-at-end (point-max) (min old-pt (point-max)))))
-                (set-window-point w new-pt)))))))))
+             (size (file-attribute-size
+                    (file-attributes (free-agent-bus--log-file))))
+             (offset free-agent-bus-log--raw-offset)
+             (incremental
+              (and (not force)
+                   offset
+                   free-agent-bus-log--newline-complete
+                   (> size offset))))
+        (if incremental
+            (let ((raw (free-agent-bus-log--read-file offset size)))
+              (if (string-suffix-p "\n" raw)
+                  (progn
+                    (free-agent-bus-log--append-contents
+                     (free-agent-bus-log--format-lines raw))
+                    (setq free-agent-bus-log--raw-offset size))
+                (setq incremental nil)))
+          (when (and (not force) offset (= size offset))
+            (setq incremental 'unchanged)))
+        (unless incremental
+          (let* ((raw (free-agent-bus-log--read-file 0 size))
+                 (contents (free-agent-bus-log--format-lines raw)))
+            (when (or force (not (string= contents (buffer-string))))
+              (free-agent-bus-log--replace-contents contents))
+            (setq free-agent-bus-log--raw-offset size
+                  free-agent-bus-log--newline-complete
+                  (or (zerop size) (string-suffix-p "\n" raw)))))))))
 
 (defun free-agent-bus-log--refresh-soon ()
   "Schedule a log refresh after a short debounce window."
