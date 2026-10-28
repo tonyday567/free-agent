@@ -46,7 +46,7 @@ import Free.Agent.Cli.Config
     parseHermesConfig,
     parseLlmConfig,
   )
-import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurn, mapTurnIO, newDeliveryGrant, replyAct)
+import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurn, mapTurnIO, newDeliveryGrant, replyActIO)
 import Free.Agent.Gateway
   ( GatewayClient (..),
     GatewayConfig (..),
@@ -385,8 +385,9 @@ runHermesAuto threshold rebootFile budget cfg = do
         pure $
           mapTurnIO
             ( \response -> do
+                posts <- replyActIO agentName stored response
                 refreshPosts <- automaticRefresh stored
-                pure (replyAct agentName stored response <> refreshPosts)
+                pure (posts <> refreshPosts)
             )
             turn
   createDirectoryIfMissing True (takeDirectory sessionFile)
@@ -442,7 +443,7 @@ runKimi budget cfg = do
       handle stored =
         let delivered = decorateSender stored
             prompt = systemPrompt <> "\n\nUser message:\n" <> body (stamped delivered)
-         in mapTurn (replyAct agentName stored)
+         in mapTurnIO (replyActIO agentName stored)
               <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
   createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
@@ -464,7 +465,7 @@ runDsh budget cfg = do
       mQuiesce = buildQuiesce (dcQuiesce cfg) (dcPitboss cfg)
       handle stored =
         let delivered = decorateSender stored
-         in mapTurn (replyAct agentName stored)
+         in mapTurnIO (replyActIO agentName stored)
               <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) (body (stamped delivered))
   createDirectoryIfMissing True (takeDirectory transcriptPath)
   TIO.putStrLn $ "   patch: " <> T.pack (dcDshPatch cfg)

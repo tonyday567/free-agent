@@ -31,6 +31,7 @@ import Free.Agent.Delivery
     newDeliveryGrant,
     postTo,
     replyAct,
+    replyWarning,
     turnMetrics,
   )
 import System.Directory (createDirectoryIfMissing, doesFileExist, removePathForcibly)
@@ -235,8 +236,15 @@ deliveryTopic = do
   putStrLn "Kimi reply-act publication"
   channelRoot <- tempRoot "free-agent-kimi-channel"
   channelCause <- postTo channelRoot ((mkPost "yang" ["kimi1", "ops"] "cause") {channel = Just "ops"})
-  assert "replyAct keeps unaddressed prose local" $
+  assert "replyAct keeps unaddressed prose local and silent" $
     null (replyAct "kimi1" channelCause "ordinary local prose")
+      && replyWarning "kimi1" "ordinary local prose" == Nothing
+  assert "a prefix-first address publishes without a warning" $
+    replyWarning "kimi1" "@yang: explicit report" == Nothing
+  assert "a later address warns with its offset and does not publish" $
+    null (replyAct "kimi1" channelCause "progress\n@yang: DONE")
+      && replyWarning "kimi1" "progress\n@yang: DONE"
+        == Just "🟡 kimi1: @yang: begins at character offset 9, not 0; response stayed local"
   assert "replyAct preserves an addressed reply's channel and ancestry" $
     case replyAct "kimi1" channelCause "@yang: explicit report" of
       [r] ->
@@ -299,6 +307,9 @@ deliveryTopic = do
   setEnv "PATH" oldPath
   assert ("the wired Kimi seat completes its scripted turns" <> if code == ExitSuccess then "" else ": " <> err) $
     code == ExitSuccess
+  let adapterWarnings = filter ("🟡 kimi1: @yang: begins at character offset " `T.isPrefixOf`) (T.lines (T.pack err))
+  assert "the wired adapter warns once for prefix-later, not for prefix-first or local prose" $
+    length adapterWarnings == 1
   content <- TIO.readFile (kimiRoot </> "log.jsonl")
   let parsed = mapMaybe (unframeStored @Text) (T.lines content)
       replies = [stamped s | s <- parsed, from (stamped s) == "kimi1"]

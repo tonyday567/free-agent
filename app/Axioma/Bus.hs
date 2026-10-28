@@ -24,7 +24,7 @@ import Data.Time (addUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (openBus, postLocal, readFileStrict, runSeatBus)
-import Free.Agent.Bus.Cli (Depth (..), hbVerdict, readyPosts, runStatus)
+import Free.Agent.Bus.Cli (Depth (..), hbVerdict, readyPosts, readyWarnings, runStatus)
 import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, writeCursor)
 import Free.Agent.Bus.Heartbeat (HbState (..), hbPath, parseHb, readHeartbeat, writeHeartbeat)
 import Free.Agent.BusStats
@@ -342,6 +342,49 @@ busTopic = do
     assert "a later claimer cannot complete the first claimer's task" $ readyIds posts == []
     assert "the first claimer's DONE resolves the dependent offer" $
       readyIds (posts <> [stored 26 "mucho" ["moka"] [20] "DONE · task 20"]) == [24]
+
+  do
+    let stored i f audience ancestors text = case parseTimeText "2026-10-28T00:00:00" of
+          Just ts -> Stamped (ts, i) (Post f Nothing audience ancestors text)
+          Nothing -> error "bad ancestry fixture timestamp"
+        readyIds = map (snd . stamp) . readyPosts
+        offer = stored 30 "moka" [] [] "TASK · parcel alpha"
+        claimInside = stored 31 "mucho" ["moka"] [30] "CLAIM · parcel alpha"
+        claimOutside = stored 31 "mucho" ["moka"] [] "CLAIM · parcel alpha"
+        dependent = stored 32 "moka" [] [] "TASK · dependent parcel"
+        dependency = stored 33 "moka" [] [] "LINK · 30 blocks 32"
+        doneInside = stored 34 "mucho" ["moka"] [30] "DONE · parcel alpha"
+        doneOutside = stored 34 "mucho" ["moka"] [] "DONE · parcel alpha"
+        withDone donePost = [offer, claimInside, dependent, dependency, donePost]
+        namesPostAndOffer warning =
+          "post 31" `T.isInfixOf` warning
+            && "offer 30" `T.isInfixOf` warning
+            && "--thread 30" `T.isInfixOf` warning
+    assert "an inside CLAIM removes its offer from READY" $
+      readyIds [offer, claimInside] == []
+    assert "an outside CLAIM leaves its offer READY" $
+      readyIds [offer, claimOutside] == [30]
+    assert "an inside CLAIM earns no ancestry warning" $
+      null (readyWarnings [offer, claimInside])
+    assert "an outside CLAIM names the post and resembling offer" $
+      case readyWarnings [offer, claimOutside] of
+        [warning] -> namesPostAndOffer warning
+        _ -> False
+    assert "an unrelated outside CLAIM earns no spurious offer warning" $
+      null (readyWarnings [offer, stored 35 "mucho" ["moka"] [] "CLAIM · unrelated"])
+    assert "an owner DONE inside the component releases a dependent offer" $
+      readyIds (withDone doneInside) == [32]
+    assert "an owner DONE outside the component leaves the dependent offer blocked" $
+      readyIds (withDone doneOutside) == []
+    assert "inside CLAIM and DONE earn no ancestry warnings beside another open offer" $
+      null (readyWarnings (withDone doneInside))
+    assert "an outside DONE names its post and resembling offer" $
+      case readyWarnings (withDone doneOutside) of
+        [warning] ->
+          "post 34" `T.isInfixOf` warning
+            && "offer 30" `T.isInfixOf` warning
+            && "--thread 30" `T.isInfixOf` warning
+        _ -> False
 
   -------------------------------------------------------------------------
   -- Bus seat: the in-process runner, decided quiet included

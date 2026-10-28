@@ -15,6 +15,8 @@ module Free.Agent.Delivery
     useDeliveryGrant,
     directPostTo,
     replyAct,
+    replyActIO,
+    replyWarning,
     postTo,
   )
 where
@@ -34,10 +36,14 @@ import Control.Concurrent
   )
 import Control.Exception (SomeException, throwIO, try)
 import Control.Monad (void)
+import Data.Foldable (traverse_)
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Free.Agent.Bus (postLocal)
+import System.IO (stderr)
 
 -- | One backend invocation and its cancellation request. Cancellation returns
 -- 'True' only when it wins against backend completion; the winning side owns
@@ -148,18 +154,53 @@ directPostTo grant deliver root post = do
 -- text stays local; no particular quiet string receives special treatment.
 replyAct :: Name -> Stamped Text -> Text -> [Post Text]
 replyAct agent stored response =
-  case T.stripPrefix "@" response of
+  case parseAddress response of
     Nothing -> []
-    Just rest ->
-      let (name, afterName) = T.break (== ':') rest
-          recipient = T.strip name
-          cause = stamped stored
-       in if T.null recipient || T.null afterName
-            then []
-            else
-              [ (Post agent (channel cause) [recipient] [snd (stamp stored)])
-                  (T.strip (T.drop 1 afterName))
-              ]
+    Just (recipient, replyBody) ->
+      [ (Post agent (channel cause) [recipient] [snd (stamp stored)])
+          replyBody
+      ]
+  where
+    cause = stamped stored
+
+-- | Publish a reply act after making a misplaced address visible. Publication
+-- and ancestry are exactly 'replyAct'; the warning is the only added effect.
+replyActIO :: Name -> Stamped Text -> Text -> IO [Post Text]
+replyActIO agent stored response = do
+  traverse_ (TIO.hPutStrLn stderr) (replyWarning agent response)
+  pure (replyAct agent stored response)
+
+-- | A valid address later in a response earns a warning with its zero-based
+-- character offset. Prefix-first and genuinely unaddressed replies stay silent.
+replyWarning :: Name -> Text -> Maybe Text
+replyWarning agent response =
+  case parseAddress response of
+    Just _ -> Nothing
+    Nothing -> do
+      (offset, recipient) <-
+        listToMaybe
+          [ (T.length prefix + 1, recipient)
+          | (prefix, rest) <- T.breakOnAll "@" (T.drop 1 response),
+            Just (recipient, _) <- pure (parseAddress rest)
+          ]
+      pure
+        ( "🟡 "
+            <> agent
+            <> ": @"
+            <> recipient
+            <> ": begins at character offset "
+            <> T.pack (show offset)
+            <> ", not 0; response stayed local"
+        )
+
+parseAddress :: Text -> Maybe (Name, Text)
+parseAddress response = do
+  rest <- T.stripPrefix "@" response
+  let (name, afterName) = T.break (== ':') rest
+      recipient = T.strip name
+  if T.null recipient || T.null afterName
+    then Nothing
+    else Just (recipient, T.strip (T.drop 1 afterName))
 
 -- | Append a post to the public tape. This operation never invokes an agent.
 postTo :: (PostBody a) => FilePath -> Post a -> IO (Stamped a)

@@ -33,6 +33,7 @@ module Free.Agent.Bus.Cli
     hbVerdict,
     liveOpt,
     readyPosts,
+    readyWarnings,
     runBusCommand,
     runStatus,
   )
@@ -45,6 +46,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (IOException, try)
 import Control.Monad (forM_, forever, guard, unless, when)
+import Data.Char (isAlphaNum)
 import Data.Foldable (traverse_)
 import Data.List (isPrefixOf, sort, sortOn)
 import Data.Maybe (isJust, listToMaybe, mapMaybe, maybe)
@@ -144,7 +146,7 @@ threadOpt =
         auto
         ( long "thread"
             <> metavar "ID"
-            <> help "Thread view: the root (or any member) post id"
+            <> help "Thread root (or any member) post id"
         )
     )
 
@@ -271,8 +273,8 @@ daemonCmd = DaemonCommand <$> rootOpt
 busParser :: Parser BusCommand
 busParser =
   subparser
-    ( command "say" (info (sayCmd <**> helper) (progDesc "Say something on the bus (deck defaults: --from tony)"))
-        <> command "post" (info (postCmd <**> helper) (progDesc "Post a message to the bus (flags or JSON on stdin)"))
+    ( command "say" (info (sayCmd <**> helper) (progDesc "Say something on the bus; --thread carries reply ancestry (deck defaults: --from tony)"))
+        <> command "post" (info (postCmd <**> helper) (progDesc "Post flags or JSON; flag posts are roots, while JSON may carry thread ancestry"))
         <> command "watch" (info (watchCmd <**> helper) (progDesc "Watch the log for posts addressed to NAMEs"))
         <> command "read" (info (readCmd <**> helper) (progDesc "Read posts addressed to NAMEs, or a thread by id"))
         <> command "ready" (info (readyCmd <**> helper) (progDesc "List unclaimed open TASKs with no unresolved blocker"))
@@ -447,7 +449,9 @@ runReady root depth = do
   let path = root </> "log.jsonl"
   exists <- doesFileExist path
   content <- if exists then readFileStrict path else pure ""
-  traverse_ (TIO.putStrLn . renderStored depth) (readyPosts (postsOf content))
+  let posts = postsOf content
+  traverse_ (TIO.putStrLn . renderStored depth) (readyPosts posts)
+  traverse_ (TIO.hPutStrLn stderr) (readyWarnings posts)
 
 -- | Open TASK offers that have no claim, owner DONE, or unresolved blocker.
 -- A directed TASK is assigned at creation and is therefore not an open offer.
@@ -455,26 +459,12 @@ readyPosts :: [Stamped Text] -> [Stamped Text]
 readyPosts posts = filter isReady [task | task <- posts, isRootTask task, null (to (stamped task))]
   where
     isReady task =
-      let component = componentOf task
+      let component = componentOf posts task
           owner = taskOwner task component
           blockers = blockersFor (snd (stamp task))
        in owner == Nothing
             && not (taskComplete owner component)
             && all blockerResolved blockers
-
-    componentOf task =
-      case [vs | (_, vs) <- slicePosts ByThread posts, any ((== snd (stamp task)) . snd . stamp) vs] of
-        (vs : _) -> sortOn (snd . stamp) vs
-        [] -> [task]
-
-    taskOwner task component =
-      case to (stamped task) of
-        [assignee] -> Just assignee
-        [] -> listToMaybe [from (stamped reply) | reply <- component, hasKind "CLAIM" reply]
-        _ -> Nothing
-
-    taskComplete owner component =
-      maybe False (\name -> any (\reply -> hasKind "DONE" reply && from (stamped reply) == name) component) owner
 
     blockersFor taskId =
       [ blocker
@@ -486,23 +476,104 @@ readyPosts posts = filter isReady [task | task <- posts, isRootTask task, null (
     blockerResolved blocker =
       any
         ( \task ->
-            let component = componentOf task
+            let component = componentOf posts task
              in snd (stamp task) == blocker
                   && isRootTask task
                   && taskComplete (taskOwner task component) component
         )
         posts
 
-    isRootTask stored = null (thread (stamped stored)) && hasKind "TASK" stored
+-- | Diagnose CLAIM and DONE posts that cannot settle any incomplete public
+-- offer because they lie outside every such offer's thread component.
+readyWarnings :: [Stamped Text] -> [Text]
+readyWarnings posts =
+  [ warning stray offer
+  | stray <- posts,
+    hasKind "CLAIM" stray || hasKind "DONE" stray,
+    let offers = openOffers posts,
+    all (outside stray . componentOf posts) (taskOffers posts),
+    Just offer <- [resemblingOffer stray offers]
+  ]
+  where
+    taskOffers = filter (\task -> isRootTask task && null (to (stamped task)))
 
-    hasKind kind stored = case T.words (body (stamped stored)) of
-      (actual : _) -> actual == kind
-      [] -> False
+    openOffers =
+      filter
+        ( \task ->
+            let component = componentOf posts task
+             in not (taskComplete (taskOwner task component) component)
+        )
+        . taskOffers
 
-    parseBlockLink text = case T.words text of
-      ("LINK" : "·" : blocker : "blocks" : target : _) ->
-        (,) <$> readMaybe (T.unpack blocker) <*> readMaybe (T.unpack target)
-      _ -> Nothing
+    outside stray component = snd (stamp stray) `notElem` map (snd . stamp) component
+
+    warning stray offer =
+      let strayId = T.pack (show (snd (stamp stray)))
+          offerId = T.pack (show (snd (stamp offer)))
+          kind = T.takeWhile (not . (`elem` [' ', '\n', '\r', '\t'])) (T.stripStart (body (stamped stray)))
+       in "🟡 post "
+            <> strayId
+            <> " "
+            <> kind
+            <> " is outside every open offer component; resembles offer "
+            <> offerId
+            <> " — re-post with bus say --thread "
+            <> offerId
+
+-- | Choose the closest-looking offer without changing offer or component
+-- semantics: an explicit id wins, then shared body tokens, then id distance.
+resemblingOffer :: Stamped Text -> [Stamped Text] -> Maybe (Stamped Text)
+resemblingOffer stray offers =
+  listToMaybe
+    [ offer
+    | offer <- sortOn resemblance offers,
+      let (explicitId, sharedTokens) = scores offer,
+      explicitId || sharedTokens > 0
+    ]
+  where
+    strayId = snd (stamp stray)
+    strayTokens = bodyTokens (body (stamped stray))
+    resemblance offer =
+      let (explicitId, sharedTokens) = scores offer
+       in (Down explicitId, Down sharedTokens, abs (strayId - snd (stamp offer)))
+
+    scores offer =
+      let offerId = snd (stamp offer)
+          offerTokens = bodyTokens (body (stamped offer))
+       in (T.pack (show offerId) `elem` strayTokens, length (filter (`elem` offerTokens) strayTokens))
+
+    bodyTokens = T.words . T.toLower . T.map (\c -> if isAlphaNum c then c else ' ')
+
+componentOf :: [Stamped Text] -> Stamped Text -> [Stamped Text]
+componentOf posts task =
+  case [vs | (_, vs) <- slicePosts ByThread posts, any ((== snd (stamp task)) . snd . stamp) vs] of
+    (vs : _) -> sortOn (snd . stamp) vs
+    [] -> [task]
+
+taskOwner :: Stamped Text -> [Stamped Text] -> Maybe Name
+taskOwner task component =
+  case to (stamped task) of
+    [assignee] -> Just assignee
+    [] -> listToMaybe [from (stamped reply) | reply <- component, hasKind "CLAIM" reply]
+    _ -> Nothing
+
+taskComplete :: Maybe Name -> [Stamped Text] -> Bool
+taskComplete owner component =
+  maybe False (\name -> any (\reply -> hasKind "DONE" reply && from (stamped reply) == name) component) owner
+
+isRootTask :: Stamped Text -> Bool
+isRootTask stored = null (thread (stamped stored)) && hasKind "TASK" stored
+
+hasKind :: Text -> Stamped Text -> Bool
+hasKind kind stored = case T.words (body (stamped stored)) of
+  (actual : _) -> actual == kind
+  [] -> False
+
+parseBlockLink :: Text -> Maybe (PostId, PostId)
+parseBlockLink text = case T.words text of
+  ("LINK" : "·" : blocker : "blocks" : target : _) ->
+    (,) <$> readMaybe (T.unpack blocker) <*> readMaybe (T.unpack target)
+  _ -> Nothing
 
 -- | The thread view: the connected component of the given id under the
 -- schema's @thread@ field. Roots carry @thread = []@, replies cite their
