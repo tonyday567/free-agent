@@ -10,6 +10,15 @@ module Free.Agent.Bus.File
     readCursor,
     writeCursor,
 
+    -- * Attached-human markers
+    Human (..),
+    humanPath,
+    readHuman,
+    writeHuman,
+    attachHuman,
+    removeHuman,
+    humanNames,
+
     -- * Event-tail loop
     QuiesceConfig (..),
     Flow (..),
@@ -26,6 +35,7 @@ import Circuit.Agent (Name, Post (..), PostId, deliversTo)
 import Circuit.Agent.Framing (Stamped, stamp, stamped, unframeStored)
 import Circuit.Agent.Mark (Mark (Timeout), markGlyph)
 import Circuit.Machine (Body (..), Moore)
+import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Tensor (Const (Const), unConst)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newMVar, withMVar)
@@ -47,13 +57,17 @@ import Control.Concurrent.STM
 import Control.Monad (guard, unless, when)
 import Data.ByteString qualified as BS
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List (isPrefixOf, sort)
 import Data.Maybe (mapMaybe)
+import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
+import Data.Time (UTCTime, getCurrentTime)
+import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Free.Agent.Bus (readFileStrict, touchLog, withLogRead)
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, listDirectory, removeFile)
 import System.FSNotify (Event (..), watchDir, withManager)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO
@@ -166,6 +180,98 @@ latestPostId root = do
 writeCursor :: FilePath -> Name -> PostId -> IO ()
 writeCursor root name pid =
   TIO.writeFile (cursorPath root name) (T.pack (show pid))
+
+-- ---------------------------------------------------------------------------
+-- Attached-human markers
+-- ---------------------------------------------------------------------------
+
+-- | The record that 'humanName' is the human attached to 'humanRoot': one
+-- per-root marker file, @.human-NAME@.
+--
+-- It is evidence and never authority. Delivery, READY, claim, DONE and
+-- completion never read it, so a marker cannot change what any of them do;
+-- it exists so a reader can tell a person's name from a seat's. It owns no
+-- state the cursor does not already own: 'humanCursor' is the value read
+-- from @.cursor-NAME@ when the marker was written, never a second cursor.
+data Human = Human
+  { humanRoot :: FilePath,
+    humanName :: Name,
+    humanAttachedAt :: UTCTime,
+    humanCursor :: PostId
+  }
+  deriving (Eq, Show)
+
+-- | Path to the attached-human marker for a name.
+humanPath :: FilePath -> Name -> FilePath
+humanPath root name = root </> (".human-" <> T.unpack name)
+
+-- | The marker as one line of JSON: @root@, @name@, @attached_at@, @cursor@.
+encodeHuman :: Human -> Text
+encodeHuman h =
+  TE.decodeUtf8 . encodeJson $
+    JObject
+      [ ("root", JString (T.pack (humanRoot h))),
+        ("name", JString (humanName h)),
+        ("attached_at", JString (T.pack (iso8601Show (humanAttachedAt h)))),
+        ("cursor", JNumber (fromIntegral (humanCursor h)))
+      ]
+
+-- | Parse a marker written by 'writeHuman'. A hand-edited or truncated
+-- marker is 'Nothing' rather than a partial record.
+decodeHuman :: Text -> Maybe Human
+decodeHuman txt = case decodeJson (TE.encodeUtf8 txt) of
+  Right (JObject ps) -> do
+    root <- strField "root" ps
+    name <- strField "name" ps
+    at <- strField "attached_at" ps >>= iso8601ParseM . T.unpack
+    cursor <- numField "cursor" ps
+    pure (Human (T.unpack root) name at cursor)
+  _ -> Nothing
+  where
+    strField k ps = case [v | (k', JString v) <- ps, k' == k] of
+      (v : _) -> Just v
+      [] -> Nothing
+    numField k ps = case [v | (k', JNumber v) <- ps, k' == k] of
+      (v : _) -> either (const Nothing) (Just . fromIntegral) (floatingOrInteger @Double @Integer v)
+      [] -> Nothing
+
+-- | Read the attached-human marker for a name, if there is one.
+readHuman :: FilePath -> Name -> IO (Maybe Human)
+readHuman root name = do
+  let path = humanPath root name
+  exists <- doesFileExist path
+  if not exists then pure Nothing else decodeHuman <$> readFileStrict path
+
+-- | Write the attached-human marker.
+writeHuman :: Human -> IO ()
+writeHuman h =
+  TIO.writeFile (humanPath (humanRoot h) (humanName h)) (encodeHuman h <> "\n")
+
+-- | Remove the attached-human marker; 'True' when there was one to remove.
+removeHuman :: FilePath -> Name -> IO Bool
+removeHuman root name = do
+  let path = humanPath root name
+  exists <- doesFileExist path
+  if exists then removeFile path >> pure True else pure False
+
+-- | Every name attached to this root, sorted. A directory scan, so it is
+-- evidence of what is on disk right now, not of what was attached earlier.
+humanNames :: FilePath -> IO [Name]
+humanNames root = do
+  entries <- listDirectory root
+  pure (sort [T.pack (drop (length humanPrefix) e) | e <- entries, humanPrefix `isPrefixOf` e])
+  where
+    humanPrefix = ".human-"
+
+-- | Stamp the marker for a name now, reading the cursor it records from the
+-- name's own cursor file.
+attachHuman :: FilePath -> Name -> IO Human
+attachHuman root name = do
+  cursor <- readCursor root name
+  at <- getCurrentTime
+  let h = Human {humanRoot = root, humanName = name, humanAttachedAt = at, humanCursor = cursor}
+  writeHuman h
+  pure h
 
 -- | Event-tail a log file and invoke the callback for every new stored post
 -- addressed to any of the subscribed names.
