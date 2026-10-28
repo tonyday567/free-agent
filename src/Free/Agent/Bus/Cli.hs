@@ -9,7 +9,10 @@
 --   say [ROOT] BODY... [--to NAME]... [--from NAME] [--thread ID]
 --   post [ROOT] [--from NAME] [--to NAME]... [--body TEXT]
 --   watch [ROOT] NAME [NAME...]
---   read [ROOT] [NAME...] [--since ID | --cursor NAME | --thread ID] [--depth 0|1|2]
+--   read [ROOT] [NAME...] [--since ID | --cursor NAME] [--thread ID] [--depth 0|1|2]
+--   inbox [ROOT] NAME [--mark-read] [--depth 0|1|2]
+--   attach [ROOT] NAME
+--   detach [ROOT] NAME
 --   ready [ROOT] [--depth 0|1|2]
 --   cursor [ROOT] get NAME
 --   cursor [ROOT] set NAME ID
@@ -19,6 +22,18 @@
 -- @say@ is the act path for the deck: one short posting command, sender
 -- defaulting to @tony@, body as positional words or on stdin. @post@ stays
 -- the explicit form (JSON on stdin, or flags).
+--
+-- @inbox@ is the attached human's unread view: posts addressed to NAME at
+-- or after @.cursor-NAME@, printed, and — only with @--mark-read@ — the
+-- cursor advances to the id after the highest post printed, never to the
+-- log tip. @attach@ writes the per-root @.human-NAME@ marker and @detach@
+-- removes it; the marker is evidence that a name is a person rather than a
+-- seat, so no delivery, READY, claim, DONE or completion path reads it.
+--
+-- @--since@ and @--cursor@ are alternatives, not a composition: both are
+-- accepted alone (@--since ID@, @--cursor NAME@) and naming both fails, so
+-- the help says so rather than leaving the "|" to be read as a combined
+-- form.
 --
 -- @--depth@ selects the cascade: 0 is a dot, 1 is one line, 2 is the
 -- verbatim evidence. The depth is always an explicit flag; the api never
@@ -58,7 +73,7 @@ import Data.Time (LocalTime, NominalDiffTime, UTCTime, diffUTCTime, getCurrentTi
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Free.Agent.Bus (postLocal, readFileStrict)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
-import Free.Agent.Bus.File (readCursor, writeCursor)
+import Free.Agent.Bus.File (Human (..), attachHuman, humanNames, readCursor, readHuman, removeHuman, writeCursor)
 import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbGlyph, hbText, readHeartbeat)
 import Free.Agent.BusStats (SliceMode (..), slicePosts)
 import Free.Agent.Cli.Config (rootOpt)
@@ -101,6 +116,9 @@ data BusCommand
   | PostCommand FilePath (Maybe Text) [Text] (Maybe Text) Bool
   | WatchCommand FilePath [Text]
   | ReadCommand FilePath [Text] (Maybe Since) (Maybe PostId) Depth
+  | InboxCommand FilePath Text Bool Depth
+  | AttachCommand FilePath Text
+  | DetachCommand FilePath Text
   | ReadyCommand FilePath Depth
   | CursorGetCommand FilePath Text
   | CursorSetCommand FilePath Text PostId
@@ -212,13 +230,50 @@ readCmd = do
   depth <- depthOpt (Depth 2)
   pure (ReadCommand root names since thr depth)
 
+inboxCmd :: Parser BusCommand
+inboxCmd = do
+  root <- rootOpt
+  name <- nameArg
+  markRead <-
+    switch
+      ( long "mark-read"
+          <> help "Advance .cursor-NAME to the id after the highest post printed (default: leave the cursor alone)"
+      )
+  depth <- depthOpt (Depth 2)
+  pure (InboxCommand root name markRead depth)
+
+attachCmd :: Parser BusCommand
+attachCmd = AttachCommand <$> rootOpt <*> nameArg
+
+detachCmd :: Parser BusCommand
+detachCmd = DetachCommand <$> rootOpt <*> nameArg
+
 readyCmd :: Parser BusCommand
 readyCmd = ReadyCommand <$> rootOpt <*> depthOpt (Depth 1)
 
+-- | @--since@ and @--cursor@ are two independent options, and the parser
+-- cannot accept them together: @option auto@ claims the token after
+-- @--since@, so @--since --cursor NAME@ is read as @--since@ with the value
+-- @--cursor@ and fails to parse it. The help is therefore the half that was
+-- wrong — it left "|" to be read as a combined form — and it now states the
+-- exclusion instead.
 sinceParser :: Parser Since
 sinceParser =
-  (SinceId <$> option auto (long "since" <> metavar "ID" <> help "Only posts with id >= ID"))
-    <|> (SinceCursor . T.pack <$> strOption (long "cursor" <> metavar "NAME" <> help "Only posts at or after .cursor-NAME"))
+  ( SinceId
+      <$> option
+        auto
+        ( long "since"
+            <> metavar "ID"
+            <> help "Only posts with id >= ID; an alternative to --cursor NAME, not a prefix of it"
+        )
+  )
+    <|> ( SinceCursor . T.pack
+            <$> strOption
+              ( long "cursor"
+                  <> metavar "NAME"
+                  <> help "Only posts at or after .cursor-NAME; an alternative to --since ID"
+              )
+        )
 
 cursorGetCmd :: Parser BusCommand
 cursorGetCmd = CursorGetCommand <$> rootOpt <*> nameArg
@@ -277,6 +332,9 @@ busParser =
         <> command "post" (info (postCmd <**> helper) (progDesc "Post flags or JSON; flag posts are roots, while JSON may carry thread ancestry"))
         <> command "watch" (info (watchCmd <**> helper) (progDesc "Watch the log for posts addressed to NAMEs"))
         <> command "read" (info (readCmd <**> helper) (progDesc "Read posts addressed to NAMEs, or a thread by id"))
+        <> command "inbox" (info (inboxCmd <**> helper) (progDesc "Print unread posts addressed to NAME; --mark-read advances .cursor-NAME to the last printed id"))
+        <> command "attach" (info (attachCmd <**> helper) (progDesc "Record NAME as the human attached to this root (evidence only; changes no delivery or READY path)"))
+        <> command "detach" (info (detachCmd <**> helper) (progDesc "Remove NAME's attached-human marker (the cursor and unread mail are untouched)"))
         <> command "ready" (info (readyCmd <**> helper) (progDesc "List unclaimed open TASKs with no unresolved blocker"))
         <> command "cursor" (info (cursorCmd <**> helper) (progDesc "Read or write agent cursor"))
         <> command "ping-watch" (info (pingWatchCmd <**> helper) (progDesc "Watch the ping file for NAME and exit on change"))
@@ -293,6 +351,9 @@ runBusCommand (SayCommand root fromName toNames thr body) = runSay root fromName
 runBusCommand (PostCommand root mfrom mto mbody viaDaemon) = runPost root mfrom mto mbody viaDaemon
 runBusCommand (WatchCommand root names) = runWatch root names
 runBusCommand (ReadCommand root names since thr depth) = runRead root names since thr depth
+runBusCommand (InboxCommand root name markRead depth) = runInbox root name markRead depth
+runBusCommand (AttachCommand root name) = runAttach root name
+runBusCommand (DetachCommand root name) = runDetach root name
 runBusCommand (ReadyCommand root depth) = runReady root depth
 runBusCommand (CursorGetCommand root name) = runCursorGet root name
 runBusCommand (CursorSetCommand root name pid) = runCursorSet root name pid
@@ -316,16 +377,23 @@ resolveRoot root = do
 -- | Post to a root, refusing loudly when there is no bus there.
 postChecked :: FilePath -> Post Text -> IO (Stamped Text)
 postChecked root p = do
-  let logPath = root </> "log.jsonl"
-  exists <- doesFileExist logPath
-  unless exists $ do
-    TIO.putStrLn
-      ( "🔴 "
-          <> T.pack root
-          <> " — no log.jsonl; not a bus. Set FREE_AGENT_BUS_ROOT or use --root."
-      )
-    exitFailure
+  requireBus root
   postLocal root p
+
+-- | The one wrong-root refusal: a root with no @log.jsonl@ is not a bus.
+noBusMessage :: FilePath -> Text
+noBusMessage root =
+  "🔴 "
+    <> T.pack root
+    <> " — no log.jsonl; not a bus. Set FREE_AGENT_BUS_ROOT or use --root."
+
+-- | Refuse loudly, and exit non-zero, unless ROOT holds a bus log.
+requireBus :: FilePath -> IO ()
+requireBus root = do
+  exists <- doesFileExist (root </> "log.jsonl")
+  unless exists $ do
+    TIO.putStrLn (noBusMessage root)
+    exitFailure
 
 -- | One command on the act path: body as words or on stdin, sender and
 -- recipients defaulted, thread optional.
@@ -441,6 +509,75 @@ runRead root names since mThread depth = do
       let lines' = T.lines content
       traverse_ (TIO.putStrLn . renderStored depth) (mapMaybe (filterSince names sinceId) lines')
 
+-- | Print NAME's unread mail: posts addressed to NAME with id at or after
+-- @.cursor-NAME@ (the cursor holds the next unread id, as 'readCursor' and
+-- 'writeCursor' define it). The cursor is the name's own state and moves
+-- only with @--mark-read@, and then only to the id after the highest post
+-- printed: never to the log tip, never past a post that was not printed.
+-- The view labels nothing and changes no delivery path.
+runInbox :: FilePath -> Text -> Bool -> Depth -> IO ()
+runInbox root name markRead depth = do
+  root' <- resolveRoot root
+  requireBus root'
+  content <- readFileStrict (root' </> "log.jsonl")
+  sinceId <- readCursor root' name
+  let shown = mapMaybe (filterSince [name] sinceId) (T.lines content)
+  traverse_ (TIO.putStrLn . renderStored depth) shown
+  when (markRead && not (null shown)) $
+    writeCursor root' name (highestId shown + 1)
+
+-- | The highest id in a non-empty set of stored posts.
+highestId :: [Stamped Text] -> PostId
+highestId = maximum . map (snd . stamp)
+
+-- | Record NAME as the human attached to this root: write the per-root
+-- @.human-NAME@ marker carrying @root@, @name@, @attached_at@ and the
+-- cursor value read at attach time.
+--
+-- Idempotent: an existing marker is left byte-identical, so re-attaching
+-- never rewrites @attached_at@ and never moves the cursor. The marker is
+-- evidence, not authority — it changes no delivery, READY, claim, DONE or
+-- completion path, and it is not a second cursor owner.
+runAttach :: FilePath -> Text -> IO ()
+runAttach root name = do
+  root' <- resolveRoot root
+  requireBus root'
+  existing <- readHuman root' name
+  case existing of
+    Just h -> TIO.putStrLn ("✓ already " <> humanLine h)
+    Nothing -> do
+      h <- attachHuman root' name
+      TIO.putStrLn ("✓ " <> humanLine h)
+
+-- | The one line that says what the marker says: @attached as NAME on ROOT@.
+humanLine :: Human -> Text
+humanLine h =
+  "attached as "
+    <> humanName h
+    <> " on "
+    <> T.pack (humanRoot h)
+    <> " (cursor "
+    <> T.pack (show (humanCursor h))
+    <> ", since "
+    <> T.pack (iso8601Show (humanAttachedAt h))
+    <> ")"
+
+-- | Remove NAME's attached-human marker. The cursor and the log are
+-- untouched, so mail unread while detached stays unread.
+runDetach :: FilePath -> Text -> IO ()
+runDetach root name = do
+  root' <- resolveRoot root
+  requireBus root'
+  removed <- removeHuman root' name
+  TIO.putStrLn
+    ( "✓ "
+        <> (if removed then "detached" else "not attached")
+        <> " as "
+        <> name
+        <> " on "
+        <> T.pack root'
+    )
+
 postsOf :: Text -> [Stamped Text]
 postsOf content = mapMaybe (unframeStored @Text) (filter (not . T.null) (T.lines content))
 
@@ -449,9 +586,17 @@ runReady root depth = do
   let path = root </> "log.jsonl"
   exists <- doesFileExist path
   content <- if exists then readFileStrict path else pure ""
+  humans <- if exists then humanNames root else pure []
   let posts = postsOf content
-  traverse_ (TIO.putStrLn . renderStored depth) (readyPosts posts)
+  traverse_ (TIO.putStrLn . renderStoredWith (humanLabel humans) depth) (readyPosts posts)
   traverse_ (TIO.hPutStrLn stderr) (readyWarnings posts)
+
+-- | The attached-human label for a rendered name: the name reads as a
+-- person rather than a seat. Evidence only — it labels names already in a
+-- row, and the row set, its order and its ids are the marker's business in
+-- no way at all.
+humanLabel :: [Name] -> Name -> Text
+humanLabel humans n = if n `elem` humans then " (human)" else ""
 
 -- | Open TASK offers that have no claim, owner DONE, or unresolved blocker.
 -- A directed TASK is assigned at creation and is therefore not an open offer.
@@ -598,17 +743,27 @@ filterSince names sinceId line = do
 -- | Render a stored post at a cascade depth: the route, the line, the
 -- verbatim frame.
 renderStored :: Depth -> Stamped Text -> Text
-renderStored (Depth d) stored
+renderStored = renderStoredWith (const "")
+
+-- | 'renderStored' with a per-name label appended to the names of the head
+-- line. The label is evidence for a reader — this name is a person, not a
+-- seat — and it never reaches depth 2, which is the log's own frame.
+--
+-- The label annotates names the row already carries; it adds, removes and
+-- reorders nothing, so a view's rows are the same rows with or without it.
+renderStoredWith :: (Name -> Text) -> Depth -> Stamped Text -> Text
+renderStoredWith label (Depth d) stored
   | d <= 0 = headLine
   | d == 1 = headLine <> " " <> excerpt
   | otherwise = frameStored stored
   where
     p = stamped stored
-    headLine = pid <> " " <> from p <> "→" <> route
+    headLine = pid <> " " <> mark (from p) <> "→" <> route
     pid = T.pack (show (snd (stamp stored)))
     route = case [n | n <- to p, not (T.null n)] of
       [] -> "public"
-      ns -> T.intercalate "," ns
+      ns -> T.intercalate "," (map mark ns)
+    mark n = n <> label n
     excerpt = T.take 72 (T.takeWhile (/= '\n') (T.strip (body p)))
 
 -- ---------------------------------------------------------------------------
@@ -724,7 +879,8 @@ runStatus root threshold live depth@(Depth d) = do
       hbNames = sort [T.pack (drop (length hbPrefix) e) | e <- entries, hbPrefix `isPrefixOf` e]
   if live
     then do
-      let seats = sortNub (hbNames ++ cursorNames ++ participants posts)
+      humans <- humanNames root
+      let seats = sortNub (hbNames ++ cursorNames ++ humans ++ participants posts)
       rows <-
         traverse
           ( \n -> do
@@ -733,7 +889,7 @@ runStatus root threshold live depth@(Depth d) = do
               pure (n, mcursor, mhb)
           )
           seats
-      traverse_ (renderSeat now posts) (filter (\(_, _, mhb) -> activeSeat mhb) rows)
+      traverse_ (renderSeat now posts humans) (filter (\(_, _, mhb) -> activeSeat mhb) rows)
     else when (d >= 1) $ do
       cursors <- traverse (\n -> (n,) <$> readCursor root n) cursorNames
       let statuses = map (seatStatus posts maxId) cursors
@@ -793,10 +949,15 @@ runStatus root threshold live depth@(Depth d) = do
             <> fmtAge age
             <> " ago)"
 
-    -- One seat at the requested depth.
-    renderSeat now posts (n, mcursor, mhb) = do
+    -- One seat at the requested depth. An attached human is labelled as a
+    -- person: the marker is read here, and nowhere on a delivery, READY,
+    -- claim, DONE or completion path.
+    renderSeat now posts humans (n, mcursor, mhb) = do
       (dot, stateText) <- hbVerdict threshold now mhb
-      let cursorText = maybe "—" (T.pack . show) mcursor
+      let isHuman = n `elem` humans
+          role = if isHuman then "human · " else ""
+          humanTag = if isHuman then " · human" else ""
+          cursorText = maybe "—" (T.pack . show) mcursor
           lastText = case lastFor n posts of
             Nothing -> "no posts"
             Just s ->
@@ -808,9 +969,9 @@ runStatus root threshold live depth@(Depth d) = do
                 <> fmtAge (diffUTCTime now (fst (stamp s)))
                 <> " ago"
       if d <= 0
-        then TIO.putStrLn (dot <> " " <> n)
+        then TIO.putStrLn (dot <> " " <> n <> humanTag)
         else do
-          TIO.putStrLn (dot <> " " <> n <> " — " <> stateText <> "; cursor " <> cursorText <> "; " <> lastText)
+          TIO.putStrLn (dot <> " " <> n <> " — " <> role <> stateText <> "; cursor " <> cursorText <> "; " <> lastText)
           when (d >= 2) $ do
             forM_ mhb $ \(st, ts, mpid) ->
               TIO.putStrLn
