@@ -2,7 +2,7 @@
 --
 --   fare search PATTERN [PATH] [--head|--tail]
 --   fare read FILE [RANGE] [--head|--tail]
---   fare gate [ROOT] [--docspec]
+--   fare gate [ROOT] [--docspec|--docspec-full]
 --   fare state [ROOT] [--head|--tail]
 --   fare usage [day|week] [--head|--tail]
 --   fare pc [--host HOST] CMD [ARG...] [--head|--tail]

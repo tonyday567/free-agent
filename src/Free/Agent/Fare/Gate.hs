@@ -15,10 +15,10 @@
 --
 -- Scoping decisions, recorded on cake/fare.md:
 --
---   ⟜ docspec is behind --docspec, not in the default suite — it
---     costs 30s+ and tests the last build, which a fresh gate run
---     just changed (the verify-card trap); the ritual data ran it
---     16×/week vs ormolu 46×, hlint 31×
+--   ⟜ docspec is opt-in: --docspec selects the repository package and
+--     excludes linked local projects; --docspec-full selects the whole
+--     linked plan. Both test the last build, which a fresh gate run
+--     just changed (the verify-card trap)
 --   ⟜ no --head/--tail knob: a verdict line has no slice to flip,
 --     so the flag would be a lie on this item
 --   ⟜ ormolu uses git ls-files (the house form, absorbing the
@@ -26,7 +26,13 @@
 --     gate — pre-commit seats check those explicitly
 --   ⟜ exit 1 on FAIL — a gate verdict is actionable, and exit codes
 --     are the honest channel (the rituals used echo sentinels)
-module Free.Agent.Fare.Gate (runGate) where
+module Free.Agent.Fare.Gate
+  ( DocspecScope (..),
+    docspecArgs,
+    docspecPackage,
+    runGate,
+  )
+where
 
 import Control.Monad (unless)
 import Data.Text (Text)
@@ -34,30 +40,55 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 import Free.Agent.Fare.Exec (runTool)
-import System.Directory (doesDirectoryExist, getTemporaryDirectory)
+import System.Directory (doesDirectoryExist, getTemporaryDirectory, listDirectory)
 import System.Exit (ExitCode (..), exitFailure)
-import System.FilePath ((</>))
+import System.FilePath (takeBaseName, takeExtension, (</>))
 import System.IO (stderr)
 import System.Posix.Process (getProcessID)
 import Text.Printf (printf)
 
+-- | Which doctest population an opt-in docspec gate selects.
+data DocspecScope
+  = DocspecRepository
+  | DocspecFull
+  deriving (Eq, Show)
+
+-- | Arguments passed to cabal-docspec. Its package target selects only
+-- that package's modules from the cabal plan; no target retains the full
+-- linked-project sweep.
+docspecArgs :: DocspecScope -> String -> [String]
+docspecArgs DocspecRepository package = [package]
+docspecArgs DocspecFull _ = []
+
+-- | Select the package name from the repository's single cabal file.
+docspecPackage :: [FilePath] -> Either Text String
+docspecPackage entries = case filter ((== ".cabal") . takeExtension) entries of
+  [cabalFile] -> Right (takeBaseName cabalFile)
+  [] -> Left "no .cabal file at repository root"
+  _ -> Left "multiple .cabal files at repository root; repository docspec needs one package"
+
 -- | a named gate check: run it, get an exit code and combined output.
 type Check = IO (ExitCode, Text)
 
+data DocspecSelection
+  = SelectRepository String
+  | SelectFull
+
 -- | run the gate suite over ROOT and print the layer-1 verdict.
-runGate :: FilePath -> Bool -> IO ()
-runGate root withDocspec = do
+runGate :: FilePath -> Maybe DocspecScope -> IO ()
+runGate root scope = do
   dirOk <- doesDirectoryExist root
   unless dirOk (die (T.pack root <> ": no such directory"))
   repo <- readTool root "git" ["-C", root, "rev-parse", "--is-inside-work-tree"]
   unless (fst repo == ExitSuccess) (die (T.pack root <> ": not a git repository (the ormolu gate needs git ls-files)"))
-  result <- go (checks withDocspec root) [] 0
+  docspec <- resolveDocspec scope root
+  result <- go (checks docspec root) [] 0
   case result of
     Right (timed, total) -> do
       let parts = [name <> " " <> secs <> "s" | (name, secs) <- reverse timed]
-      TIO.putStrLn ("GATE PASS (" <> packSecs total <> "s): " <> T.intercalate ", " parts)
+      TIO.putStrLn ("GATE PASS (" <> packSecs total <> "s): " <> T.intercalate ", " parts <> "; " <> verdictScope docspec)
     Left (name, secs, out) -> do
-      TIO.putStrLn ("GATE FAIL — " <> name <> " (" <> secs <> "s): " <> signal name (T.lines out))
+      TIO.putStrLn ("GATE FAIL — " <> name <> " (" <> secs <> "s): " <> signal name (T.lines out) <> "; " <> verdictScope docspec)
       artifactPath <- writeArtifact root out
       TIO.putStrLn ("full log: " <> T.pack artifactPath)
       exitFailure
@@ -72,17 +103,29 @@ runGate root withDocspec = do
         then go rest ((name, secs) : timed) (acc + diffUTCTime stop start)
         else pure (Left (name, secs, out))
 
+resolveDocspec :: Maybe DocspecScope -> FilePath -> IO (Maybe DocspecSelection)
+resolveDocspec Nothing _ = pure Nothing
+resolveDocspec (Just DocspecFull) _ = pure (Just SelectFull)
+resolveDocspec (Just DocspecRepository) root = do
+  entries <- listDirectory root
+  package <- either die pure (docspecPackage entries)
+  pure (Just (SelectRepository package))
+
 -- ---------------------------------------------------------------------------
 -- Checks
 -- ---------------------------------------------------------------------------
 
-checks :: Bool -> FilePath -> [(Text, Check)]
-checks withDocspec root =
+checks :: Maybe DocspecSelection -> FilePath -> [(Text, Check)]
+checks docspec root =
   [ ("build", buildC),
     ("ormolu", ormoluC),
     ("hlint", hlintC)
   ]
-    ++ [("docspec", docspecC) | withDocspec]
+    ++ case docspec of
+      Nothing -> []
+      Just SelectFull -> [("docspec", readTool root "cabal-docspec" (docspecArgs DocspecFull ""))]
+      Just (SelectRepository package) ->
+        [("docspec", readTool root "cabal-docspec" (docspecArgs DocspecRepository package))]
   where
     buildC = readTool root "cabal" ["build", "all"]
     ormoluC = do
@@ -93,7 +136,6 @@ checks withDocspec root =
           [] -> pure (ExitSuccess, "")
           files -> readTool root "ormolu" ("--mode" : "check" : files)
     hlintC = readTool root "hlint" ["."]
-    docspecC = readTool root "cabal-docspec" []
 
 -- | run a tool in ROOT; a missing executable is a gate error, not a
 -- silent skip.
@@ -107,6 +149,12 @@ readTool root cmd args = do
 -- ---------------------------------------------------------------------------
 -- Output
 -- ---------------------------------------------------------------------------
+
+verdictScope :: Maybe DocspecSelection -> Text
+verdictScope Nothing = "excluded: docspec[repository], docspec[full]"
+verdictScope (Just SelectFull) = "docspec scope: full (all linked local projects)"
+verdictScope (Just (SelectRepository package)) =
+  "docspec scope: repository=" <> T.pack package <> " (linked local projects excluded)"
 
 -- | the one signal line a failure distills to.
 signal :: Text -> [Text] -> Text

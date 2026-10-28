@@ -12,7 +12,7 @@
 --
 --   search PATTERN [PATH] [--head|--tail]   bounded recursive substring search
 --   read FILE [RANGE] [--head|--tail]       file slices, never whole files
---   gate [ROOT] [--docspec]                 distilled build/lint verdict
+--   gate [ROOT] [--docspec|--docspec-full]  distilled build/lint verdict
 --   state [ROOT] [--head|--tail]            distilled git status/log/diff
 module Free.Agent.Fare.Cli
   ( SearchConfig (..),
@@ -28,7 +28,7 @@ where
 import Data.Text (Text)
 import Data.Text qualified as T
 import Free.Agent.Fare.Config (End, endOpt, rootArg)
-import Free.Agent.Fare.Gate (runGate)
+import Free.Agent.Fare.Gate (DocspecScope (..), runGate)
 import Free.Agent.Fare.Read (runRead)
 import Free.Agent.Fare.Search (runSearch)
 import Free.Agent.Fare.State (runState)
@@ -59,7 +59,7 @@ data ReadConfig = ReadConfig
 -- --head/--tail do not exist here: a verdict has no slice to flip.
 data GateConfig = GateConfig
   { gaRoot :: FilePath,
-    gaDocspec :: Bool
+    gaDocspec :: Maybe DocspecScope
   }
   deriving (Show)
 
@@ -114,7 +114,18 @@ gateParser =
   GateCmd
     <$> ( GateConfig
             <$> rootArg
-            <*> switch (long "docspec" <> help "Add cabal-docspec to the suite (30s+; tests the last build)")
+            <*> optional
+              ( flag'
+                  DocspecRepository
+                  ( long "docspec"
+                      <> help "Add cabal-docspec for ROOT's package only (30s+; tests the last build; excludes linked local projects)"
+                  )
+                  <|> flag'
+                    DocspecFull
+                    ( long "docspec-full"
+                        <> help "Add cabal-docspec for ROOT and all linked local projects (30s+; tests the last build)"
+                    )
+              )
         )
 
 stateParser :: Parser FareCommand
