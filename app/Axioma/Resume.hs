@@ -17,7 +17,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (openBus, postLocal, runSeatBus)
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliDeliverTo, parseSessionId)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliDeliverTo, kimiCli, parseSessionId)
 import Free.Agent.Delivery (TurnResult (..), awaitTurn)
 import Free.Agent.Host (hostShard, mkHost)
 import System.Directory (doesFileExist, removePathForcibly)
@@ -487,4 +487,47 @@ resumeTopic = do
       "context exhausted" `T.isInfixOf` msgB
     assert "stinky-exhausted: fresh error names the fresh path" $
       "fresh session" `T.isInfixOf` msgB
+    removePathForcibly dir
+
+  -------------------------------------------------------------------------
+  -- Kimi resume and scrub: the resumed argv keeps its session id, the
+  -- addressed presentation bullet is removed, the resume hint is filtered,
+  -- and the rotated session id is persisted.
+  --
+  -- Mutation guards: removing the guarded bullet strip fails the prefix
+  -- assertion; dropping -r fails the argv assertion; restoring the resume
+  -- line fails the filter assertion; breaking session persistence fails the
+  -- final stored-id assertion.
+  -------------------------------------------------------------------------
+  putStrLn "Kimi resume and addressed-bullet scrub"
+  do
+    dir <- tempRoot "free-agent-kimi-resume"
+    let script = dir </> "fake-kimi.sh"
+        sf = dir </> "session"
+    TIO.writeFile sf "kimi-resume-old"
+    TIO.writeFile script $
+      T.pack $
+        unlines
+          [ "#!/bin/sh",
+            "printf '• @moka: resumed\\n'",
+            "printf 'argv:%s\\n' \"$*\"",
+            "printf 'To resume this session: kimi -r kimi-resume-fresh\\n'",
+            "cat >/dev/null"
+          ]
+    let base = kimiCli Nothing Nothing sf
+        cli =
+          base
+            { cliCommand = "/bin/sh",
+              cliArgv = \prompt mSid -> [script] <> cliArgv base prompt mSid
+            }
+    result <- queryDelivery cli dir "hello-kimi"
+    assert "Kimi scrub removes one addressed presentation bullet" $
+      "@moka: resumed" `T.isPrefixOf` result
+    assert "Kimi resumed argv retains the stored session id" $
+      "-r kimi-resume-old" `T.isInfixOf` result
+    assert "Kimi resume hint remains filtered" $
+      not ("To resume this session" `T.isInfixOf` result)
+    stored <- TIO.readFile sf
+    assert "Kimi rotated session id is persisted" $
+      T.strip stored == "kimi-resume-fresh"
     removePathForcibly dir

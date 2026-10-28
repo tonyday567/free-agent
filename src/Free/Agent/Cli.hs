@@ -162,13 +162,19 @@ kimiSessionId out =
     (l : _) -> listToMaybe (reverse (T.words l))
     [] -> Nothing
 
--- | Drop the resume-hint line; keep the reply text.
+-- | Drop the resume-hint line and one addressed presentation bullet.
+-- Ordinary bullets and addressed lines behind a preamble stay untouched.
 kimiText :: Text -> Text
-kimiText =
-  T.strip
-    . T.unlines
-    . filter (not . ("To resume this session:" `T.isPrefixOf`))
-    . T.lines
+kimiText text =
+  let clean =
+        T.strip
+          . T.unlines
+          . filter (not . ("To resume this session:" `T.isPrefixOf`))
+          . T.lines
+          $ text
+   in case T.stripPrefix "• " clean of
+        Just rest | "@" `T.isPrefixOf` rest -> rest
+        _ -> clean
 
 -- | Recipe for the grok CLI: @grok -p \<prompt\> --output-format json
 -- [--resume \<sid\>]@.  Plain output carries no session id, so the JSON

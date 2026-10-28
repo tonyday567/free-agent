@@ -10,12 +10,14 @@ where
 import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Agent (Post (..), replyTo)
 import Circuit.Agent.Framing (stamp, stamped, unframeStored)
+import Circuit.Agent.Mark (Mark (..), markGlyph)
 import Control.Concurrent (threadDelay)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Free.Agent.Bus.File (writeCursor)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliDeliverTo, parseSessionId)
 import Free.Agent.Delivery
   ( DeliveryRefusal (..),
@@ -28,11 +30,15 @@ import Free.Agent.Delivery
     directPostTo,
     newDeliveryGrant,
     postTo,
+    replyAct,
     turnMetrics,
   )
-import System.Directory (doesFileExist, removePathForcibly)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removePathForcibly)
+import System.Environment (getEnv, getExecutablePath, setEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
+import System.Posix.Files (setFileMode)
+import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 
 deliveryTopic :: IO ()
@@ -215,3 +221,101 @@ deliveryTopic = do
   assert "the refused direct post does not reach the backend" $
     invocationCount == 1
   removePathForcibly grantRoot
+
+  -------------------------------------------------------------------------
+  -- Kimi publication through the wired binary: plain prose stays local,
+  -- while one addressed presentation bullet is removed before replyAct.
+  -- The transcript retains raw CLI output; delivery receives the scrubbed form.
+  --
+  -- Mutation guards: restoring defaultReply publishes the plain and
+  -- preambled cases; removing the guarded kimiText strip loses the only
+  -- public reply; dropping replyAct's channel or ancestry fails the reply
+  -- assertions; replacing raw with scrubbed output fails the raw assertion.
+  -------------------------------------------------------------------------
+  putStrLn "Kimi reply-act publication"
+  channelRoot <- tempRoot "free-agent-kimi-channel"
+  channelCause <- postTo channelRoot ((mkPost "yang" ["kimi1", "ops"] "cause") {channel = Just "ops"})
+  assert "replyAct keeps unaddressed prose local" $
+    null (replyAct "kimi1" channelCause "ordinary local prose")
+  assert "replyAct preserves an addressed reply's channel and ancestry" $
+    case replyAct "kimi1" channelCause "@yang: explicit report" of
+      [r] ->
+        body r == "explicit report"
+          && to r == ["yang"]
+          && channel r == Just "ops"
+          && thread r == [snd (stamp channelCause)]
+      _ -> False
+  assert "replyAct does not invent DONE after a progress preamble" $
+    null (replyAct "kimi1" channelCause "• working\n\n• @yang: DONE not-earned")
+  removePathForcibly channelRoot
+
+  kimiRoot <- tempRoot "free-agent-kimi-publication"
+  let fakeBin = kimiRoot </> "bin"
+      fakeKimi = fakeBin </> "kimi"
+      promptFile = kimiRoot </> "prompt.md"
+      kimiSessionFile = kimiRoot </> "session"
+      kimiTranscriptLog = kimiRoot </> ".transcripts" </> "kimi1.jsonl"
+  TIO.writeFile promptFile "You are a test seat."
+  createDirectoryIfMissing True fakeBin
+  TIO.writeFile fakeKimi $
+    T.pack $
+      unlines
+        [ "#!/bin/sh",
+          "input=\"$*\"",
+          "case \"$input\" in",
+          "  *PLAIN-CASE*) printf 'ordinary local prose\\n' ;;",
+          "  *EXPLICIT-CASE*) printf '• @yang: explicit report\\n' ;;",
+          "  *PREAMBLE-CASE*) printf '• working\\n\\n• @yang: DONE not-earned\\n' ;;",
+          "  *BULLET-CASE*) printf '• ordinary bullet\\n' ;;",
+          "esac",
+          "printf 'To resume this session: kimi -r fake-kimi-integration\\n'"
+        ]
+  setFileMode fakeKimi 0o755
+  writeCursor kimiRoot "kimi1" 0
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "PLAIN-CASE")
+  explicitCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "EXPLICIT-CASE")
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "PREAMBLE-CASE")
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "BULLET-CASE")
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] (markGlyph Landed <> " done"))
+  myPath <- takeDirectory <$> getExecutablePath
+  let bin = myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent"
+  oldPath <- getEnv "PATH"
+  setEnv "PATH" (fakeBin <> ":" <> oldPath)
+  (code, _out, err) <-
+    readProcessWithExitCode
+      bin
+      [ "--root",
+        kimiRoot,
+        "--name",
+        "kimi1",
+        "--backend",
+        "kimi",
+        "--prompt",
+        promptFile,
+        "--session",
+        kimiSessionFile
+      ]
+      ""
+  setEnv "PATH" oldPath
+  assert ("the wired Kimi seat completes its scripted turns" <> if code == ExitSuccess then "" else ": " <> err) $
+    code == ExitSuccess
+  content <- TIO.readFile (kimiRoot </> "log.jsonl")
+  let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+      replies = [stamped s | s <- parsed, from (stamped s) == "kimi1"]
+  assert "plain and preambled Kimi prose remain local" $
+    not $
+      any
+        (\r -> body r `elem` ["ordinary local prose", "• ordinary bullet", "• working\n\n• @yang: DONE not-earned"])
+        replies
+  assert "the addressed bullet publishes with ancestry" $
+    case replies of
+      [r] ->
+        body r == "explicit report"
+          && to r == ["yang"]
+          && channel r == Nothing
+          && thread r == [snd (stamp explicitCause)]
+      _ -> False
+  kimiTranscript <- TIO.readFile kimiTranscriptLog
+  assert "Kimi raw output preserves the addressed presentation bullet" $
+    "• @yang: explicit report" `T.isInfixOf` kimiTranscript
+  removePathForcibly kimiRoot

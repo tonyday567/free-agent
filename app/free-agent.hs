@@ -336,11 +336,6 @@ hostTurn host =
     )
     <*> pure ""
 
-defaultReply :: Text -> Stamped Text -> Text -> [Post Text]
-defaultReply agentName stored response =
-  let cause = stamped stored
-   in [routeReply ((mkPost agentName [from cause] response) {channel = channel cause})]
-
 runHermes :: Int -> HermesConfig -> IO ()
 runHermes = runHermesAuto Nothing Nothing
 
@@ -447,7 +442,7 @@ runKimi budget cfg = do
       handle stored =
         let delivered = decorateSender stored
             prompt = systemPrompt <> "\n\nUser message:\n" <> body (stamped delivered)
-         in mapTurn (defaultReply agentName stored)
+         in mapTurn (replyAct agentName stored)
               <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
   createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
