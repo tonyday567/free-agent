@@ -12,11 +12,13 @@
 --
 --   search PATTERN [PATH] [--head|--tail]   bounded recursive substring search
 --   read FILE [RANGE] [--head|--tail]       file slices, never whole files
---   gate [ROOT] [--docspec|--docspec-full]  distilled build/lint verdict
+--   gate [ROOT] [--docspec|--docspec-full|--no-docspec]
+--                                               distilled build/lint verdict
 --   state [ROOT] [--head|--tail]            distilled git status/log/diff
 module Free.Agent.Fare.Cli
   ( SearchConfig (..),
     ReadConfig (..),
+    GateDocspec (..),
     GateConfig (..),
     StateConfig (..),
     FareCommand (..),
@@ -25,9 +27,10 @@ module Free.Agent.Fare.Cli
   )
 where
 
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Free.Agent.Fare.Config (End, endOpt, rootArg)
+import Free.Agent.Fare.Config (End, endOpt, readGateDocspec, rootArg)
 import Free.Agent.Fare.Gate (DocspecScope (..), runGate)
 import Free.Agent.Fare.Read (runRead)
 import Free.Agent.Fare.Search (runSearch)
@@ -55,11 +58,19 @@ data ReadConfig = ReadConfig
   }
   deriving (Show)
 
+-- | Invocation choice for the docspec lane. The default is resolved from
+-- ROOT's .fare file; explicit choices always win.
+data GateDocspec
+  = RepositoryDefault
+  | DocspecExcluded
+  | DocspecSelected DocspecScope
+  deriving (Eq, Show)
+
 -- | gate configuration: distilled build/lint verdict over ROOT.
 -- --head/--tail do not exist here: a verdict has no slice to flip.
 data GateConfig = GateConfig
   { gaRoot :: FilePath,
-    gaDocspec :: Maybe DocspecScope
+    gaDocspec :: GateDocspec
   }
   deriving (Show)
 
@@ -114,18 +125,25 @@ gateParser =
   GateCmd
     <$> ( GateConfig
             <$> rootArg
-            <*> optional
-              ( flag'
-                  DocspecRepository
-                  ( long "docspec"
-                      <> help "Add cabal-docspec for ROOT's package only (30s+; tests the last build; excludes linked local projects)"
-                  )
-                  <|> flag'
-                    DocspecFull
-                    ( long "docspec-full"
-                        <> help "Add cabal-docspec for ROOT and all linked local projects (30s+; tests the last build)"
-                    )
-              )
+            <*> ( fromMaybe RepositoryDefault
+                    <$> optional
+                      ( flag'
+                          DocspecExcluded
+                          ( long "no-docspec"
+                              <> help "Run only build, ormolu and hlint; the verdict names both excluded docspec lanes"
+                          )
+                          <|> flag'
+                            (DocspecSelected DocspecRepository)
+                            ( long "docspec"
+                                <> help "Override .fare: add cabal-docspec for ROOT's package only (30s+; tests the last build; excludes linked local projects)"
+                            )
+                          <|> flag'
+                            (DocspecSelected DocspecFull)
+                            ( long "docspec-full"
+                                <> help "Override .fare: add cabal-docspec for ROOT and all linked local projects (30s+; tests the last build)"
+                            )
+                      )
+                )
         )
 
 stateParser :: Parser FareCommand
@@ -142,7 +160,14 @@ fareParser =
   subparser
     ( command "search" (info (searchParser <**> helper) (progDesc "Bounded search over files"))
         <> command "read" (info (readParser <**> helper) (progDesc "File slices, never whole files"))
-        <> command "gate" (info (gateParser <**> helper) (progDesc "Distilled build/lint verdict"))
+        <> command
+          "gate"
+          ( info
+              (gateParser <**> helper)
+              ( fullDesc
+                  <> progDesc "Run build, ormolu, hlint and the configured docspec lane. Default: ROOT/.fare gate.docspec = none|repository|full (none without the file); explicit flags override it. PASS/FAIL names the selected scope and exclusions."
+              )
+          )
         <> command "state" (info (stateParser <**> helper) (progDesc "Distilled git status/log/diff"))
     )
 
@@ -156,7 +181,11 @@ runFareCommand = \case
     runSearch (sePattern cfg) (sePath cfg) (seEnd cfg)
   ReadCmd cfg ->
     runRead (reFile cfg) (reRange cfg) (reEnd cfg)
-  GateCmd cfg ->
-    runGate (gaRoot cfg) (gaDocspec cfg)
+  GateCmd cfg -> do
+    scope <- case gaDocspec cfg of
+      RepositoryDefault -> readGateDocspec (gaRoot cfg)
+      DocspecExcluded -> pure Nothing
+      DocspecSelected selected -> pure (Just selected)
+    runGate (gaRoot cfg) scope
   StateCmd cfg ->
     runState (stRoot cfg) (stEnd cfg)

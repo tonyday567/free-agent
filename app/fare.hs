@@ -2,7 +2,7 @@
 --
 --   fare search PATTERN [PATH] [--head|--tail]
 --   fare read FILE [RANGE] [--head|--tail]
---   fare gate [ROOT] [--docspec|--docspec-full]
+--   fare gate [ROOT] [--docspec|--docspec-full|--no-docspec]
 --   fare state [ROOT] [--head|--tail]
 --   fare usage [day|week] [--head|--tail]
 --   fare pc [--host HOST] CMD [ARG...] [--head|--tail]
@@ -11,18 +11,20 @@ module Main (main) where
 
 import Free.Agent.Fare.Cli (fareParser, runFareCommand)
 import Options.Applicative
-  ( execParser,
+  ( customExecParser,
     fullDesc,
     header,
     helper,
     info,
+    prefs,
     progDesc,
+    showHelpOnError,
     (<**>),
   )
 
 main :: IO ()
 main = do
-  cmd <- execParser opts
+  cmd <- customExecParser (prefs showHelpOnError) opts
   runFareCommand cmd
   where
     opts =

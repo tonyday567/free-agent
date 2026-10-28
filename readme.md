@@ -116,6 +116,13 @@ Main modules:
 
 ## Development
 
+`fare gate` reads the repository's optional `.fare` file for its default
+docspec lane: `gate.docspec = none`, `repository`, or `full`. This checkout
+selects `repository`, so bare `fare gate` runs build, ormolu, hlint, and
+doctests for `free-agent`; linked local projects remain excluded and the
+verdict says so. `--docspec`, `--docspec-full`, and `--no-docspec` override
+the configured default for one invocation.
+
 ```bash
 cabal build free-agent free-agent-axioma
 cabal run free-agent-axioma

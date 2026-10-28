@@ -80,7 +80,7 @@ topicDesc Connector = "connector turn grammar (B7): zero/one/two-frame turns"
 topicDesc Acp = "ACP seat (R2a): scripted double + wired-binary integration"
 topicDesc Lifecycle = "lifecycle hygiene (H): lock stress, daemon liveness, death honesty (L1-L5)"
 topicDesc Usage = "Hermes latest-prompt usage anchor"
-topicDesc Fare = "fare docspec flag parsing and repository/full module selection"
+topicDesc Fare = "fare gate defaults, docspec flags, and repository/full module selection"
 
 topicParser :: Parser Topic
 topicParser =
