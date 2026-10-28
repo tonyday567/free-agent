@@ -1,0 +1,43 @@
+# Model overlay: pin the seat default to qwen3.5:9b-house (house variant:
+# temperature 0.6, top_k 40 baked in via `ollama create`). The provider block
+# is re-declared whole because the house model id is not in the base patch's
+# models list (dsh patch merge is shallow at the provider level). Layer after
+# the base patch; requires the tunnel up and OLLAMA_API_KEY set (any value).
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      ollama:
+        displayName: Ollama local
+        api: openai-completions
+        baseURL: http://localhost:11435/v1
+        apiKeyEnv: OLLAMA_API_KEY
+        defaultContextWindow: 16384
+        defaultMaxTokens: 4096
+        models:
+          - id: qwen2.5:14b
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: qwen2.5-coder:7b
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: llama3.1:8b
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: deepseek-r1:8b
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: gemma4:12b-it-qat
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: qwen3.8:27b
+            contextWindow: 16384
+            maxTokens: 4096
+          - id: qwen3.5:9b-house
+            contextWindow: 16384
+            maxTokens: 4096
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: ollama
+    model: qwen3.5:9b-house
