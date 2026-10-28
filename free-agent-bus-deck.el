@@ -120,9 +120,15 @@ holds the runner's board, or use `SPC y r' for the READY view instead."
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-auto-refresh-interval 5.0
-  "Seconds between re-runs of a visible CLI view (status, READY, thread).
-The CLI reads the log and writes no cursor; a paused view costs nothing."
+  "Seconds between re-runs of visible READY and thread CLI views.
+Status is message-driven instead.  The CLI reads the log and writes no cursor;
+a paused view costs nothing."
   :type 'number
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-status-label-width 72
+  "Display width of a status row's latest-assignment label."
+  :type 'integer
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-log-show-timestamps t
@@ -211,16 +217,19 @@ command stays visible to the runner instead of being hidden by an error."
 
 (defun free-agent-bus--id-at-point ()
   "Return the post id on the current line, or nil.
-Understands the log tail (`[id@ts]'), CLI views (`id from→to'), the thread
+A status row carries its assignment id as a text property.  Otherwise this
+understands the log tail (`[id@ts]'), CLI views (`id from→to'), the thread
 view (raw JSONL), and text mentioning `id=<n>'."
-  (save-excursion
-    (beginning-of-line)
-    (cond
-     ((looking-at "\\[\\([0-9]+\\)@") (string-to-number (match-string 1)))
-     ((looking-at "{\"id\":\\([0-9]+\\)") (string-to-number (match-string 1)))
-     ((looking-at "\\([0-9]+\\)[ \t]") (string-to-number (match-string 1)))
-     ((re-search-forward "id=\\([0-9]+\\)" (line-end-position) t)
-      (string-to-number (match-string 1))))))
+  (or (get-text-property (point) 'free-agent-bus-post-id)
+      (save-excursion
+        (beginning-of-line)
+        (or (get-text-property (point) 'free-agent-bus-post-id)
+            (cond
+             ((looking-at "\\[\\([0-9]+\\)@") (string-to-number (match-string 1)))
+             ((looking-at "{\"id\":\\([0-9]+\\)") (string-to-number (match-string 1)))
+             ((looking-at "\\([0-9]+\\)[ \t]") (string-to-number (match-string 1)))
+             ((re-search-forward "id=\\([0-9]+\\)" (line-end-position) t)
+              (string-to-number (match-string 1))))))))
 
 ;;; Failures stay visible
 
@@ -436,6 +445,8 @@ buffer is never left silently stale."
            (setq free-agent-bus-log-depth next)
            (free-agent-bus-log-refresh t)
            (message "Depth %s" next))
+          ((derived-mode-p 'free-agent-bus-status-mode)
+           (message "Status rows use depth 1"))
           ((derived-mode-p 'free-agent-bus-view-mode)
            (setq free-agent-bus-view-depth next)
            (free-agent-bus--view-refresh)
@@ -474,14 +485,331 @@ TITLE names the view; the header carries root, identity, and freshness."
     (pop-to-buffer buf)
     (free-agent-bus--start-auto-refresh)))
 
+;;; Message-driven status
+
+(defvar free-agent-bus-status--usage-cache (make-hash-table :test 'equal)
+  "Latest completed Hermes usage readings, keyed by (ROOT . SEAT).")
+
+(defvar free-agent-bus-status--usage-running (make-hash-table :test 'equal)
+  "Running Hermes usage collectors, keyed by (ROOT . SEAT).")
+
+(defvar-local free-agent-bus-status--model nil
+  "Parsed status rows and their latest log-derived assignments.")
+
+(defvar-local free-agent-bus-status--file-watch nil
+  "File-notify descriptor for this status buffer.")
+
+(defvar-local free-agent-bus-status--refresh-timer nil
+  "Debounce timer for status file notifications.")
+
+(defvar-local free-agent-bus-status--processes nil
+  "Usage collectors owned by this status buffer.")
+
+(define-derived-mode free-agent-bus-status-mode free-agent-bus-view-mode "FAB-Status"
+  "Major mode for message-driven live bus status."
+  (setq-local revert-buffer-function
+              (lambda (&rest _) (free-agent-bus-status-refresh)))
+  (local-set-key (kbd "q") #'kill-current-buffer)
+  (add-hook 'kill-buffer-hook #'free-agent-bus-status-stop nil t))
+
+(defun free-agent-bus-status--key (seat)
+  "Return the usage-cache key for SEAT under the current bus root."
+  (cons (free-agent-bus--expand-root) seat))
+
+(defun free-agent-bus-status--first-useful-line (body)
+  "Return the first nonempty, non-fence line of BODY, or nil."
+  (let ((lines (split-string (or body "") "\n"))
+        (found nil))
+    (while (and lines (not found))
+      (let ((line (string-trim (pop lines))))
+        (unless (or (string-empty-p line)
+                    (string-match-p "\\`[`'-]+\\'" line))
+          (setq found line))))
+    found))
+
+(defun free-agent-bus-status--assignment-label (body)
+  "Return a one-line assignment label for BODY, or nil for report traffic."
+  (when-let ((line (free-agent-bus-status--first-useful-line body)))
+    (let ((case-fold-search t)
+          (line (if (string-match "^\\(?:[•*+-][ \t]+\\)?\\(?:@[^:]+:[ \t]*\\)?\\(.*\\)$" line)
+                    (match-string 1 line)
+                  line)))
+      (unless (string-match-p
+               "^\\(CLAIM\\|DONE\\|LINK\\|NOTE\\|REPORT\\|ACK\\|RECEIPT\\|✓\\|🟢\\)\\($\\|[ \t·]\\)\\|^I am seated\\b\\|^Standing by\\b"
+               line)
+        (string-join (split-string line "[ \t\r\n]+" t) " ")))))
+
+(defun free-agent-bus-status--assignments (seats)
+  "Project the latest assignment for each name in SEATS from the bus log."
+  (let ((assignments (make-hash-table :test 'equal)))
+    (dolist (line (split-string (free-agent-bus-log--read-file) "\n" t))
+      (when-let ((obj (ignore-errors (json-read-from-string line))))
+        (let ((to (append (alist-get 'to obj) nil))
+              (body (alist-get 'body obj))
+              (id (alist-get 'id obj)))
+          (when-let ((label (free-agent-bus-status--assignment-label body)))
+            (dolist (seat seats)
+              (when (member seat to)
+                (puthash seat (cons label id) assignments)))))))
+    assignments))
+
+(defun free-agent-bus-status--parse-row (line)
+  "Parse one `bus status --live' output LINE into a render model."
+  (if (string-match
+       "^\\([🟢🟡⚪]+\\) \\([^ ]+\\) — \\([^;]+\\).*; cursor \\([^;]+\\); last post .*$"
+       line)
+      (list :text line
+            :dot (match-string 1 line)
+            :seat (match-string 2 line)
+            :freshness (match-string 3 line)
+            :cursor (match-string 4 line)
+            :label nil :task-id nil)
+    (list :text line :seat nil :label nil :task-id nil)))
+
+(defun free-agent-bus-status--session (seat freshness)
+  "Classify SEAT's Hermes session without waiting on a usage process."
+  (if (string= freshness "no heartbeat")
+      'n/a
+    (let ((path (expand-file-name
+                 (format ".sessions/%s.sid" seat)
+                 (free-agent-bus--expand-root))))
+      (cond
+       ((not (file-exists-p path)) 'first-run)
+       ((not (file-readable-p path)) 'unavailable)
+       (t
+        (let ((sid (condition-case nil
+                       (with-temp-buffer
+                         (insert-file-contents path nil 0 256)
+                         (string-trim (buffer-string)))
+                     (error nil))))
+          (cond
+           ((null sid) 'unavailable)
+           ((string-empty-p sid) 'first-run)
+           ((string-prefix-p "local-" sid) (cons 'hermes path))
+           (t 'n/a))))))))
+
+(defun free-agent-bus-status--usage-text (seat freshness)
+  "Return SEAT's cached usage display, without starting a collector."
+  (let ((session (free-agent-bus-status--session seat freshness)))
+    (if (not (eq (car-safe session) 'hermes))
+        (pcase session
+          ('first-run "first run")
+          ('n/a "n/a")
+          (_ "unavailable"))
+      (let ((cached (gethash (free-agent-bus-status--key seat)
+                             free-agent-bus-status--usage-cache 'missing)))
+        (pcase cached
+          ('missing "pending")
+          ('unavailable "unavailable")
+          ((pred integerp) (format "%dk" (/ (+ cached 500) 1000)))
+          (_ "unavailable"))))))
+
+(defun free-agent-bus-status--freshness-text (freshness)
+  "Reduce CLI freshness to the short age used by status rows."
+  (if (string-match "^\\(working\\|idle\\) \\([^ ]+\\) ago$" freshness)
+      (match-string 2 freshness)
+    (if (string= freshness "no heartbeat") "—" freshness)))
+
+(defun free-agent-bus-status--row-text (row)
+  "Render one parsed status ROW with usage and assignment context."
+  (if-let ((seat (plist-get row :seat)))
+      (let* ((label (or (plist-get row :label) "—"))
+             (label (truncate-string-to-width
+                     label free-agent-bus-status-label-width nil nil t))
+             (id (plist-get row :task-id))
+             (line (string-join
+                    (list (concat (plist-get row :dot) " " seat)
+                          (free-agent-bus-status--usage-text
+                           seat (plist-get row :freshness))
+                          (free-agent-bus-status--freshness-text
+                           (plist-get row :freshness))
+                          (plist-get row :cursor)
+                          label)
+                    " ⟜ ")))
+        (if id
+            (propertize line 'free-agent-bus-post-id id
+                        'help-echo (format "RET: open assignment thread %s" id))
+          line))
+    (plist-get row :text)))
+
+(defun free-agent-bus-status--render ()
+  "Render the current status model, skipping an unchanged repaint."
+  (let* ((model free-agent-bus-status--model)
+         (watch free-agent-bus-status--file-watch)
+         (contents
+          (with-temp-buffer
+            (insert (propertize
+                     (format "bus status (live) · depth 1\nroot %s · posting as %s · %s\n\n"
+                             (free-agent-bus--expand-root) free-agent-bus-name
+                             (if watch
+                                 "message-driven"
+                               "manual refresh · file-notify unavailable"))
+                     'face 'bold))
+            (dolist (row model)
+              (insert (free-agent-bus-status--row-text row) "\n"))
+            (buffer-string))))
+    (unless (equal-including-properties contents (buffer-string))
+      (let ((inhibit-read-only t)
+            (old-point (point))
+            (window-states
+             (mapcar (lambda (w) (list w (window-point w) (window-start w)))
+                     (get-buffer-window-list (current-buffer) nil t))))
+        (erase-buffer)
+        (insert contents)
+        (goto-char (min old-point (point-max)))
+        (dolist (state window-states)
+          (let ((w (nth 0 state)))
+            (set-window-point w (min (nth 1 state) (point-max)))
+            (set-window-start w (min (nth 2 state) (point-max)))))
+        (set-buffer-modified-p nil)))))
+
+(defun free-agent-bus-status--usage-sentinel (proc _event)
+  "Cache PROC's completed usage reading and repaint only this status."
+  (when (memq (process-status proc) '(exit signal closed failed))
+    (let* ((key (process-get proc 'free-agent-bus-key))
+           (buf (process-get proc 'free-agent-bus-buffer))
+           (current (eq (gethash key free-agent-bus-status--usage-running) proc)))
+      (when current (remhash key free-agent-bus-status--usage-running))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (setq-local free-agent-bus-status--processes
+                      (delq proc free-agent-bus-status--processes))))
+      (when (and current (not (process-get proc 'free-agent-bus-cancelled)))
+        (let ((tokens (and (zerop (process-exit-status proc))
+                           (string-match "prompt_tokens=\\([0-9]+\\)"
+                                         (or (process-get proc 'free-agent-bus-output) ""))
+                           (string-to-number
+                            (match-string 1 (process-get proc 'free-agent-bus-output))))))
+          (puthash key (or tokens 'unavailable) free-agent-bus-status--usage-cache))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf (free-agent-bus-status--render)))))))
+
+(defun free-agent-bus-status--collect (seat path)
+  "Start one asynchronous Hermes usage collector for SEAT at PATH."
+  (let* ((key (free-agent-bus-status--key seat))
+         (buf (current-buffer)))
+    (unless (gethash key free-agent-bus-status--usage-running)
+      (let ((proc (make-process
+                   :name (format "free-agent-usage-%s" seat)
+                   :buffer nil
+                   :command (list (free-agent-bus--executable) "usage" "hermes" path)
+                   :noquery t
+                   :filter (lambda (p text)
+                             (process-put p 'free-agent-bus-output
+                                          (concat (process-get p 'free-agent-bus-output) text)))
+                   :sentinel #'free-agent-bus-status--usage-sentinel)))
+        (process-put proc 'free-agent-bus-key key)
+        (process-put proc 'free-agent-bus-buffer buf)
+        (puthash key proc free-agent-bus-status--usage-running)
+        (push proc free-agent-bus-status--processes)))))
+
+(defun free-agent-bus-status--collect-usage ()
+  "Collect fresh usage for visible Hermes seats without overlapping collectors."
+  (dolist (row free-agent-bus-status--model)
+    (when-let ((seat (plist-get row :seat)))
+      (let ((session (free-agent-bus-status--session
+                      seat (plist-get row :freshness))))
+        (when (eq (car-safe session) 'hermes)
+          (free-agent-bus-status--collect seat (cdr session)))))))
+
+(defun free-agent-bus-status-refresh ()
+  "Refresh status and assignment labels now; usage remains asynchronous."
+  (interactive)
+  (free-agent-bus--check-root)
+  (let* ((result (free-agent-bus--cli "status" "--live" "--depth" "1"))
+         (status (car result))
+         (output (cdr result))
+         (rows (if (string-empty-p output)
+                   (list (list :text "(no rows)" :seat nil :label nil :task-id nil))
+                 (mapcar #'free-agent-bus-status--parse-row
+                         (split-string output "\n" t))))
+         (seats (delq nil (mapcar (lambda (row)
+                                    (and (plist-get row :seat)
+                                         (not (string= (plist-get row :freshness)
+                                                       "no heartbeat"))
+                                         (plist-get row :seat)))
+                                  rows)))
+         (assignments (free-agent-bus-status--assignments seats)))
+    (dolist (row rows)
+      (when-let ((seat (plist-get row :seat)))
+        (when-let ((assignment (gethash seat assignments)))
+          (plist-put row :label (car assignment))
+          (plist-put row :task-id (cdr assignment)))))
+    (setq-local free-agent-bus-status--model
+                (append rows
+                        (unless (zerop status)
+                          (list (list :text (format "⛔ free-agent bus status exited %d" status)
+                                      :seat nil :label nil :task-id nil)))))
+    (free-agent-bus-status--render)
+    (free-agent-bus-status--collect-usage)))
+
+(defun free-agent-bus-status--refresh-soon ()
+  "Coalesce file-notification events into one status refresh."
+  (when free-agent-bus-status--refresh-timer
+    (cancel-timer free-agent-bus-status--refresh-timer))
+  (setq-local free-agent-bus-status--refresh-timer
+              (run-with-timer
+               0.05 nil
+               (lambda (buf)
+                 (when (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (setq-local free-agent-bus-status--refresh-timer nil)
+                     (ignore-errors (free-agent-bus-status-refresh)))))
+               (current-buffer))))
+
+(defun free-agent-bus-status-stop-watch ()
+  "Remove the status log watch and its pending debounce timer."
+  (when free-agent-bus-status--refresh-timer
+    (cancel-timer free-agent-bus-status--refresh-timer)
+    (setq-local free-agent-bus-status--refresh-timer nil))
+  (when free-agent-bus-status--file-watch
+    (file-notify-rm-watch free-agent-bus-status--file-watch)
+    (setq-local free-agent-bus-status--file-watch nil)))
+
+(defun free-agent-bus-status-start-watch ()
+  "Refresh status on log messages, with no periodic fallback timer."
+  (free-agent-bus-status-stop-watch)
+  (condition-case nil
+      (let ((buf (current-buffer)))
+        (setq-local free-agent-bus-status--file-watch
+                    (file-notify-add-watch
+                     (free-agent-bus--log-file) '(change)
+                     (lambda (_event)
+                       (when (buffer-live-p buf)
+                         (with-current-buffer buf
+                           (free-agent-bus-status--refresh-soon)))))))
+    (error
+     (setq-local free-agent-bus-status--file-watch nil)
+     (message "free-agent status: file-notify unavailable; use g to refresh"))))
+
+(defun free-agent-bus-status-stop ()
+  "Remove the status watch and cancel every collector it owns."
+  (free-agent-bus-status-stop-watch)
+  (dolist (proc free-agent-bus-status--processes)
+    (process-put proc 'free-agent-bus-cancelled t)
+    (let ((key (process-get proc 'free-agent-bus-key)))
+      (when (eq (gethash key free-agent-bus-status--usage-running) proc)
+        (remhash key free-agent-bus-status--usage-running)))
+    (when (process-live-p proc) (delete-process proc)))
+  (setq-local free-agent-bus-status--processes nil))
+
+(defun free-agent-bus-status--prepare ()
+  "Prepare the current buffer as a fresh message-driven status view."
+  (unless (derived-mode-p 'free-agent-bus-status-mode)
+    (free-agent-bus-status-mode))
+  (free-agent-bus-status-start-watch)
+  (free-agent-bus-status-refresh))
+
 ;;;###autoload
 (defun free-agent-bus-status ()
-  "Open the live status view: freshness, seats, heartbeat, cursor, last post.
-Seat dots describe loop liveness, not the quality of work or whether it was
-accepted.  Uses `bus status --live'; no cursor is written."
+  "Open live status with prompt usage and latest-assignment labels.
+Log messages refresh the view; Hermes usage collection is asynchronous and
+cached.  No cursor is written and no model is invoked."
   (interactive)
-  (free-agent-bus--open-view free-agent-bus-status-buffer-name
-                             "bus status (live)" "status" '("--live") 1))
+  (free-agent-bus--check-root)
+  (let ((buf (get-buffer-create free-agent-bus-status-buffer-name)))
+    (with-current-buffer buf (free-agent-bus-status--prepare))
+    (pop-to-buffer buf)))
 
 ;;;###autoload
 (defun free-agent-bus-ready ()
@@ -523,7 +851,9 @@ retelling: a task's body, its claim, and its DONE read in log order."
   (let ((visible nil))
     (dolist (buf (buffer-list))
       (with-current-buffer buf
-        (when (and free-agent-bus--view-spec (get-buffer-window buf))
+        (when (and free-agent-bus--view-spec
+                   (not (derived-mode-p 'free-agent-bus-status-mode))
+                   (get-buffer-window buf))
           (setq visible t)
           (ignore-errors (free-agent-bus--view-refresh)))))
     (unless visible
@@ -741,13 +1071,7 @@ One frame, one rail: notice live work, read the evidence, post the next act."
          (post-buf (get-buffer-create free-agent-bus-post-buffer-name))
          (main (selected-window)))
     (with-current-buffer status-buf
-      (unless (derived-mode-p 'free-agent-bus-view-mode)
-        (free-agent-bus-view-mode))
-      (setq-local free-agent-bus--view-spec
-                  (list :title "bus status (live)" :subcommand "status"
-                        :args '("--live") :base-depth 1))
-      (setq-local free-agent-bus-view-depth 1)
-      (free-agent-bus--view-refresh))
+      (free-agent-bus-status--prepare))
     (set-window-buffer main status-buf)
     (set-window-point main (with-current-buffer status-buf (point-min)))
     (let ((log-win (split-window main (floor (* 0.30 (window-total-height main))))))
@@ -761,8 +1085,7 @@ One frame, one rail: notice live work, read the evidence, post the next act."
           (unless (derived-mode-p 'free-agent-bus-post-mode)
             (free-agent-bus-post-mode))
           (free-agent-bus--post-mode-refresh))
-        (select-window main)))
-    (free-agent-bus--start-auto-refresh)))
+        (select-window main)))))
 
 ;;;###autoload
 (defun free-agent-bus-deck-quit ()
