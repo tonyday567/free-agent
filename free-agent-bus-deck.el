@@ -203,8 +203,9 @@ A value `run-with-timer' cannot repeat is refused where the timer is started,
 because the failure is silent: zero and nil both yield a one-shot timer that
 fires once and never again — the page freezes after a single repaint, which is
 the defect this timer exists to fix — a string is taken the same way, and a
-negative value signals `Invalid repetition interval' inside the call that opens
-the status view.  Refused, the timer stays off, the deck says so, and the log
+negative value is the one that would signal `Invalid repetition interval' inside
+`run-with-timer'.  The guard is what keeps that from happening: all four are
+refused here, the timer stays off, the message names the value, and the log
 watch is the only repaint."
   :type 'number
   :group 'free-agent-bus-deck)
@@ -1157,10 +1158,11 @@ cancelled by `free-agent-bus-status-stop' when the buffer is killed.
 `free-agent-bus-status-refresh-interval' must be a positive number.  Measured:
 zero and nil both arm a one-shot timer that fires once and never repeats — the
 page freezes after a single repaint, which is the defect this timer exists to
-fix — a string is taken the same way, and a negative value signals `Invalid
-repetition interval' right here, inside the call that opens the status view.
-Anything else leaves the timer off, says so, and leaves the log watch as the
-only repaint.  Returns the timer, or nil when none was started."
+fix — a string is taken the same way, and a negative value would signal `Invalid
+repetition interval' inside `run-with-timer'.  The guard is what keeps that from
+happening: all four are refused here, the timer stays off, the message names the
+value, and the log watch is the only repaint.  Returns the timer, or nil when
+none was started."
   (or (free-agent-bus--arm-timer
        'free-agent-bus-status--periodic-timer
        free-agent-bus-status-refresh-interval
