@@ -20,7 +20,7 @@
 --   status [ROOT] [--threshold SECS] [--live] [--depth 0|1|2]
 --
 -- @say@ is the act path for the deck: one short posting command, sender
--- defaulting to @tony@, body as positional words or on stdin. @post@ stays
+-- defaulting to @runner@, body as positional words or on stdin. @post@ stays
 -- the explicit form (JSON on stdin, or flags).
 --
 -- @inbox@ is the attached human's unread view: posts addressed to NAME at
@@ -176,7 +176,7 @@ sayCmd = do
       (T.pack <$> str)
       ( long "from"
           <> metavar "NAME"
-          <> value "tony"
+          <> value "runner"
           <> showDefault
           <> help "Sender name"
       )
@@ -328,7 +328,7 @@ daemonCmd = DaemonCommand <$> rootOpt
 busParser :: Parser BusCommand
 busParser =
   subparser
-    ( command "say" (info (sayCmd <**> helper) (progDesc "Say something on the bus; --thread carries reply ancestry (deck defaults: --from tony)"))
+    ( command "say" (info (sayCmd <**> helper) (progDesc "Say something on the bus; --thread carries reply ancestry (deck defaults: --from runner)"))
         <> command "post" (info (postCmd <**> helper) (progDesc "Post flags or JSON; flag posts are roots, while JSON may carry thread ancestry"))
         <> command "watch" (info (watchCmd <**> helper) (progDesc "Watch the log for posts addressed to NAMEs"))
         <> command "read" (info (readCmd <**> helper) (progDesc "Read posts addressed to NAMEs, or a thread by id"))

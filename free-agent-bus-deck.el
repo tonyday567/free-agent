@@ -72,7 +72,7 @@ A root without a readable log is an explicit error, never an empty view."
   :type 'string
   :group 'free-agent-bus-deck)
 
-(defcustom free-agent-bus-name "tony"
+(defcustom free-agent-bus-name "runner"
   "Name this deck posts as, and the identity every view reports."
   :type 'string
   :group 'free-agent-bus-deck)
@@ -163,7 +163,7 @@ a paused view costs nothing."
   :type '(choice (const 0) (const 1) (const 2))
   :group 'free-agent-bus-deck)
 
-(defcustom free-agent-bus-log-filter-choices '("tony" "moka" "mucho" "ristretto" "stinky" "doppio" "allegro")
+(defcustom free-agent-bus-log-filter-choices '("runner" "moka" "mucho" "ristretto" "stinky" "doppio" "allegro")
   "Common audience filter choices offered by `free-agent-bus-log-set-filter'.
 Public posts (`to: []') are shown whatever the filter."
   :type '(repeat string)
