@@ -52,6 +52,12 @@
 ;; `free-agent-bus--evil-bind-keys'.  `g' is not a deck key: it stays evil's
 ;; goto prefix in every deck buffer, and refreshing is automatic instead — the
 ;; log tails on its own watch, and status repaints on a timer.
+;;
+;; Marks: a post the attached human wrote renders in
+;; `free-agent-bus-post-mine-face', and a post with ancestry renders
+;; `↩ROOT LABEL' — the thread root's id and that root's own first line — in
+;; `free-agent-bus-thread-face'.  Both read the log's own fields, `from' and
+;; `thread'; a conversation is never inferred from timestamps or sender names.
 
 ;;; Code:
 
@@ -65,6 +71,27 @@
 (defgroup free-agent-bus-deck nil
   "Emacs surface for the free-agent bus log."
   :group 'applications)
+
+(defface free-agent-bus-post-mine-face
+  '((t :inherit (bold font-lock-function-name-face)))
+  "Face on the summary line of a post `free-agent-bus-name' wrote.
+This is the only thing that has to distinguish the attached human's own
+posts from the fleet's in a tail where both are just lines of text."
+  :group 'free-agent-bus-deck)
+
+(defface free-agent-bus-thread-face
+  '((t :inherit shadow))
+  "Face on a post's ancestry in the log tail: its thread root and that
+root's own label.  Quiet by default — the ancestry is context for the post
+beside it, not a second copy of the conversation."
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-log-thread-label-width 32
+  "Display width of the thread label the log tail puts after `↩ROOT'.
+The label is the thread root's own first line, so a reader knows which
+conversation a post joins without looking the id up."
+  :type 'integer
+  :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-executable "free-agent"
   "Executable used to read and scribe the bus.
@@ -280,36 +307,51 @@ it and no act in this deck depends on it."
   (let ((names (append to nil)))
     (if names (mapconcat #'identity names ",") "public")))
 
+(defun free-agent-bus--id-in-line (line)
+  "Return the post id LINE carries, or nil.
+Understands the log tail (`[id@ts]'), CLI views (`id from→to'), raw JSONL
+(`{\"id\":N'), and text mentioning `id=<n>'.  A rendered post usually carries
+`free-agent-bus-post-id' as a text property instead, which is cheaper and
+exact; this is what reads a line that carries no property."
+  (cond
+   ((string-match "\\`\\[\\([0-9]+\\)@" line) (string-to-number (match-string 1 line)))
+   ((string-match "\\`{\"id\":\\([0-9]+\\)" line) (string-to-number (match-string 1 line)))
+   ((string-match "\\`\\([0-9]+\\)[ \t]" line) (string-to-number (match-string 1 line)))
+   ((string-match "id=\\([0-9]+\\)" line) (string-to-number (match-string 1 line)))))
+
+(defun free-agent-bus--sender-in-line (line)
+  "Return the sender name LINE carries, or nil.
+Understands the same shapes `free-agent-bus--id-in-line' does: a raw JSONL
+line (\"from\"), a log-tail head line (`[id@ts] from→audience'), and a CLI
+view head line (`id from→audience')."
+  (or (and (string-match "\"from\"[ \t]*:[ \t]*\"\\([^\"]+\\)\"" line)
+           (match-string 1 line))
+      (and (string-match "\\`\\[[0-9]+@[^]]*\\][ \t]+\\([^ \t]+\\)→" line)
+           (match-string 1 line))
+      (and (string-match "\\`[0-9]+[ \t]+\\([^ \t]+\\)→" line)
+           (match-string 1 line))))
+
 (defun free-agent-bus--id-at-point ()
   "Return the post id on the current line, or nil.
-A status row carries its assignment id as a text property.  Otherwise this
-understands the log tail (`[id@ts]'), CLI views (`id from→to'), the thread
-view (raw JSONL), and text mentioning `id=<n>'."
+A status row, and now every post the deck renders itself, carries its id as a
+text property.  Otherwise this falls back to `free-agent-bus--id-in-line'."
   (or (get-text-property (point) 'free-agent-bus-post-id)
       (save-excursion
         (beginning-of-line)
         (or (get-text-property (point) 'free-agent-bus-post-id)
-            (cond
-             ((looking-at "\\[\\([0-9]+\\)@") (string-to-number (match-string 1)))
-             ((looking-at "{\"id\":\\([0-9]+\\)") (string-to-number (match-string 1)))
-             ((looking-at "\\([0-9]+\\)[ \t]") (string-to-number (match-string 1)))
-             ((re-search-forward "id=\\([0-9]+\\)" (line-end-position) t)
-              (string-to-number (match-string 1))))))))
+            (free-agent-bus--id-in-line
+             (buffer-substring-no-properties (point) (line-end-position)))))))
 
 (defun free-agent-bus--sender-at-point ()
   "Return the sender name on the current line, or nil.
-Understands the same shapes `free-agent-bus--id-at-point' does: a raw JSONL
-line (\"from\"), a log-tail head line (`[id@ts] from→audience'), and a CLI
-view head line (`id from→audience')."
-  (save-excursion
-    (beginning-of-line)
-    (let ((line (buffer-substring-no-properties (point) (line-end-position))))
-      (or (and (string-match "\"from\"[ \t]*:[ \t]*\"\\([^\"]+\\)\"" line)
-               (match-string 1 line))
-          (and (string-match "\\`\\[[0-9]+@[^]]*\\][ \t]+\\([^ \t]+\\)→" line)
-               (match-string 1 line))
-          (and (string-match "\\`[0-9]+[ \t]+\\([^ \t]+\\)→" line)
-               (match-string 1 line))))))
+A line the deck rendered carries `free-agent-bus-sender'; otherwise this falls
+back to `free-agent-bus--sender-in-line'."
+  (or (get-text-property (point) 'free-agent-bus-sender)
+      (save-excursion
+        (beginning-of-line)
+        (or (get-text-property (point) 'free-agent-bus-sender)
+            (free-agent-bus--sender-in-line
+             (buffer-substring-no-properties (point) (line-end-position)))))))
 
 ;;; Failures stay visible
 
@@ -510,6 +552,34 @@ clears; on failure the draft is kept and the error buffer is shown."
 (defvar-local free-agent-bus-view-depth 1
   "Cascade depth of this view: 0 dot, 1 one-line excerpt, 2 verbatim.")
 
+(defun free-agent-bus--decorate-view-line (line)
+  "Propertize one CLI view LINE for a reader.
+The id and the sender come from the CLI's own line shape — `id from→audience'
+or a raw JSONL frame — so a line that carries neither is returned verbatim and
+a view never invents a post.  A post the attached human wrote is faced here as
+it is in the log tail."
+  (let ((id (free-agent-bus--id-in-line line))
+        (from (free-agent-bus--sender-in-line line)))
+    (if (or (null id) (null from))
+        line
+      (let ((text (copy-sequence line))
+            (mine (string= from free-agent-bus-name)))
+        (add-text-properties 0 (length text)
+                             (list 'free-agent-bus-post-id id
+                                   'free-agent-bus-sender from
+                                   'free-agent-bus-mine (and mine t)
+                                   'help-echo (format "RET: open the thread of post %s" id))
+                             text)
+        (when mine
+          (add-text-properties 0 (length text)
+                               (list 'face 'free-agent-bus-post-mine-face)
+                               text))
+        text))))
+
+(defun free-agent-bus--decorate-view-output (output)
+  "Propertize a CLI view's OUTPUT line by line."
+  (mapconcat #'free-agent-bus--decorate-view-line (split-string output "\n") "\n"))
+
 (defun free-agent-bus--view-refresh ()
   "Re-run this view's CLI command and rerender the buffer.
 A failing command is rendered into the buffer with its exit status; the
@@ -531,7 +601,7 @@ buffer is never left silently stale."
                           'face 'bold))
       (insert (if (string-empty-p output)
                   (propertize "(no rows)\n" 'face 'shadow)
-                (concat output "\n")))
+                (concat (free-agent-bus--decorate-view-output output) "\n")))
       (when (/= status 0)
         (insert (propertize (format "\n⛔ free-agent bus %s exited %d\n" sub status) 'face 'error))))
     (set-buffer-modified-p nil)))
@@ -1011,7 +1081,7 @@ not seen."
       (insert (propertize (free-agent-bus-inbox--header) 'face 'bold))
       (insert (if (string-empty-p output)
                   (propertize "(no unread mail)\n" 'face 'shadow)
-                (concat output "\n")))
+                (concat (free-agent-bus--decorate-view-output output) "\n")))
       (when (/= status 0)
         (insert (propertize (format "\n⛔ free-agent bus inbox exited %d\n" status) 'face 'error))))
     (set-buffer-modified-p nil)))
@@ -1200,37 +1270,119 @@ post naming one of the filter names.  There is no broadcast token."
         (null names)
         (seq-intersection names filter))))
 
+(defvar-local free-agent-bus-log--posts nil
+  "Hash table of post id -> plist (:from :to :thread :label) for this buffer.
+Filled from the log text as it is rendered, so ancestry resolves to a thread
+root and that root's label without a CLI call per line; an appended post
+inherits an index that already covers the prefix.")
+
+(defun free-agent-bus-log--index (obj)
+  "Record parsed post OBJ for ancestry lookup.  Returns OBJ."
+  (when-let ((id (alist-get 'id obj)))
+    (unless free-agent-bus-log--posts
+      (setq free-agent-bus-log--posts (make-hash-table :test 'eq)))
+    (puthash id
+             (list :from (alist-get 'from obj)
+                   :to (append (alist-get 'to obj) nil)
+                   :thread (append (alist-get 'thread obj) nil)
+                   :label (free-agent-bus-status--first-useful-line
+                           (alist-get 'body obj)))
+             free-agent-bus-log--posts))
+  obj)
+
+(defun free-agent-bus-log--thread-root (id)
+  "Return the root post id of ID's thread, or ID itself when it is a root.
+Only the log's own `thread' field is followed — never a timestamp, never a
+sender name — and a cycle in that field stops the walk where it repeats."
+  (let ((current id)
+        (seen (list id))
+        (next nil))
+    (while (and (setq next (car (plist-get (gethash current free-agent-bus-log--posts)
+                                           :thread)))
+                (not (memq next seen)))
+      (setq current next)
+      (push next seen))
+    current))
+
+(defun free-agent-bus-log--ancestry (obj)
+  "Ancestry text for parsed post OBJ: `↩ROOT LABEL', or the empty string.
+ROOT is the thread root's id and LABEL that root's own first line, so the tail
+says which conversation a post joins without the reader looking an id up.  A
+post with no ancestry renders no ancestry text at all."
+  (if-let ((thread (append (alist-get 'thread obj) nil)))
+      (let* ((root (free-agent-bus-log--thread-root (alist-get 'id obj)))
+             (label (plist-get (gethash root free-agent-bus-log--posts) :label)))
+        (concat "↩" (number-to-string root)
+                (if (or (null label) (string-empty-p label))
+                    ""
+                  (concat " "
+                          (truncate-string-to-width
+                           label free-agent-bus-log-thread-label-width nil nil "…")))))
+    ""))
+
 (defun free-agent-bus-log--format-line (line)
-  "Format one raw log LINE at the buffer's cascade depth.
+  "Format one raw log LINE at the buffer's cascade depth, carrying properties.
 0 = dot, 1 = one-line excerpt, 2 = verbatim body.  Unparseable lines are
 returned as-is so the runner sees exactly what is in the file, and a post
-whose audience does not match is dropped."
+whose audience does not match is dropped.
+
+A rendered post carries `free-agent-bus-post-id', `free-agent-bus-sender' and
+`free-agent-bus-thread-root'; a post the attached human wrote also carries
+`free-agent-bus-mine', with `free-agent-bus-post-mine-face' on its summary (the
+head line, and at depth 1 the excerpt beside it), and its ancestry is faced
+with `free-agent-bus-thread-face'."
   (let ((obj (ignore-errors (json-read-from-string line))))
     (cond
      ((null obj) line)
-     ((not (free-agent-bus-log--shows-p (alist-get 'to obj))) nil)
      (t
-      (let* ((id (alist-get 'id obj))
-             (ts (alist-get 'ts obj))
-             (from (alist-get 'from obj))
-             (audience (free-agent-bus--audience-string (alist-get 'to obj)))
-             (thread (append (alist-get 'thread obj) nil))
-             (body (or (alist-get 'body obj) ""))
-             (stamped (if free-agent-bus-log-show-timestamps
-                          (format "[%s@%s]" id ts)
-                        (format "[%s]" id)))
-             (depth free-agent-bus-log-depth))
-        (pcase depth
-          (0 (format "%s %s→%s%s" stamped from audience
-                     (if thread " ↩" "")))
-          (1 (format "%s %s→%s%s %s" stamped from audience
-                     (if thread " ↩" "")
-                     (car (split-string body "\n"))))
-          (_ (format "%s %s→%s%s\n%s"
-                     stamped from audience
-                     (if thread " ↩" "")
-                     (mapconcat (lambda (l) (concat "│ " l))
-                                (split-string body "\n") "\n")))))))))
+      ;; Indexed before the filter: a post the filter hides can still be the
+      ;; thread root that labels the posts the filter shows.
+      (free-agent-bus-log--index obj)
+      (if (not (free-agent-bus-log--shows-p (alist-get 'to obj)))
+          nil
+        (let* ((id (alist-get 'id obj))
+               (ts (alist-get 'ts obj))
+               (from (alist-get 'from obj))
+               (audience (free-agent-bus--audience-string (alist-get 'to obj)))
+               (ancestry (free-agent-bus-log--ancestry obj))
+               (body (or (alist-get 'body obj) ""))
+               (mine (and (string= from free-agent-bus-name) t))
+               (root (if (string-empty-p ancestry)
+                         id
+                       (free-agent-bus-log--thread-root id)))
+               (stamped (if free-agent-bus-log-show-timestamps
+                            (format "[%s@%s]" id ts)
+                          (format "[%s]" id)))
+               (depth free-agent-bus-log-depth)
+               (prefix (concat stamped " " from "→" audience))
+               (head (concat prefix
+                             (if (string-empty-p ancestry) "" (concat " " ancestry))))
+               (ancestry-start (1+ (length prefix)))
+               (text (pcase depth
+                       (0 head)
+                       (1 (concat head
+                                  (if (string-empty-p ancestry) " " " · ")
+                                  (car (split-string body "\n"))))
+                       (_ (concat head "\n"
+                                  (mapconcat (lambda (l) (concat "│ " l))
+                                             (split-string body "\n") "\n"))))))
+          (add-text-properties
+           0 (length text)
+           (list 'free-agent-bus-post-id id
+                 'free-agent-bus-sender from
+                 'free-agent-bus-thread-root root
+                 'free-agent-bus-mine mine
+                 'help-echo (format "RET: open the thread of post %s" id))
+           text)
+          (when mine
+            (add-text-properties 0 (if (= depth 1) (length text) (length head))
+                                 (list 'face 'free-agent-bus-post-mine-face)
+                                 text))
+          (unless (string-empty-p ancestry)
+            (add-text-properties ancestry-start (+ ancestry-start (length ancestry))
+                                 (list 'face 'free-agent-bus-thread-face)
+                                 text))
+          text))))))
 
 (defvar-local free-agent-bus-log--raw-offset nil
   "Byte offset of the log snapshot used for the current render.")
@@ -1310,7 +1462,7 @@ a full rebuild."
         (unless incremental
           (let* ((raw (free-agent-bus-log--read-file 0 size))
                  (contents (free-agent-bus-log--format-lines raw)))
-            (when (or force (not (string= contents (buffer-string))))
+            (when (or force (not (equal-including-properties contents (buffer-string))))
               (free-agent-bus-log--replace-contents contents))
             (setq free-agent-bus-log--raw-offset size
                   free-agent-bus-log--newline-complete
