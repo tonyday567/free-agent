@@ -354,10 +354,14 @@ it and no act in this deck depends on it."
       (format "not attached: run `%s bus attach %s --root %s'"
               free-agent-bus-executable free-agent-bus-name root)))))
 
-(defun free-agent-bus--audience-string (to)
-  "Render a post's TO field (a vector or list) as an audience string."
+(defun free-agent-bus--audience-string (to &optional when-empty)
+  "Render a post's TO field (a vector or list) as an audience string.
+An empty TO on a post is `public', which is the CLI's own spelling for one.
+WHEN-EMPTY is what an empty audience says for a caller describing something that
+is not a post — a draft that has not been addressed says `none', because nothing
+has been chosen, and calling that public would report a send nobody made."
   (let ((names (append to nil)))
-    (if names (mapconcat #'identity names ",") "public")))
+    (if names (mapconcat #'identity names ",") (or when-empty "public"))))
 
 (defun free-agent-bus--id-in-line (line)
   "Return the post id LINE carries, or nil.
@@ -582,10 +586,13 @@ id, so replying into a task's thread is how a CLAIM or DONE is filed."
   (message "Thread: %s" (or free-agent-bus-post-thread "root post")))
 
 (defun free-agent-bus--current-audience ()
-  "Audience of the next post as a string, for the mode line and messages."
-  (cond (free-agent-bus-post-public "public")
-        (free-agent-bus-post-to (mapconcat #'identity free-agent-bus-post-to ","))
-        (t "none")))
+  "Audience of the next post as a string, for the mode line and messages.
+Three outcomes from two branches: the public flag, then the same renderer the
+log uses, with `none' as the empty case — an unaddressed draft is not a public
+post, and the mode line has to say so before the send refuses it."
+  (if free-agent-bus-post-public
+      "public"
+    (free-agent-bus--audience-string free-agent-bus-post-to "none")))
 
 (defun free-agent-bus--receipt-line (output)
   "Turn the CLI's stamped post JSON into a one-line receipt."
