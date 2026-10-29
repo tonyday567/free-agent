@@ -42,10 +42,16 @@
 ;;   SPC y q                 close deck buffers
 ;; In *free-agent-bus-log* and the view buffers:
 ;;   RET  open the thread of the post at point      TAB  cycle cascade depth
-;;   g    refresh        q  quit window      t/f  timestamps / filter (log only)
+;;   t/f  timestamps / filter (log only)            q  quit the window
 ;; In *free-agent-bus-inbox*:
 ;;   m    mark read (bus inbox NAME --mark-read)  r  reply into the thread at
-;;   g    refresh (never marks)  RET/t  thread     point (composition buffer)
+;;   RET/t  thread at point                       point (composition buffer)
+;;
+;; evil's state maps outrank a plain buffer-local major-mode map, so every key
+;; above is installed a second time through evil's auxiliary keymaps in
+;; `free-agent-bus--evil-bind-keys'.  `g' is not a deck key: it stays evil's
+;; goto prefix in every deck buffer, and refreshing is automatic instead — the
+;; log tails on its own watch, and status repaints on a timer.
 
 ;;; Code:
 
@@ -145,6 +151,15 @@ holds the runner's board, or use `SPC y r' for the READY view instead."
   "Seconds between re-runs of visible READY and thread CLI views.
 Status is message-driven instead.  The CLI reads the log and writes no cursor;
 a paused view costs nothing."
+  :type 'number
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-status-refresh-interval 5.0
+  "Seconds between repaints of a live status buffer.
+The log watch covers a new message; this timer covers the state a seat changes
+without appending one — a cursor write, a heartbeat, a settlement, a failed
+send — which the watch can never see.  One `bus status --live' runs per tick,
+and the timer lasts exactly as long as the status buffer."
   :type 'number
   :group 'free-agent-bus-deck)
 
@@ -594,6 +609,11 @@ TITLE names the view; the header carries root, identity, and freshness."
 (defvar-local free-agent-bus-status--refresh-timer nil
   "Debounce timer for status file notifications.")
 
+(defvar-local free-agent-bus-status--periodic-timer nil
+  "Periodic repaint timer for this status buffer.
+Status repaints on the log watch and on this timer, so state that appends no
+log message still reaches the page.")
+
 (defvar-local free-agent-bus-status--processes nil
   "Usage collectors owned by this status buffer.")
 
@@ -796,9 +816,10 @@ TITLE names the view; the header carries root, identity, and freshness."
         (when (eq (car-safe session) 'hermes)
           (free-agent-bus-status--collect seat (cdr session)))))))
 
-(defun free-agent-bus-status-refresh ()
-  "Refresh status and assignment labels now; usage remains asynchronous."
-  (interactive)
+(defun free-agent-bus-status--refresh-model ()
+  "Re-read the live rows and repaint.
+Usage stays asynchronous: the caller decides whether to start collectors, so a
+periodic repaint does not spawn a usage process every tick."
   (free-agent-bus--check-root)
   (let* ((result (free-agent-bus--cli "status" "--live" "--depth" "1"))
          (status (car result))
@@ -824,8 +845,13 @@ TITLE names the view; the header carries root, identity, and freshness."
                         (unless (zerop status)
                           (list (list :text (format "⛔ free-agent bus status exited %d" status)
                                       :seat nil :label nil :task-id nil)))))
-    (free-agent-bus-status--render)
-    (free-agent-bus-status--collect-usage)))
+    (free-agent-bus-status--render)))
+
+(defun free-agent-bus-status-refresh ()
+  "Refresh status and assignment labels now; usage remains asynchronous."
+  (interactive)
+  (free-agent-bus-status--refresh-model)
+  (free-agent-bus-status--collect-usage))
 
 (defun free-agent-bus-status--refresh-soon ()
   "Coalesce file-notification events into one status refresh."
@@ -841,6 +867,28 @@ TITLE names the view; the header carries root, identity, and freshness."
                      (ignore-errors (free-agent-bus-status-refresh)))))
                (current-buffer))))
 
+(defun free-agent-bus-status--start-periodic ()
+  "Repaint this status buffer on a timer.
+The log watch fires on a new message; this covers the state that appends no
+log message at all.  The timer is owned by the buffer, not the window, and is
+cancelled by `free-agent-bus-status-stop' when the buffer is killed."
+  (free-agent-bus-status--stop-periodic)
+  (setq-local free-agent-bus-status--periodic-timer
+              (run-with-timer
+               free-agent-bus-status-refresh-interval
+               free-agent-bus-status-refresh-interval
+               (lambda (buf)
+                 (when (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (ignore-errors (free-agent-bus-status--refresh-model)))))
+               (current-buffer))))
+
+(defun free-agent-bus-status--stop-periodic ()
+  "Cancel this status buffer's periodic repaint timer."
+  (when (timerp free-agent-bus-status--periodic-timer)
+    (cancel-timer free-agent-bus-status--periodic-timer))
+  (setq-local free-agent-bus-status--periodic-timer nil))
+
 (defun free-agent-bus-status-stop-watch ()
   "Remove the status log watch and its pending debounce timer."
   (when free-agent-bus-status--refresh-timer
@@ -851,7 +899,10 @@ TITLE names the view; the header carries root, identity, and freshness."
     (setq-local free-agent-bus-status--file-watch nil)))
 
 (defun free-agent-bus-status-start-watch ()
-  "Refresh status on log messages, with no periodic fallback timer."
+  "Refresh status on log messages and on a periodic repaint.
+The log watch covers a new message; `free-agent-bus-status-refresh-interval'
+covers the state that appends no log message.  file-notify is preferred but
+never required."
   (free-agent-bus-status-stop-watch)
   (condition-case nil
       (let ((buf (current-buffer)))
@@ -864,11 +915,12 @@ TITLE names the view; the header carries root, identity, and freshness."
                            (free-agent-bus-status--refresh-soon)))))))
     (error
      (setq-local free-agent-bus-status--file-watch nil)
-     (message "free-agent status: file-notify unavailable; use g to refresh"))))
+     (message "free-agent status: file-notify unavailable; repainting on a timer"))))
 
 (defun free-agent-bus-status-stop ()
-  "Remove the status watch and cancel every collector it owns."
+  "Remove the status watch, stop its repaint timer, and cancel its collectors."
   (free-agent-bus-status-stop-watch)
+  (free-agent-bus-status--stop-periodic)
   (dolist (proc free-agent-bus-status--processes)
     (process-put proc 'free-agent-bus-cancelled t)
     (let ((key (process-get proc 'free-agent-bus-key)))
@@ -882,13 +934,16 @@ TITLE names the view; the header carries root, identity, and freshness."
   (unless (derived-mode-p 'free-agent-bus-status-mode)
     (free-agent-bus-status-mode))
   (free-agent-bus-status-start-watch)
+  (free-agent-bus-status--start-periodic)
   (free-agent-bus-status-refresh))
 
 ;;;###autoload
 (defun free-agent-bus-status ()
   "Open live status with prompt usage and latest-assignment labels.
-Log messages refresh the view; Hermes usage collection is asynchronous and
-cached.  No cursor is written and no model is invoked."
+Log messages refresh the view, and a periodic repaint covers the state that
+appends no log message, so the page does not go stale between posts.  Hermes
+usage collection is asynchronous and cached.  No cursor is written and no
+model is invoked."
   (interactive)
   (free-agent-bus--check-root)
   (let ((buf (get-buffer-create free-agent-bus-status-buffer-name)))
@@ -1391,27 +1446,48 @@ One frame, one rail: notice live work, read the evidence, post the next act."
     (when-let ((b (get-buffer buf)))
       (kill-buffer b))))
 
-;; evil normal state shadows the deck's letters — m is evil-set-marker, r is
-;; evil-replace, t is evil-find-char-to — so a plain buffer-local map never
-;; sees them.  An evil-define-key on the mode keymap installs an evil
-;; auxiliary keymap for that mode, so the mode's own letters win inside its
-;; buffer while evil normal state, the state's global map and the leader stay
-;; untouched.  evil-define-key* is the immediate form of evil-define-key, used
-;; under `with-eval-after-load' so evil stays out of the deck's compile- and
-;; load-time dependencies; the aux keymap is created for a symbol keymap whose
-;; value is set, which is the case here.
-;; g is deliberately not bound: it lives in an evil intercept layer that no
-;; buffer-local map reaches, so it stays evil goto.
+;; evil's state maps shadow the deck's own keys: m is evil-set-marker, r is
+;; evil-replace, t is evil-find-char-to, RET is evil-ret, q is evil-record-macro
+;; (Doom's override layer takes C-<return> in normal and visual state), so a
+;; plain buffer-local major-mode map never sees them.  An evil-define-key on the
+;; mode keymap installs an evil auxiliary keymap for that mode, and the
+;; auxiliary map is consulted above the state maps and above the override
+;; layer, so the mode's own keys win inside its buffer while evil, its state
+;; maps and the leader stay untouched.  evil-define-key* is the immediate form
+;; of evil-define-key, used under `with-eval-after-load' so evil stays out of
+;; the deck's compile- and load-time dependencies; the aux keymap is created for
+;; a symbol keymap whose value is set, which is the case here.
+;;
+;; Every documented key in this file appears in this function, so the tables in
+;; the header comment and in buff/emacs.md describe what the deck actually
+;; does.  `g' is deliberately absent: it lives in an evil intercept layer that
+;; only an aux keymap could shadow, and it is worth more as evil's goto prefix
+;; than as a refresh key — refreshing is automatic (log watch, status timer).
 (declare-function evil-define-key* "evil" (state keymap key def &rest bindings))
 
 (defun free-agent-bus--evil-bind-keys ()
-  "Give the deck's modes their letter keys back in evil normal state."
+  "Give the deck's modes their own keys back under evil.
+Each binding mirrors the mode's own map; the aux keymaps are what make those
+keys reachable while evil's state maps are active."
+  (evil-define-key* 'normal free-agent-bus-post-mode-map
+    (kbd "C-<return>") #'free-agent-bus-send)
+  (evil-define-key* 'visual free-agent-bus-post-mode-map
+    (kbd "C-<return>") #'free-agent-bus-send)
+  (evil-define-key* 'normal free-agent-bus-log-mode-map
+    (kbd "t") #'free-agent-bus-log-toggle-timestamps
+    (kbd "f") #'free-agent-bus-log-set-filter
+    (kbd "RET") #'free-agent-bus-thread-at-point
+    (kbd "q") #'quit-window)
+  (evil-define-key* 'normal free-agent-bus-view-mode-map
+    (kbd "t") #'free-agent-bus-thread-at-point
+    (kbd "RET") #'free-agent-bus-thread-at-point)
   (evil-define-key* 'normal free-agent-bus-inbox-mode-map
     (kbd "m") #'free-agent-bus-inbox-mark-read
     (kbd "r") #'free-agent-bus-reply-at-point
-    (kbd "t") #'free-agent-bus-thread-at-point)
-  (evil-define-key* 'normal free-agent-bus-view-mode-map
-    (kbd "t") #'free-agent-bus-thread-at-point))
+    (kbd "t") #'free-agent-bus-thread-at-point
+    (kbd "RET") #'free-agent-bus-thread-at-point)
+  (evil-define-key* 'normal free-agent-bus-status-mode-map
+    (kbd "q") #'kill-current-buffer))
 
 (with-eval-after-load 'evil (free-agent-bus--evil-bind-keys))
 
