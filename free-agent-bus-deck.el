@@ -383,27 +383,31 @@ view head line (`id from→audience')."
       (and (string-match "\\`[0-9]+[ \t]+\\([^ \t]+\\)→" line)
            (match-string 1 line))))
 
-(defun free-agent-bus--id-at-point ()
-  "Return the post id on the current line, or nil.
-A status row, and now every post the deck renders itself, carries its id as a
-text property.  Otherwise this falls back to `free-agent-bus--id-in-line'."
-  (or (get-text-property (point) 'free-agent-bus-post-id)
+(defun free-agent-bus--field-at-point (property fallback)
+  "Return the field PROPERTY carries at point, or FALLBACK's parse of the line.
+A line the deck rendered carries its fields as text properties; a line it did
+not carries none, so FALLBACK is called with the line as a string.  The property
+is read at point and then at the beginning of the line, because a post's own
+rendered text and its continuation lines differ in where the property starts."
+  (or (get-text-property (point) property)
       (save-excursion
         (beginning-of-line)
-        (or (get-text-property (point) 'free-agent-bus-post-id)
-            (free-agent-bus--id-in-line
-             (buffer-substring-no-properties (point) (line-end-position)))))))
+        (or (get-text-property (point) property)
+            (funcall fallback
+                     (buffer-substring-no-properties (point) (line-end-position)))))))
+
+(defun free-agent-bus--id-at-point ()
+  "Return the post id on the current line, or nil.
+A status row, and every post the deck renders itself, carries its id as a text
+property; `free-agent-bus--id-in-line' reads it back from the text when the line
+came from somewhere that does not set properties."
+  (free-agent-bus--field-at-point 'free-agent-bus-post-id #'free-agent-bus--id-in-line))
 
 (defun free-agent-bus--sender-at-point ()
   "Return the sender name on the current line, or nil.
-A line the deck rendered carries `free-agent-bus-sender'; otherwise this falls
-back to `free-agent-bus--sender-in-line'."
-  (or (get-text-property (point) 'free-agent-bus-sender)
-      (save-excursion
-        (beginning-of-line)
-        (or (get-text-property (point) 'free-agent-bus-sender)
-            (free-agent-bus--sender-in-line
-             (buffer-substring-no-properties (point) (line-end-position)))))))
+A line the deck rendered carries `free-agent-bus-sender';
+`free-agent-bus--sender-in-line' reads the name back from the text otherwise."
+  (free-agent-bus--field-at-point 'free-agent-bus-sender #'free-agent-bus--sender-in-line))
 
 ;;; Failures stay visible
 
