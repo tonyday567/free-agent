@@ -174,15 +174,22 @@ holds the runner's board, or use `SPC y r' for the READY view instead."
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-log-refresh-interval 1.0
-  "Seconds between log refreshes when file-notify is unavailable."
-  :type 'number
+  "Seconds between log refreshes when file-notify is unavailable.
+A value `run-with-timer' cannot repeat is refused where that fallback timer is
+armed, because the failure is silent: the tail would refresh once and then never
+again.  See `free-agent-bus-status-refresh-interval' for the measurement."
+  :type 'number'
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-auto-refresh-interval 5.0
   "Seconds between re-runs of visible READY and thread CLI views.
 Status is message-driven instead.  The CLI reads the log and writes no cursor;
-a paused view costs nothing."
-  :type 'number
+a paused view costs nothing.
+
+A value `run-with-timer' cannot repeat is refused where the timer is started,
+for the same reason as `free-agent-bus-status-refresh-interval': the views would
+refresh once and then quietly stop being fresh."
+  :type 'number'
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-status-refresh-interval 5.0
@@ -766,12 +773,16 @@ buffer is never left silently stale."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'free-agent-bus-thread-at-point)
     (define-key map (kbd "<tab>") #'free-agent-bus-cycle-depth)
+    ;; TAB is the C-i event: a terminal frame sends it for the Tab key, where a
+    ;; GUI frame sends <tab>.  Both names, or the key is dead in a terminal.
+    (define-key map (kbd "TAB") #'free-agent-bus-cycle-depth)
     (define-key map (kbd "t") #'free-agent-bus-thread-at-point)
     map)
   "Keymap for CLI-backed bus views.")
 
 (define-key free-agent-bus-view-mode-map (kbd "RET") #'free-agent-bus-thread-at-point)
 (define-key free-agent-bus-view-mode-map (kbd "<tab>") #'free-agent-bus-cycle-depth)
+(define-key free-agent-bus-view-mode-map (kbd "TAB") #'free-agent-bus-cycle-depth)
 
 (define-derived-mode free-agent-bus-view-mode special-mode "FAB-View"
   "Major mode for CLI-backed bus views (status, READY, thread).
@@ -1299,8 +1310,16 @@ its sentinel refreshes the buffer and waits again.  No timer, no polling."
     (define-key map (kbd "m") #'free-agent-bus-inbox-mark-read)
     (define-key map (kbd "g") #'free-agent-bus-inbox-refresh)
     (define-key map (kbd "<tab>") #'free-agent-bus-cycle-depth)
+    (define-key map (kbd "TAB") #'free-agent-bus-cycle-depth)
     map)
   "Keymap for `free-agent-bus-inbox-mode'.")
+
+;; The inbox map has no other top-level re-bind, and a `defvar' does not
+;; overwrite a live map, so this one line is what keeps the key this slice adds
+;; reachable after a reload rather than only after a restart.  The view and log
+;; maps carry their own re-binds, and the status map lives off the view map's
+;; parent, so those four surfaces come back on their own.
+(define-key free-agent-bus-inbox-mode-map (kbd "TAB") #'free-agent-bus-cycle-depth)
 
 (define-derived-mode free-agent-bus-inbox-mode special-mode "FAB-Inbox"
   "Major mode for the human's unread-mail buffer.
@@ -1363,12 +1382,19 @@ The header carries the explicit attached line.  Freshness waits on
       (free-agent-bus--stop-auto-refresh))))
 
 (defun free-agent-bus--start-auto-refresh ()
-  "Start the visible-view refresh timer, if it is not already running."
+  "Start the visible-view refresh timer, if it is not already running.
+Refused, rather than armed, when the interval is not a positive number:
+`run-with-timer' would take a timer that fires once and never repeats, so the
+views would refresh once and then quietly stop being fresh — the same silent
+failure the status timer guards against."
   (unless free-agent-bus--auto-timer
-    (setq free-agent-bus--auto-timer
-          (run-with-timer free-agent-bus-auto-refresh-interval
-                          free-agent-bus-auto-refresh-interval
-                          #'free-agent-bus--auto-refresh-buffers))))
+    (if (free-agent-bus--interval-p free-agent-bus-auto-refresh-interval)
+        (setq free-agent-bus--auto-timer
+              (run-with-timer free-agent-bus-auto-refresh-interval
+                              free-agent-bus-auto-refresh-interval
+                              #'free-agent-bus--auto-refresh-buffers))
+      (message "free-agent-bus: auto-refresh interval %S cannot repeat; visible views will not refresh themselves"
+               free-agent-bus-auto-refresh-interval))))
 
 (defun free-agent-bus--stop-auto-refresh ()
   "Stop the visible-view refresh timer."
@@ -1390,11 +1416,13 @@ The header carries the explicit attached line.  Freshness waits on
     (define-key map (kbd "f") #'free-agent-bus-log-set-filter)
     (define-key map (kbd "RET") #'free-agent-bus-thread-at-point)
     (define-key map (kbd "<tab>") #'free-agent-bus-cycle-depth)
+    (define-key map (kbd "TAB") #'free-agent-bus-cycle-depth)
     map)
   "Keymap for `free-agent-bus-log-mode'.")
 
 (define-key free-agent-bus-log-mode-map (kbd "RET") #'free-agent-bus-thread-at-point)
 (define-key free-agent-bus-log-mode-map (kbd "<tab>") #'free-agent-bus-cycle-depth)
+(define-key free-agent-bus-log-mode-map (kbd "TAB") #'free-agent-bus-cycle-depth)
 
 (define-derived-mode free-agent-bus-log-mode text-mode "FreeAgentBus-Log"
   "Major mode for the bus log tail.
@@ -1697,7 +1725,10 @@ has no special meaning; name it explicitly to see legacy broadcast lines."
 
 (defun free-agent-bus-log-start-watch ()
   "Start watching the log file.
-Prefer file-notify events; fall back to a polling timer if unavailable."
+Prefer file-notify events; fall back to a polling timer if unavailable.  The
+fallback timer is refused, rather than armed, when the interval is not a
+positive number: it would fire once and never again, so the tail would stop
+refreshing itself without saying so."
   (free-agent-bus-log-stop-watch)
   (condition-case nil
       (setq free-agent-bus-log--file-watch
@@ -1706,8 +1737,11 @@ Prefer file-notify events; fall back to a polling timer if unavailable."
                                    (lambda (_event)
                                      (free-agent-bus-log--refresh-soon))))
     (error
-     (setq free-agent-bus-log--timer
-           (run-with-timer 0 free-agent-bus-log-refresh-interval #'free-agent-bus-log-refresh)))))
+     (if (free-agent-bus--interval-p free-agent-bus-log-refresh-interval)
+         (setq free-agent-bus-log--timer
+               (run-with-timer 0 free-agent-bus-log-refresh-interval #'free-agent-bus-log-refresh))
+       (message "free-agent-bus: file-notify is unavailable and the log-refresh interval %S cannot repeat; the tail will refresh only when you refresh it"
+                free-agent-bus-log-refresh-interval)))))
 
 (defun free-agent-bus-log-stop-watch ()
   "Stop watching the log file."
