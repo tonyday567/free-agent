@@ -56,7 +56,7 @@ import Free.Agent.Gateway
   )
 import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesCli, hostResponse, processHost)
 import Free.Agent.Refresh (preserveForRefresh, refreshDue, refreshRequestPath, writeRefreshRequest)
-import Free.Agent.Usage (readHermesUsage)
+import Free.Agent.Usage (readHermesUsage, readUsageIdentity, renderUsageIdentity)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (getExecutablePath, lookupEnv)
@@ -73,9 +73,15 @@ data Command
   = AgentCmd Int Backend
   | BusCmd BusCommand
   | StatusCmd FilePath (Maybe NominalDiffTime) Bool Depth
-  | UsageCmd FilePath
+  | UsageCmd HermesUsageSource
   | RefreshCmd Int Int HermesConfig
   | RefreshChildCmd Int Int (Maybe FilePath) HermesConfig
+  deriving (Show)
+
+-- | Existing session-file measurement or an explicit one-shot usage report.
+data HermesUsageSource
+  = HermesSessionFile FilePath
+  | HermesUsageFile FilePath
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -193,7 +199,7 @@ commandParser =
               ( subparser
                   ( command
                       "hermes"
-                      (info (UsageCmd <$> argument str (metavar "SESSION_FILE") <**> helper) (progDesc "Latest-prompt tokens for a Hermes session file"))
+                      (info (UsageCmd <$> hermesUsageSourceParser <**> helper) (progDesc "Latest-prompt tokens or one-shot C/F/O identity for Hermes"))
                   )
                   <**> helper
               )
@@ -238,6 +244,17 @@ commandParser =
             [(n, "")] -> Right (fromInteger n :: NominalDiffTime)
             _ -> Left ("expected a whole number of seconds, got: " ++ s)
 
+hermesUsageSourceParser :: Parser HermesUsageSource
+hermesUsageSourceParser =
+  (HermesSessionFile <$> argument str (metavar "SESSION_FILE"))
+    <|> ( HermesUsageFile
+            <$> strOption
+              ( long "usage-file"
+                  <> metavar "PATH"
+                  <> help "Read C/F/O from Hermes -z --usage-file; context history is reported unavailable"
+              )
+        )
+
 opts :: ParserInfo Command
 opts =
   info
@@ -259,10 +276,15 @@ main = do
     AgentCmd budget backend -> runBackend budget backend
     BusCmd busCmd -> runBusCommand busCmd
     StatusCmd root mthreshold live depth -> runStatus root (fromMaybe 900 mthreshold) live depth
-    UsageCmd sessionFile ->
-      readHermesUsage sessionFile >>= \case
-        Left err -> TIO.putStrLn ("🔴 " <> err) >> exitFailure
-        Right (sid, tokens) -> TIO.putStrLn ("🟢 session=" <> sid <> " prompt_tokens=" <> T.pack (show tokens))
+    UsageCmd source -> case source of
+      HermesSessionFile sessionFile ->
+        readHermesUsage sessionFile >>= \case
+          Left err -> TIO.putStrLn ("🔴 " <> err) >> exitFailure
+          Right (sid, tokens) -> TIO.putStrLn ("🟢 session=" <> sid <> " prompt_tokens=" <> T.pack (show tokens))
+      HermesUsageFile usageFile ->
+        readUsageIdentity usageFile >>= \case
+          Left err -> TIO.putStrLn ("🔴 " <> err) >> exitFailure
+          Right identity -> TIO.putStr (renderUsageIdentity identity)
     RefreshCmd budget threshold cfg -> runRefreshSupervisor budget threshold cfg
     RefreshChildCmd budget threshold note cfg -> runHermesAuto (Just threshold) note budget cfg
 
