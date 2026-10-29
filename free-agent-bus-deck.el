@@ -58,6 +58,9 @@
 ;; `↩ROOT LABEL' — the thread root's id and that root's own first line — in
 ;; `free-agent-bus-thread-face'.  Both read the log's own fields, `from' and
 ;; `thread'; a conversation is never inferred from timestamps or sender names.
+;; The log tail indexes posts as it renders them; a view or the inbox, which has
+;; no tail, reads the log once per refresh (`free-agent-bus-log--read-index')
+;; and adds the same mark to its own lines.
 
 ;;; Code:
 
@@ -552,33 +555,64 @@ clears; on failure the draft is kept and the error buffer is shown."
 (defvar-local free-agent-bus-view-depth 1
   "Cascade depth of this view: 0 dot, 1 one-line excerpt, 2 verbatim.")
 
-(defun free-agent-bus--decorate-view-line (line)
-  "Propertize one CLI view LINE for a reader.
-The id and the sender come from the CLI's own line shape — `id from→audience'
-or a raw JSONL frame — so a line that carries neither is returned verbatim and
-a view never invents a post.  A post the attached human wrote is faced here as
-it is in the log tail."
+(defun free-agent-bus--view-head (line)
+  "Return (ID . HEAD-END) for a CLI view line, or nil.
+A view line's head is `id from→audience'.  A name may carry the READY view's
+` (human)' label, so the audience is read as names rather than as one token;
+HEAD-END is the position just after it, where an excerpt would begin."
+  (when (string-match
+         (concat "\\`\\([0-9]+\\)[ \t]+[^ \t]+\\(?:[ \t]+(human)\\)?→"
+                 "\\(?:[^ ,\t]+\\(?:[ \t]+(human)\\)?"
+                 "\\(?:,[^ ,\t]+\\(?:[ \t]+(human)\\)?\\)*\\)")
+         line)
+    (cons (string-to-number (match-string 1 line)) (match-end 0))))
+
+(defun free-agent-bus--decorate-view-line (line posts)
+  "Propertize one CLI view LINE against index POSTS.
+An ancestry mark is added in both shapes a view renders: `↩ROOT LABEL' after a
+head's audience, with a ` · ' before its excerpt — the shape the log tail uses —
+and after a raw frame (depth 2), outside its braces, so the frame itself stays
+exact.  A line carrying neither an id nor a sender is returned verbatim, so a
+view never invents a post."
   (let ((id (free-agent-bus--id-in-line line))
         (from (free-agent-bus--sender-in-line line)))
     (if (or (null id) (null from))
         line
-      (let ((text (copy-sequence line))
-            (mine (string= from free-agent-bus-name)))
+      (let* ((head (free-agent-bus--view-head line))
+             (root (and (gethash id posts)
+                        (free-agent-bus-log--thread-root id posts)))
+             (ancestry (free-agent-bus-log--ancestry-for id posts))
+             (ancestry-start (if head (1+ (cdr head)) (1+ (length line))))
+             (text (cond
+                    ((string-empty-p ancestry) (copy-sequence line))
+                    ((null head) (concat line " " ancestry))
+                    (t (let* ((end (cdr head))
+                              (rest (string-trim-left (substring line end))))
+                         (concat (substring line 0 end) " " ancestry
+                                 (if (string-empty-p rest) "" (concat " · " rest)))))))
+             (mine (string= from free-agent-bus-name)))
         (add-text-properties 0 (length text)
                              (list 'free-agent-bus-post-id id
                                    'free-agent-bus-sender from
                                    'free-agent-bus-mine (and mine t)
+                                   'free-agent-bus-thread-root root
                                    'help-echo (format "RET: open the thread of post %s" id))
                              text)
         (when mine
           (add-text-properties 0 (length text)
                                (list 'face 'free-agent-bus-post-mine-face)
                                text))
+        (unless (string-empty-p ancestry)
+          (add-text-properties ancestry-start (+ ancestry-start (length ancestry))
+                               (list 'face 'free-agent-bus-thread-face)
+                               text))
         text))))
 
-(defun free-agent-bus--decorate-view-output (output)
-  "Propertize a CLI view's OUTPUT line by line."
-  (mapconcat #'free-agent-bus--decorate-view-line (split-string output "\n") "\n"))
+(defun free-agent-bus--decorate-view-output (output posts)
+  "Propertize a CLI view's OUTPUT line by line, against index POSTS."
+  (mapconcat (lambda (line) (free-agent-bus--decorate-view-line line posts))
+             (split-string output "\n")
+             "\n"))
 
 (defun free-agent-bus--view-refresh ()
   "Re-run this view's CLI command and rerender the buffer.
@@ -592,6 +626,7 @@ buffer is never left silently stale."
                                 (list "--depth" (number-to-string depth)))))
          (status (car result))
          (output (cdr result))
+         (posts (free-agent-bus-log--read-index))
          (inhibit-read-only t))
     (free-agent-bus--preserving-position
       (erase-buffer)
@@ -601,7 +636,7 @@ buffer is never left silently stale."
                           'face 'bold))
       (insert (if (string-empty-p output)
                   (propertize "(no rows)\n" 'face 'shadow)
-                (concat (free-agent-bus--decorate-view-output output) "\n")))
+                (concat (free-agent-bus--decorate-view-output output posts) "\n")))
       (when (/= status 0)
         (insert (propertize (format "\n⛔ free-agent bus %s exited %d\n" sub status) 'face 'error))))
     (set-buffer-modified-p nil)))
@@ -1075,13 +1110,14 @@ not seen."
                                       "--depth" (number-to-string free-agent-bus-inbox-depth)))
          (status (car result))
          (output (cdr result))
+         (posts (free-agent-bus-log--read-index))
          (inhibit-read-only t))
     (free-agent-bus--preserving-position
       (erase-buffer)
       (insert (propertize (free-agent-bus-inbox--header) 'face 'bold))
       (insert (if (string-empty-p output)
                   (propertize "(no unread mail)\n" 'face 'shadow)
-                (concat (free-agent-bus--decorate-view-output output) "\n")))
+                (concat (free-agent-bus--decorate-view-output output posts) "\n")))
       (when (/= status 0)
         (insert (propertize (format "\n⛔ free-agent bus inbox exited %d\n" status) 'face 'error))))
     (set-buffer-modified-p nil)))
@@ -1276,42 +1312,61 @@ Filled from the log text as it is rendered, so ancestry resolves to a thread
 root and that root's label without a CLI call per line; an appended post
 inherits an index that already covers the prefix.")
 
-(defun free-agent-bus-log--index (obj)
-  "Record parsed post OBJ for ancestry lookup.  Returns OBJ."
+(defun free-agent-bus-log--index-post (posts obj)
+  "Record parsed post OBJ in index POSTS.  Returns OBJ."
   (when-let ((id (alist-get 'id obj)))
-    (unless free-agent-bus-log--posts
-      (setq free-agent-bus-log--posts (make-hash-table :test 'eq)))
     (puthash id
              (list :from (alist-get 'from obj)
                    :to (append (alist-get 'to obj) nil)
                    :thread (append (alist-get 'thread obj) nil)
                    :label (free-agent-bus-status--first-useful-line
                            (alist-get 'body obj)))
-             free-agent-bus-log--posts))
+             posts))
   obj)
 
-(defun free-agent-bus-log--thread-root (id)
-  "Return the root post id of ID's thread, or ID itself when it is a root.
+(defun free-agent-bus-log--index (obj)
+  "Record parsed post OBJ in this buffer's index.  Returns OBJ.
+The log buffer builds its index from the text it is rendering, so the index
+covers the log prefix and every append, and no line needs its own file read."
+  (unless free-agent-bus-log--posts
+    (setq free-agent-bus-log--posts (make-hash-table :test 'eq)))
+  (free-agent-bus-log--index-post free-agent-bus-log--posts obj))
+
+(defun free-agent-bus-log--read-index ()
+  "Return a fresh post index, read from the whole log file.
+A view buffer has no tail to build an index from, so it reads the log once per
+refresh — the way the status model already reads it for assignment labels.  A
+missing or unreadable log yields an empty index; the view's own CLI call is what
+reports that root as broken."
+  (let ((posts (make-hash-table :test 'eq)))
+    (when (file-readable-p (free-agent-bus--log-file))
+      (dolist (line (split-string (free-agent-bus-log--read-file) "\n" t))
+        (when-let ((obj (ignore-errors (json-read-from-string line))))
+          (free-agent-bus-log--index-post posts obj))))
+    posts))
+
+(defun free-agent-bus-log--thread-root (id posts)
+  "Return the root post id of ID's thread in index POSTS, or ID itself.
 Only the log's own `thread' field is followed — never a timestamp, never a
 sender name — and a cycle in that field stops the walk where it repeats."
   (let ((current id)
         (seen (list id))
         (next nil))
-    (while (and (setq next (car (plist-get (gethash current free-agent-bus-log--posts)
-                                           :thread)))
+    (while (and (setq next (car (plist-get (gethash current posts) :thread)))
                 (not (memq next seen)))
       (setq current next)
       (push next seen))
     current))
 
-(defun free-agent-bus-log--ancestry (obj)
-  "Ancestry text for parsed post OBJ: `↩ROOT LABEL', or the empty string.
-ROOT is the thread root's id and LABEL that root's own first line, so the tail
-says which conversation a post joins without the reader looking an id up.  A
-post with no ancestry renders no ancestry text at all."
-  (if-let ((thread (append (alist-get 'thread obj) nil)))
-      (let* ((root (free-agent-bus-log--thread-root (alist-get 'id obj)))
-             (label (plist-get (gethash root free-agent-bus-log--posts) :label)))
+(defun free-agent-bus-log--ancestry-for (id posts)
+  "Ancestry text for post ID in index POSTS: `↩ROOT LABEL', or the empty string.
+ROOT is the thread root's id and LABEL that root's own first line, so a reader
+sees which conversation a post joins without looking an id up.  A post with no
+ancestry, and a post POSTS does not carry, render no ancestry at all: an id
+with no `thread' field to read is not a conversation."
+  (if-let ((thread (plist-get (gethash id posts) :thread)))
+      (let* ((root (free-agent-bus-log--thread-root id posts))
+             (label (plist-get (gethash root posts) :label)))
         (concat "↩" (number-to-string root)
                 (if (or (null label) (string-empty-p label))
                     ""
@@ -1344,12 +1399,13 @@ with `free-agent-bus-thread-face'."
                (ts (alist-get 'ts obj))
                (from (alist-get 'from obj))
                (audience (free-agent-bus--audience-string (alist-get 'to obj)))
-               (ancestry (free-agent-bus-log--ancestry obj))
+               (ancestry (free-agent-bus-log--ancestry-for
+                          id free-agent-bus-log--posts))
                (body (or (alist-get 'body obj) ""))
                (mine (and (string= from free-agent-bus-name) t))
                (root (if (string-empty-p ancestry)
                          id
-                       (free-agent-bus-log--thread-root id)))
+                       (free-agent-bus-log--thread-root id free-agent-bus-log--posts)))
                (stamped (if free-agent-bus-log-show-timestamps
                             (format "[%s@%s]" id ts)
                           (format "[%s]" id)))
