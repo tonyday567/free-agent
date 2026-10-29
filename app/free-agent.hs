@@ -58,7 +58,7 @@ import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, def
 import Free.Agent.Refresh (preserveForRefresh, refreshDue, refreshRequestPath, writeRefreshRequest)
 import Free.Agent.Usage (readHermesUsage, readUsageIdentity, renderUsageIdentity)
 import Options.Applicative
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory)
 import System.Environment (getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure, exitWith)
 import System.FilePath (takeDirectory, (</>))
@@ -568,10 +568,11 @@ runGateway :: Int -> GatewayCliConfig -> IO ()
 runGateway budget cfg = do
   validatePrompt (gcwPromptFile cfg)
   systemPrompt <- TIO.readFile (gcwPromptFile cfg)
+  home <- getHomeDirectory
   let names = gcwNames cfg
       agentName = agentNameOf names
       framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
-      gwCfg = defaultGatewayConfig {gwBaseUrl = gcwBaseUrl cfg, gwKeyEnv = gcwKeyEnv cfg}
+      gwCfg = defaultGatewayConfig {gwBaseUrl = gcwBaseUrl cfg, gwKeyEnv = gcwKeyEnv cfg, gwCwd = home </> "pit"}
   client <- openGateway gwCfg
   let host = gatewayHost agentName framedPrompt client
       mQuiesce = buildQuiesce (gcwQuiesce cfg) (gcwPitboss cfg)

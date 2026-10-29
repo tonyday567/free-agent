@@ -68,7 +68,8 @@ data GatewayConfig = GatewayConfig
     gwBaseUrl :: Text,
     -- | Environment variable holding the Bearer key.
     gwKeyEnv :: String,
-    -- | Working directory pinned on the server-side session.
+    -- | Working directory pinned on the server-side session (@\".\"@ keeps the
+    -- server's own cwd).
     gwCwd :: FilePath
   }
   deriving (Show, Eq)
@@ -78,7 +79,7 @@ defaultGatewayConfig =
   GatewayConfig
     { gwBaseUrl = "http://127.0.0.1:8642/p/pit",
       gwKeyEnv = "API_SERVER_KEY",
-      gwCwd = "/Users/tonyday567/pit"
+      gwCwd = "."
     }
 
 -- ---------------------------------------------------------------------------
