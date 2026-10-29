@@ -991,10 +991,13 @@ The log watch fires on a new message; this covers the state that appends no
 log message at all.  The timer is owned by the buffer, not the window, and is
 cancelled by `free-agent-bus-status-stop' when the buffer is killed.
 
-`free-agent-bus-status-refresh-interval' must be a positive number — zero
-would re-arm a repeating timer with no delay, and nil would not arm one at all
-— so anything else leaves the timer off, says so, and leaves the log watch as
-the only repaint.  Returns the timer, or nil when none was started."
+`free-agent-bus-status-refresh-interval' must be a positive number.  Measured:
+zero and nil both arm a one-shot timer that fires once and never repeats — the
+page freezes after a single repaint, which is the defect this timer exists to
+fix — a string is taken the same way, and a negative value signals `Invalid
+repetition interval' right here, inside the call that opens the status view.
+Anything else leaves the timer off, says so, and leaves the log watch as the
+only repaint.  Returns the timer, or nil when none was started."
   (free-agent-bus-status--stop-periodic)
   (cond
    ((free-agent-bus--interval-p free-agent-bus-status-refresh-interval)
