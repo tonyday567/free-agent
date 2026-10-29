@@ -1070,19 +1070,35 @@ periodic repaint does not spawn a usage process every tick."
   (free-agent-bus-status--refresh-model)
   (free-agent-bus-status--collect-usage))
 
+(defun free-agent-bus--debounce (timer-var delay function &optional buffer)
+  "Coalesce a burst of events into one call to FUNCTION, DELAY seconds later.
+TIMER-VAR names the variable that holds the pending timer: it is cancelled
+first, and cleared when the timer fires, so it never keeps a dead handle.  With
+BUFFER the timer belongs to that buffer — it is set buffer-locally there,
+FUNCTION runs with that buffer current, and a killed buffer drops the call.
+Returns the armed timer."
+  (when (timerp (symbol-value timer-var))
+    (cancel-timer (symbol-value timer-var)))
+  (let ((callback
+         (lambda ()
+           (if buffer
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (set (make-local-variable timer-var) nil)
+                   (funcall function)))
+             (set timer-var nil)
+             (funcall function)))))
+    (if buffer
+        (with-current-buffer buffer
+          (set (make-local-variable timer-var)
+               (run-with-timer delay nil callback)))
+      (set timer-var (run-with-timer delay nil callback)))))
+
 (defun free-agent-bus-status--refresh-soon ()
   "Coalesce file-notification events into one status refresh."
-  (when free-agent-bus-status--refresh-timer
-    (cancel-timer free-agent-bus-status--refresh-timer))
-  (setq-local free-agent-bus-status--refresh-timer
-              (run-with-timer
-               0.05 nil
-               (lambda (buf)
-                 (when (buffer-live-p buf)
-                   (with-current-buffer buf
-                     (setq-local free-agent-bus-status--refresh-timer nil)
-                     (ignore-errors (free-agent-bus-status-refresh)))))
-               (current-buffer))))
+  (free-agent-bus--debounce 'free-agent-bus-status--refresh-timer 0.05
+                            (lambda () (ignore-errors (free-agent-bus-status-refresh)))
+                            (current-buffer)))
 
 (defun free-agent-bus--interval-p (value)
   "Whether VALUE can repeat a timer: a positive number of seconds."
@@ -1409,7 +1425,16 @@ failure the status timer guards against."
 ;;; Log tail
 
 (defvar free-agent-bus-log--timer nil
-  "Fallback timer for periodic log refresh.")
+  "Fallback timer for periodic log refresh.
+Holds the repeating poll only; file-notify events coalesce into
+`free-agent-bus-log--debounce-timer', which fires once and is then cleared.  The
+two are separate because their lifetimes differ, and one variable could not say
+which of the two it held.")
+
+(defvar free-agent-bus-log--debounce-timer nil
+  "Pending coalescing timer for file-notify events on the log.
+Armed by `free-agent-bus-log--refresh-soon' and cleared by the timer itself, so
+it never holds a handle that has already fired.")
 
 (defvar free-agent-bus-log--file-watch nil
   "File-notify descriptor for the log file.")
@@ -1686,11 +1711,11 @@ a full rebuild."
                   (or (zerop size) (string-suffix-p "\n" raw)))))))))
 
 (defun free-agent-bus-log--refresh-soon ()
-  "Schedule a log refresh after a short debounce window."
-  (when free-agent-bus-log--timer
-    (cancel-timer free-agent-bus-log--timer))
-  (setq free-agent-bus-log--timer
-        (run-with-timer 0.05 nil #'free-agent-bus-log-refresh)))
+  "Coalesce file-notification events into one log refresh.
+Its own variable, not `free-agent-bus-log--timer': that one holds the polling
+fallback, which repeats, while this one fires once — two lifetimes, two names."
+  (free-agent-bus--debounce 'free-agent-bus-log--debounce-timer 0.05
+                            #'free-agent-bus-log-refresh))
 
 (defun free-agent-bus-log-toggle-timestamps ()
   "Toggle ids and timestamps in the log tail and re-render."
@@ -1748,10 +1773,13 @@ refreshing itself without saying so."
                 free-agent-bus-log-refresh-interval)))))
 
 (defun free-agent-bus-log-stop-watch ()
-  "Stop watching the log file."
+  "Stop watching the log file, and drop any refresh it still has pending."
   (when free-agent-bus-log--timer
     (cancel-timer free-agent-bus-log--timer)
     (setq free-agent-bus-log--timer nil))
+  (when free-agent-bus-log--debounce-timer
+    (cancel-timer free-agent-bus-log--debounce-timer)
+    (setq free-agent-bus-log--debounce-timer nil))
   (when free-agent-bus-log--file-watch
     (file-notify-rm-watch free-agent-bus-log--file-watch)
     (setq free-agent-bus-log--file-watch nil)))
