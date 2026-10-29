@@ -37,7 +37,8 @@
 ;;   SPC y t                 thread at point (or prompt for a post id)
 ;;   SPC y i                 inbox: unread mail for this name
 ;;   SPC y f                 set the audience filter (empty = show everything)
-;;   SPC y b                 open the board file
+;;   SPC y b                 board file — retired: its default path is gone, so
+;;                           the row is marked, not removed (the runner rules)
 ;;   SPC y d                 deck: status + log + compose in one frame
 ;;   SPC y q                 close deck buffers
 ;; In *free-agent-bus-log* and the view buffers:
@@ -185,11 +186,19 @@ a paused view costs nothing."
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-status-refresh-interval 5.0
-  "Seconds between repaints of a live status buffer.
+  "Seconds between repaints of a live status buffer, as a positive number.
 The log watch covers a new message; this timer covers the state a seat changes
 without appending one — a cursor write, a heartbeat, a settlement, a failed
 send — which the watch can never see.  One `bus status --live' runs per tick,
-and the timer lasts exactly as long as the status buffer."
+and the timer lasts exactly as long as the status buffer.
+
+A value `run-with-timer' cannot repeat is refused where the timer is started,
+because the failure is silent: zero and nil both yield a one-shot timer that
+fires once and never again — the page freezes after a single repaint, which is
+the defect this timer exists to fix — a string is taken the same way, and a
+negative value signals `Invalid repetition interval' inside the call that opens
+the status view.  Refused, the timer stays off, the deck says so, and the log
+watch is the only repaint."
   :type 'number
   :group 'free-agent-bus-deck)
 
@@ -208,8 +217,12 @@ and the timer lasts exactly as long as the status buffer."
   :type '(choice (const 0) (const 1) (const 2))
   :group 'free-agent-bus-deck)
 
-(defcustom free-agent-bus-log-filter-choices '("runner" "moka" "mucho" "ristretto" "stinky" "doppio" "allegro")
-  "Common audience filter choices offered by `free-agent-bus-log-set-filter'.
+(defcustom free-agent-bus-log-filter-choices nil
+  "Names offered first by `free-agent-bus-log-set-filter' completion.
+Empty by default on purpose: a roster of seats belongs to one root and goes
+stale — the default this replaced named seven seats, none of them on the root
+the deck was reading — while the log's own senders are the truth and the prompt
+takes any name typed in full.  Set this to the names you filter by.
 Public posts (`to: []') are shown whatever the filter."
   :type '(repeat string)
   :group 'free-agent-bus-deck)
@@ -972,21 +985,36 @@ periodic repaint does not spawn a usage process every tick."
                      (ignore-errors (free-agent-bus-status-refresh)))))
                (current-buffer))))
 
+(defun free-agent-bus--interval-p (value)
+  "Whether VALUE can repeat a timer: a positive number of seconds."
+  (and (numberp value) (> value 0)))
+
 (defun free-agent-bus-status--start-periodic ()
-  "Repaint this status buffer on a timer.
+  "Repaint this status buffer on a timer, when the interval can bear one.
 The log watch fires on a new message; this covers the state that appends no
 log message at all.  The timer is owned by the buffer, not the window, and is
-cancelled by `free-agent-bus-status-stop' when the buffer is killed."
+cancelled by `free-agent-bus-status-stop' when the buffer is killed.
+
+`free-agent-bus-status-refresh-interval' must be a positive number — zero
+would re-arm a repeating timer with no delay, and nil would not arm one at all
+— so anything else leaves the timer off, says so, and leaves the log watch as
+the only repaint.  Returns the timer, or nil when none was started."
   (free-agent-bus-status--stop-periodic)
-  (setq-local free-agent-bus-status--periodic-timer
-              (run-with-timer
-               free-agent-bus-status-refresh-interval
-               free-agent-bus-status-refresh-interval
-               (lambda (buf)
-                 (when (buffer-live-p buf)
-                   (with-current-buffer buf
-                     (ignore-errors (free-agent-bus-status--refresh-model)))))
-               (current-buffer))))
+  (cond
+   ((free-agent-bus--interval-p free-agent-bus-status-refresh-interval)
+    (setq-local free-agent-bus-status--periodic-timer
+                (run-with-timer
+                 free-agent-bus-status-refresh-interval
+                 free-agent-bus-status-refresh-interval
+                 (lambda (buf)
+                   (when (buffer-live-p buf)
+                     (with-current-buffer buf
+                       (ignore-errors (free-agent-bus-status--refresh-model)))))
+                 (current-buffer))))
+   (t
+    (message "free-agent status: repaint interval %S is not a positive number; the timer is not started"
+             free-agent-bus-status-refresh-interval)
+    nil)))
 
 (defun free-agent-bus-status--stop-periodic ()
   "Cancel this status buffer's periodic repaint timer."
