@@ -592,8 +592,6 @@ view never invents a post."
     (if (or (null id) (null from))
         line
       (let* ((head (free-agent-bus--view-head line))
-             (root (and (gethash id posts)
-                        (free-agent-bus-log--thread-root id posts)))
              (ancestry (free-agent-bus-log--ancestry-for id posts))
              (ancestry-start (if head (1+ (cdr head)) (1+ (length line))))
              (text (cond
@@ -607,8 +605,6 @@ view never invents a post."
         (add-text-properties 0 (length text)
                              (list 'free-agent-bus-post-id id
                                    'free-agent-bus-sender from
-                                   'free-agent-bus-mine (and mine t)
-                                   'free-agent-bus-thread-root root
                                    'help-echo (format "RET: open the thread of post %s" id))
                              text)
         (when mine
@@ -1335,18 +1331,36 @@ post naming one of the filter names.  There is no broadcast token."
         (seq-intersection names filter))))
 
 (defvar-local free-agent-bus-log--posts nil
-  "Hash table of post id -> plist (:from :to :thread :label) for this buffer.
+  "Hash table of post id -> plist (:thread :label) for this buffer.
 Filled from the log text as it is rendered, so ancestry resolves to a thread
 root and that root's label without a CLI call per line; an appended post
-inherits an index that already covers the prefix.")
+inherits an index that already covers the prefix.  Two fields, because those
+are the two things ancestry reads: the sender and the audience are in the
+rendered line, and nothing reads them back out of this table.")
+
+(defvar-local free-agent-bus-log--root nil
+  "The expanded bus root this buffer's render state belongs to.
+The index and the byte offsets are per-root, and `free-agent-bus-root' can be
+repointed at another bus: without this, an id left over from the previous root
+would resolve its ancestry against a post that is no longer being read, and an
+offset would resume a different log mid-file.")
+
+(defun free-agent-bus-log--repoint ()
+  "Drop this buffer's render state when the deck has been repointed.
+`free-agent-bus-log-refresh' calls this before it reads anything, so the tail
+never renders a new root through the previous root's index or offsets."
+  (let ((root (free-agent-bus--expand-root)))
+    (unless (equal root free-agent-bus-log--root)
+      (setq-local free-agent-bus-log--root root)
+      (setq-local free-agent-bus-log--posts nil)
+      (setq-local free-agent-bus-log--raw-offset nil)
+      (setq-local free-agent-bus-log--newline-complete nil))))
 
 (defun free-agent-bus-log--index-post (posts obj)
   "Record parsed post OBJ in index POSTS.  Returns OBJ."
   (when-let ((id (alist-get 'id obj)))
     (puthash id
-             (list :from (alist-get 'from obj)
-                   :to (append (alist-get 'to obj) nil)
-                   :thread (append (alist-get 'thread obj) nil)
+             (list :thread (append (alist-get 'thread obj) nil)
                    :label (free-agent-bus-status--first-useful-line
                            (alist-get 'body obj)))
              posts))
@@ -1355,9 +1369,11 @@ inherits an index that already covers the prefix.")
 (defun free-agent-bus-log--index (obj)
   "Record parsed post OBJ in this buffer's index.  Returns OBJ.
 The log buffer builds its index from the text it is rendering, so the index
-covers the log prefix and every append, and no line needs its own file read."
+covers the log prefix and every append, and no line needs its own file read.
+The table is rebuilt on every full render and dropped on a repoint, so an id in
+it always belongs to the log this buffer is showing."
   (unless free-agent-bus-log--posts
-    (setq free-agent-bus-log--posts (make-hash-table :test 'eq)))
+    (setq-local free-agent-bus-log--posts (make-hash-table :test 'eq)))
   (free-agent-bus-log--index-post free-agent-bus-log--posts obj))
 
 (defun free-agent-bus-log--read-index ()
@@ -1409,18 +1425,16 @@ with no `thread' field to read is not a conversation."
 returned as-is so the runner sees exactly what is in the file, and a post
 whose audience does not match is dropped.
 
-A rendered post carries `free-agent-bus-post-id', `free-agent-bus-sender' and
-`free-agent-bus-thread-root'; a post the attached human wrote also carries
-`free-agent-bus-mine', with `free-agent-bus-post-mine-face' on its summary (the
-head line, and at depth 1 the excerpt beside it), and its ancestry is faced
-with `free-agent-bus-thread-face'."
+A rendered post carries `free-agent-bus-post-id' and `free-agent-bus-sender',
+which `free-agent-bus--id-at-point' and `free-agent-bus--sender-at-point' read
+back for RET and for a reply.  A post the attached human wrote is marked by
+`free-agent-bus-post-mine-face' on its summary (the head line, and at depth 1
+the excerpt beside it) rather than by a property of its own, and its ancestry is
+faced with `free-agent-bus-thread-face'."
   (let ((obj (ignore-errors (json-read-from-string line))))
     (cond
      ((null obj) line)
      (t
-      ;; Indexed before the filter: a post the filter hides can still be the
-      ;; thread root that labels the posts the filter shows.
-      (free-agent-bus-log--index obj)
       (if (not (free-agent-bus-log--shows-p (alist-get 'to obj)))
           nil
         (let* ((id (alist-get 'id obj))
@@ -1431,9 +1445,6 @@ with `free-agent-bus-thread-face'."
                           id free-agent-bus-log--posts))
                (body (or (alist-get 'body obj) ""))
                (mine (and (string= from free-agent-bus-name) t))
-               (root (if (string-empty-p ancestry)
-                         id
-                       (free-agent-bus-log--thread-root id free-agent-bus-log--posts)))
                (stamped (if free-agent-bus-log-show-timestamps
                             (format "[%s@%s]" id ts)
                           (format "[%s]" id)))
@@ -1450,12 +1461,15 @@ with `free-agent-bus-thread-face'."
                        (_ (concat head "\n"
                                   (mapconcat (lambda (l) (concat "│ " l))
                                              (split-string body "\n") "\n"))))))
+          ;; Two properties, both read back: --id-at-point and --sender-at-point
+          ;; are what RET, thread-at-point and reply-at-point ask.  The human's own
+          ;; posts are marked by the face, so no property repeats that, and the
+          ;; thread root is in the label text rather than in a property nothing
+          ;; reads.
           (add-text-properties
            0 (length text)
            (list 'free-agent-bus-post-id id
                  'free-agent-bus-sender from
-                 'free-agent-bus-thread-root root
-                 'free-agent-bus-mine mine
                  'help-echo (format "RET: open the thread of post %s" id))
            text)
           (when mine
@@ -1475,11 +1489,17 @@ with `free-agent-bus-thread-face'."
   "Whether the rendered log snapshot ends with a complete newline.")
 
 (defun free-agent-bus-log--format-lines (raw)
-  "Format RAW log text using the current buffer's display settings."
-  (mapconcat #'identity
-             (delq nil (mapcar #'free-agent-bus-log--format-line
-                               (split-string raw "\n")))
-             "\n"))
+  "Format RAW log text using the current buffer's display settings.
+Every line is indexed before any line is formatted, so a post whose ancestry
+names an id later in the same text still finds it, and a post the filter hides
+still labels the posts the filter shows."
+  (let ((lines (split-string raw "\n")))
+    (dolist (line lines)
+      (when-let ((obj (ignore-errors (json-read-from-string line))))
+        (free-agent-bus-log--index obj)))
+    (mapconcat #'identity
+               (delq nil (mapcar #'free-agent-bus-log--format-line lines))
+               "\n")))
 
 (defun free-agent-bus-log--window-states (buf)
   "Capture window points for BUF and whether each point was at the end."
@@ -1524,6 +1544,7 @@ rendering the log prefix.  FORCE, truncation, and partial-line appends use
 a full rebuild."
   (when-let ((buf (get-buffer free-agent-bus-log-buffer-name)))
     (with-current-buffer buf
+      (free-agent-bus-log--repoint)
       (let* ((inhibit-read-only t)
              (size (file-attribute-size
                     (file-attributes (free-agent-bus--log-file))))
@@ -1544,6 +1565,10 @@ a full rebuild."
           (when (and (not force) offset (= size offset))
             (setq incremental 'unchanged)))
         (unless incremental
+          ;; A full render re-reads the whole log, so the index is rebuilt rather
+          ;; than extended: a log replaced under this buffer (moved to the
+          ;; archive, restarted from id 0) leaves no id behind.
+          (setq-local free-agent-bus-log--posts nil)
           (let* ((raw (free-agent-bus-log--read-file 0 size))
                  (contents (free-agent-bus-log--format-lines raw)))
             (when (or force (not (equal-including-properties contents (buffer-string))))
