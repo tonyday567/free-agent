@@ -387,25 +387,84 @@ back to `free-agent-bus--sender-in-line'."
 
 ;;; Rendering keeps the reader's place
 
+(defun free-agent-bus--post-line-start (id)
+  "Start of the line carrying post ID in the current buffer, or nil.
+The property is what every rendered post carries, so this searches for the
+property rather than for the text: a line re-rendered at another depth, or by
+the CLI, still finds the same id."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((pos (point-min))
+          (found nil))
+      (while (and (not found) (< pos (point-max)))
+        (if (equal (get-text-property pos 'free-agent-bus-post-id) id)
+            (setq found (save-excursion (goto-char pos) (line-beginning-position)))
+          (setq pos (next-single-property-change pos 'free-agent-bus-post-id))))
+      found)))
+
+(defun free-agent-bus--position-record (pos)
+  "Describe POS for a rebuild: its post, its column, its offset, its endness.
+`free-agent-bus--id-at-point' decides the post — the rendered property first,
+the line's own shape as the fallback — so a point that is not on a post records
+no id and falls back to its offset."
+  (save-excursion
+    (goto-char pos)
+    (list :id (free-agent-bus--id-at-point)
+          :column (- pos (line-beginning-position))
+          :offset pos
+          :end (= pos (point-max)))))
+
+(defun free-agent-bus--position-target (record)
+  "The position RECORD should be restored to, in the buffer as it stands now.
+The end of the buffer wins, so a tailing reader stays at the tail.  Then the
+recorded post, so a rebuild that re-renders every line at a new depth keeps the
+reader on the post they were following, at the column they were at.  Then the
+raw offset, clamped, for a point that was not on a post at all."
+  (or (and (plist-get record :end) (point-max))
+      (when-let ((id (plist-get record :id)))
+        (when-let ((start (free-agent-bus--post-line-start id)))
+          (save-excursion
+            (goto-char start)
+            (goto-char (min (+ start (or (plist-get record :column) 0))
+                            (line-end-position))))))
+      (min (plist-get record :offset) (point-max))))
+
+(defun free-agent-bus--remember-position ()
+  "Remember where the reader is: point, and every window's point and start.
+Each position is recorded as the post under it plus its offset and column, so a
+render that changes every line's length can put the reader back on the same
+post rather than on whatever now sits at the same offset."
+  (list :point (free-agent-bus--position-record (point))
+        :windows (mapcar (lambda (w)
+                           (list w
+                                 (free-agent-bus--position-record (window-point w))
+                                 (free-agent-bus--position-record (window-start w))))
+                         (get-buffer-window-list (current-buffer) nil t))))
+
+(defun free-agent-bus--restore-position (state)
+  "Put point, and each live window's point and start, back where STATE says.
+A window start is restored without forcing, so point never becomes invisible on
+a repaint."
+  (goto-char (free-agent-bus--position-target (plist-get state :point)))
+  (dolist (entry (plist-get state :windows))
+    (let ((window (nth 0 entry)))
+      (when (window-live-p window)
+        (set-window-point window (free-agent-bus--position-target (nth 1 entry)))
+        (set-window-start window (free-agent-bus--position-target (nth 2 entry)) t)))))
+
 (defmacro free-agent-bus--preserving-position (&rest body)
-  "Evaluate BODY, then restore point and each window's start.
-A render erases the buffer, so without this every refresh — including the
-one a ping triggers — throws the reader back to the top.  Point is clamped
-to the new buffer end, and a window start is restored without forcing, so
-point never becomes invisible on a repaint.  This is the shape
-`free-agent-bus-status--render' has always used, shared."
+  "Evaluate BODY, then put the reader back where they were.
+A render erases the buffer and re-renders every line, and at another depth every
+post renders a different length, so a raw offset lands in a different post:
+`free-agent-bus--remember-position' records the post under the reader — at point
+and in every window — and `free-agent-bus--restore-position' resolves it in the
+new text, keeping the offset rule for a point that was not on a post.  Without
+this a refresh, a ping, or a depth change throws the reader off the message they
+were following."
   (declare (indent 0) (debug t))
-  `(let ((saved-point (point))
-         (saved-windows
-          (mapcar (lambda (w) (list w (window-point w) (window-start w)))
-                  (get-buffer-window-list (current-buffer) nil t))))
+  `(let ((state (free-agent-bus--remember-position)))
      ,@body
-     (goto-char (min saved-point (point-max)))
-     (dolist (saved saved-windows)
-       (let ((w (nth 0 saved)))
-         (when (window-live-p w)
-           (set-window-point w (min (nth 1 saved) (point-max)))
-           (set-window-start w (min (nth 2 saved) (point-max)) t))))))
+     (free-agent-bus--restore-position state)))
 
 ;;; Composition
 
@@ -1504,41 +1563,26 @@ still labels the posts the filter shows."
                (delq nil (mapcar #'free-agent-bus-log--format-line lines))
                "\n")))
 
-(defun free-agent-bus-log--window-states (buf)
-  "Capture window points for BUF and whether each point was at the end."
-  (mapcar (lambda (w)
-            (let ((pt (window-point w)))
-              (list w pt (= pt (point-max)))))
-          (get-buffer-window-list buf nil t)))
-
-(defun free-agent-bus-log--restore-window-states (states)
-  "Restore window STATES, keeping only formerly at-end windows at the end."
-  (dolist (state states)
-    (let* ((w (nth 0 state))
-           (old-pt (nth 1 state))
-           (was-at-end (nth 2 state))
-           (new-pt (if was-at-end (point-max) (min old-pt (point-max)))))
-      (set-window-point w new-pt))))
-
 (defun free-agent-bus-log--replace-contents (contents)
-  "Replace the log buffer with CONTENTS, preserving scroll positions."
-  (let ((window-states
-         (free-agent-bus-log--window-states (current-buffer))))
+  "Replace the log buffer with CONTENTS, keeping the reader's place.
+This is the forced path — a depth change, a truncation, a partial-line append —
+so it is the one where every post changes length; the record resolves by post
+rather than by offset for exactly that reason."
+  (let ((state (free-agent-bus--remember-position)))
     (erase-buffer)
     (insert contents)
-    (free-agent-bus-log--restore-window-states window-states)))
+    (free-agent-bus--restore-position state)))
 
 (defun free-agent-bus-log--append-contents (contents)
-  "Append CONTENTS to the log buffer, preserving scroll positions."
-  (let ((window-states
-         (free-agent-bus-log--window-states (current-buffer)))
-        (old-point (point))
-        (was-at-end (= (point) (point-max))))
+  "Append CONTENTS to the log buffer, keeping the reader's place.
+Appending shifts nothing, so the record lands on the same lines it recorded; the
+same mechanism serves both, which is the point: one idiom for the reader's
+place, not the tail's own pair beside the shared macro."
+  (let ((state (free-agent-bus--remember-position)))
     (save-excursion
       (goto-char (point-max))
       (insert contents))
-    (goto-char (if was-at-end (point-max) (min old-point (point-max))))
-    (free-agent-bus-log--restore-window-states window-states)))
+    (free-agent-bus--restore-position state)))
 
 (defun free-agent-bus-log-refresh (&optional force)
   "Refresh the log buffer from the file, preserving scroll position.
