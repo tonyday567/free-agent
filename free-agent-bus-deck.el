@@ -1077,6 +1077,44 @@ periodic repaint does not spawn a usage process every tick."
   (free-agent-bus-status--refresh-model)
   (free-agent-bus-status--collect-usage))
 
+(defun free-agent-bus--cancel-timer (timer-var &optional buffer)
+  "Cancel the timer TIMER-VAR holds, and leave the variable nil.
+With BUFFER the variable is that buffer's own, so only its timer is touched;
+without it the variable is the global one.  Safe on a variable that holds nil or
+a timer that has already fired."
+  (let ((timer (if buffer
+                   (buffer-local-value timer-var buffer)
+                 (symbol-value timer-var))))
+    (when (timerp timer)
+      (cancel-timer timer))
+    (if buffer
+        (with-current-buffer buffer
+          (set (make-local-variable timer-var) nil))
+      (set timer-var nil))))
+
+(defun free-agent-bus--arm-timer (timer-var delay repeat function &optional buffer)
+  "Arm a timer in TIMER-VAR, cancelling whatever that variable already held.
+DELAY and REPEAT go to `run-with-timer' unchanged, so the log's polling fallback
+starts at 0 and the status repaint waits its interval.  With BUFFER the timer
+belongs to that buffer: FUNCTION runs there and only while the buffer is alive,
+and the variable is set buffer-locally.  Returns the timer, or nil when REPEAT
+cannot repeat — the variable is left nil then, and the caller says why."
+  (free-agent-bus--cancel-timer timer-var buffer)
+  (when (free-agent-bus--interval-p repeat)
+    (let ((timer (run-with-timer
+                  delay repeat
+                  (if buffer
+                      (lambda ()
+                        (when (buffer-live-p buffer)
+                          (with-current-buffer buffer
+                            (funcall function))))
+                    function))))
+      (if buffer
+          (with-current-buffer buffer
+            (set (make-local-variable timer-var) timer))
+        (set timer-var timer))
+      timer)))
+
 (defun free-agent-bus--debounce (timer-var delay function &optional buffer)
   "Coalesce a burst of events into one call to FUNCTION, DELAY seconds later.
 TIMER-VAR names the variable that holds the pending timer: it is cancelled
@@ -1084,8 +1122,7 @@ first, and cleared when the timer fires, so it never keeps a dead handle.  With
 BUFFER the timer belongs to that buffer — it is set buffer-locally there,
 FUNCTION runs with that buffer current, and a killed buffer drops the call.
 Returns the armed timer."
-  (when (timerp (symbol-value timer-var))
-    (cancel-timer (symbol-value timer-var)))
+  (free-agent-bus--cancel-timer timer-var buffer)
   (let ((callback
          (lambda ()
            (if buffer
@@ -1124,34 +1161,24 @@ fix — a string is taken the same way, and a negative value signals `Invalid
 repetition interval' right here, inside the call that opens the status view.
 Anything else leaves the timer off, says so, and leaves the log watch as the
 only repaint.  Returns the timer, or nil when none was started."
-  (free-agent-bus-status--stop-periodic)
-  (cond
-   ((free-agent-bus--interval-p free-agent-bus-status-refresh-interval)
-    (setq-local free-agent-bus-status--periodic-timer
-                (run-with-timer
-                 free-agent-bus-status-refresh-interval
-                 free-agent-bus-status-refresh-interval
-                 (lambda (buf)
-                   (when (buffer-live-p buf)
-                     (with-current-buffer buf
-                       (ignore-errors (free-agent-bus-status--refresh-model)))))
-                 (current-buffer))))
-   (t
-    (message "free-agent status: repaint interval %S is not a positive number; the timer is not started"
-             free-agent-bus-status-refresh-interval)
-    nil)))
+  (or (free-agent-bus--arm-timer
+       'free-agent-bus-status--periodic-timer
+       free-agent-bus-status-refresh-interval
+       free-agent-bus-status-refresh-interval
+       (lambda () (ignore-errors (free-agent-bus-status--refresh-model)))
+       (current-buffer))
+      (progn
+        (message "free-agent status: repaint interval %S is not a positive number; the timer is not started"
+                 free-agent-bus-status-refresh-interval)
+        nil)))
 
 (defun free-agent-bus-status--stop-periodic ()
   "Cancel this status buffer's periodic repaint timer."
-  (when (timerp free-agent-bus-status--periodic-timer)
-    (cancel-timer free-agent-bus-status--periodic-timer))
-  (setq-local free-agent-bus-status--periodic-timer nil))
+  (free-agent-bus--cancel-timer 'free-agent-bus-status--periodic-timer (current-buffer)))
 
 (defun free-agent-bus-status-stop-watch ()
   "Remove the status log watch and its pending debounce timer."
-  (when free-agent-bus-status--refresh-timer
-    (cancel-timer free-agent-bus-status--refresh-timer)
-    (setq-local free-agent-bus-status--refresh-timer nil))
+  (free-agent-bus--cancel-timer 'free-agent-bus-status--refresh-timer (current-buffer))
   (when free-agent-bus-status--file-watch
     (file-notify-rm-watch free-agent-bus-status--file-watch)
     (setq-local free-agent-bus-status--file-watch nil)))
@@ -1415,19 +1442,18 @@ Refused, rather than armed, when the interval is not a positive number:
 views would refresh once and then quietly stop being fresh — the same silent
 failure the status timer guards against."
   (unless free-agent-bus--auto-timer
-    (if (free-agent-bus--interval-p free-agent-bus-auto-refresh-interval)
-        (setq free-agent-bus--auto-timer
-              (run-with-timer free-agent-bus-auto-refresh-interval
-                              free-agent-bus-auto-refresh-interval
-                              #'free-agent-bus--auto-refresh-buffers))
-      (message "free-agent-bus: auto-refresh interval %S cannot repeat; visible views will not refresh themselves"
-               free-agent-bus-auto-refresh-interval))))
+    (or (free-agent-bus--arm-timer 'free-agent-bus--auto-timer
+                                   free-agent-bus-auto-refresh-interval
+                                   free-agent-bus-auto-refresh-interval
+                                   #'free-agent-bus--auto-refresh-buffers)
+        (progn
+          (message "free-agent-bus: auto-refresh interval %S cannot repeat; visible views will not refresh themselves"
+                   free-agent-bus-auto-refresh-interval)
+          nil))))
 
 (defun free-agent-bus--stop-auto-refresh ()
   "Stop the visible-view refresh timer."
-  (when free-agent-bus--auto-timer
-    (cancel-timer free-agent-bus--auto-timer)
-    (setq free-agent-bus--auto-timer nil)))
+  (free-agent-bus--cancel-timer 'free-agent-bus--auto-timer))
 
 ;;; Log tail
 
@@ -1773,20 +1799,18 @@ refreshing itself without saying so."
                                    (lambda (_event)
                                      (free-agent-bus-log--refresh-soon))))
     (error
-     (if (free-agent-bus--interval-p free-agent-bus-log-refresh-interval)
-         (setq free-agent-bus-log--timer
-               (run-with-timer 0 free-agent-bus-log-refresh-interval #'free-agent-bus-log-refresh))
-       (message "free-agent-bus: file-notify is unavailable and the log-refresh interval %S cannot repeat; the tail will refresh only when you refresh it"
-                free-agent-bus-log-refresh-interval)))))
+     (or (free-agent-bus--arm-timer 'free-agent-bus-log--timer 0
+                                    free-agent-bus-log-refresh-interval
+                                    #'free-agent-bus-log-refresh)
+         (progn
+           (message "free-agent-bus: file-notify is unavailable and the log-refresh interval %S cannot repeat; the tail will refresh only when you refresh it"
+                    free-agent-bus-log-refresh-interval)
+           nil)))))
 
 (defun free-agent-bus-log-stop-watch ()
   "Stop watching the log file, and drop any refresh it still has pending."
-  (when free-agent-bus-log--timer
-    (cancel-timer free-agent-bus-log--timer)
-    (setq free-agent-bus-log--timer nil))
-  (when free-agent-bus-log--debounce-timer
-    (cancel-timer free-agent-bus-log--debounce-timer)
-    (setq free-agent-bus-log--debounce-timer nil))
+  (free-agent-bus--cancel-timer 'free-agent-bus-log--timer)
+  (free-agent-bus--cancel-timer 'free-agent-bus-log--debounce-timer)
   (when free-agent-bus-log--file-watch
     (file-notify-rm-watch free-agent-bus-log--file-watch)
     (setq free-agent-bus-log--file-watch nil)))
