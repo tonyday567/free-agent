@@ -261,27 +261,56 @@ A stale or missing root is an error, never an empty museum."
                   (free-agent-bus--log-file)))
     root))
 
+(defconst free-agent-bus--unlaunchable-status 127
+  "Status reported when the CLI cannot be launched at all.
+127 is the shell's own \"command not found\", and it is a number so every
+caller's numeric test keeps working and `free-agent-bus--report-failure' has a
+status to name.")
+
+(defun free-agent-bus--unlaunchable (err)
+  "A (STATUS . OUTPUT) pair for a CLI that could not be run, from ERR.
+The executable is named because that is the runner's fix, and the signal's own
+text is kept because it names the file that is missing."
+  (cons free-agent-bus--unlaunchable-status
+        (format "cannot run %s\n%s\n\nfree-agent-bus-executable is %S: an absolute path is used as given, any other name is looked up on PATH."
+                (free-agent-bus--executable) (error-message-string err)
+                free-agent-bus-executable)))
+
 (defun free-agent-bus--cli (subcommand &rest args)
   "Run `free-agent bus SUBCOMMAND --root ROOT ARGS...'.
 Return (STATUS . OUTPUT).  Never signals on a non-zero exit: a failing
-command stays visible to the runner instead of being hidden by an error."
+command stays visible to the runner instead of being hidden by an error.
+A CLI that cannot be launched at all comes back the same way — status 127
+carrying the reason — so a missing executable reaches the runner's error
+surface rather than a signal from inside a refresh."
   (free-agent-bus--check-root)
   (let ((coding-system-for-read 'utf-8))
     (with-temp-buffer
-      (let ((status (apply #'call-process (free-agent-bus--executable) nil t nil
-                           "bus" subcommand "--root" (free-agent-bus--expand-root) args)))
-        (cons status (string-trim-right (buffer-string)))))))
+      (condition-case err
+          (let ((status (apply #'call-process (free-agent-bus--executable) nil t nil
+                               "bus" subcommand "--root" (free-agent-bus--expand-root) args)))
+            (cons status (string-trim-right (buffer-string))))
+        (file-error (free-agent-bus--unlaunchable err))))))
 
 (defun free-agent-bus--cli-stdin (input subcommand &rest args)
-  "Run the CLI with INPUT on stdin.  Return (STATUS . OUTPUT)."
+  "Run the CLI with INPUT on stdin.  Return (STATUS . OUTPUT).
+OUTPUT is what the CLI wrote and not the input echoed back:
+`call-process-region' leaves the region in place, so the reply begins where the
+region ended, and taking the whole buffer would hand the caller its own text
+prefixed to the reply — which is what a receipt line then prints.  Like
+`free-agent-bus--cli', an executable that cannot be launched is a status rather
+than a signal, so a send that cannot run says so and keeps the draft."
   (let ((coding-system-for-read 'utf-8)
         (coding-system-for-write 'utf-8))
     (with-temp-buffer
       (insert input)
-      (let ((status (apply #'call-process-region (point-min) (point-max)
-                           (free-agent-bus--executable) nil t nil
-                           "bus" subcommand "--root" (free-agent-bus--expand-root) args)))
-        (cons status (string-trim-right (buffer-string)))))))
+      (let ((reply-from (point-max)))
+        (condition-case err
+            (let ((status (apply #'call-process-region (point-min) reply-from
+                                 (free-agent-bus--executable) nil t nil
+                                 "bus" subcommand "--root" (free-agent-bus--expand-root) args)))
+              (cons status (string-trim-right (buffer-substring reply-from (point-max)))))
+          (file-error (free-agent-bus--unlaunchable err)))))))
 
 (defun free-agent-bus--context-line ()
   "Identity and freshness line shared by every view."
