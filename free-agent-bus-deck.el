@@ -312,6 +312,28 @@ view head line (`id from→audience')."
     (message "⛔ free-agent %s failed (exit %s); see *free-agent-bus-error*"
              command status)))
 
+;;; Rendering keeps the reader's place
+
+(defmacro free-agent-bus--preserving-position (&rest body)
+  "Evaluate BODY, then restore point and each window's start.
+A render erases the buffer, so without this every refresh — including the
+one a ping triggers — throws the reader back to the top.  Point is clamped
+to the new buffer end, and a window start is restored without forcing, so
+point never becomes invisible on a repaint.  This is the shape
+`free-agent-bus-status--render' has always used, shared."
+  (declare (indent 0) (debug t))
+  `(let ((saved-point (point))
+         (saved-windows
+          (mapcar (lambda (w) (list w (window-point w) (window-start w)))
+                  (get-buffer-window-list (current-buffer) nil t))))
+     ,@body
+     (goto-char (min saved-point (point-max)))
+     (dolist (saved saved-windows)
+       (let ((w (nth 0 saved)))
+         (when (window-live-p w)
+           (set-window-point w (min (nth 1 saved) (point-max)))
+           (set-window-start w (min (nth 2 saved) (point-max)) t))))))
+
 ;;; Composition
 
 (defun free-agent-bus--post-mode-name ()
@@ -486,17 +508,17 @@ buffer is never left silently stale."
          (status (car result))
          (output (cdr result))
          (inhibit-read-only t))
-    (erase-buffer)
-    (insert (propertize (format "%s · depth %s\n%s\n\n"
-                                (plist-get spec :title) depth
-                                (free-agent-bus--context-line))
-                        'face 'bold))
-    (insert (if (string-empty-p output)
-                (propertize "(no rows)\n" 'face 'shadow)
-              (concat output "\n")))
-    (when (/= status 0)
-      (insert (propertize (format "\n⛔ free-agent bus %s exited %d\n" sub status) 'face 'error)))
-    (goto-char (point-min))
+    (free-agent-bus--preserving-position
+      (erase-buffer)
+      (insert (propertize (format "%s · depth %s\n%s\n\n"
+                                  (plist-get spec :title) depth
+                                  (free-agent-bus--context-line))
+                          'face 'bold))
+      (insert (if (string-empty-p output)
+                  (propertize "(no rows)\n" 'face 'shadow)
+                (concat output "\n")))
+      (when (/= status 0)
+        (insert (propertize (format "\n⛔ free-agent bus %s exited %d\n" sub status) 'face 'error))))
     (set-buffer-modified-p nil)))
 
 (defun free-agent-bus-cycle-depth ()
@@ -719,18 +741,10 @@ TITLE names the view; the header carries root, identity, and freshness."
               (insert (free-agent-bus-status--row-text row) "\n"))
             (buffer-string))))
     (unless (equal-including-properties contents (buffer-string))
-      (let ((inhibit-read-only t)
-            (old-point (point))
-            (window-states
-             (mapcar (lambda (w) (list w (window-point w) (window-start w)))
-                     (get-buffer-window-list (current-buffer) nil t))))
-        (erase-buffer)
-        (insert contents)
-        (goto-char (min old-point (point-max)))
-        (dolist (state window-states)
-          (let ((w (nth 0 state)))
-            (set-window-point w (min (nth 1 state) (point-max)))
-            (set-window-start w (min (nth 2 state) (point-max)))))
+      (let ((inhibit-read-only t))
+        (free-agent-bus--preserving-position
+          (erase-buffer)
+          (insert contents))
         (set-buffer-modified-p nil)))))
 
 (defun free-agent-bus-status--usage-sentinel (proc _event)
@@ -937,14 +951,14 @@ not seen."
          (status (car result))
          (output (cdr result))
          (inhibit-read-only t))
-    (erase-buffer)
-    (insert (propertize (free-agent-bus-inbox--header) 'face 'bold))
-    (insert (if (string-empty-p output)
-                (propertize "(no unread mail)\n" 'face 'shadow)
-              (concat output "\n")))
-    (when (/= status 0)
-      (insert (propertize (format "\n⛔ free-agent bus inbox exited %d\n" status) 'face 'error)))
-    (goto-char (point-min))
+    (free-agent-bus--preserving-position
+      (erase-buffer)
+      (insert (propertize (free-agent-bus-inbox--header) 'face 'bold))
+      (insert (if (string-empty-p output)
+                  (propertize "(no unread mail)\n" 'face 'shadow)
+                (concat output "\n")))
+      (when (/= status 0)
+        (insert (propertize (format "\n⛔ free-agent bus inbox exited %d\n" status) 'face 'error))))
     (set-buffer-modified-p nil)))
 
 ;;;###autoload
@@ -1376,6 +1390,30 @@ One frame, one rail: notice live work, read the evidence, post the next act."
                      free-agent-bus-thread-buffer-name))
     (when-let ((b (get-buffer buf)))
       (kill-buffer b))))
+
+;; evil normal state shadows the deck's letters — m is evil-set-marker, r is
+;; evil-replace, t is evil-find-char-to — so a plain buffer-local map never
+;; sees them.  An evil-define-key on the mode keymap installs an evil
+;; auxiliary keymap for that mode, so the mode's own letters win inside its
+;; buffer while evil normal state, the state's global map and the leader stay
+;; untouched.  evil-define-key* is the immediate form of evil-define-key, used
+;; under `with-eval-after-load' so evil stays out of the deck's compile- and
+;; load-time dependencies; the aux keymap is created for a symbol keymap whose
+;; value is set, which is the case here.
+;; g is deliberately not bound: it lives in an evil intercept layer that no
+;; buffer-local map reaches, so it stays evil goto.
+(declare-function evil-define-key* "evil" (state keymap key def &rest bindings))
+
+(defun free-agent-bus--evil-bind-keys ()
+  "Give the deck's modes their letter keys back in evil normal state."
+  (evil-define-key* 'normal free-agent-bus-inbox-mode-map
+    (kbd "m") #'free-agent-bus-inbox-mark-read
+    (kbd "r") #'free-agent-bus-reply-at-point
+    (kbd "t") #'free-agent-bus-thread-at-point)
+  (evil-define-key* 'normal free-agent-bus-view-mode-map
+    (kbd "t") #'free-agent-bus-thread-at-point))
+
+(with-eval-after-load 'evil (free-agent-bus--evil-bind-keys))
 
 ;; Leader bindings, self-contained: the deck binds its own keys whenever
 ;; `doom-leader-map' exists, so no Doom config edit is needed for a hot-load
