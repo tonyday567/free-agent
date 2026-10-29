@@ -1183,24 +1183,35 @@ only repaint.  Returns the timer, or nil when none was started."
     (file-notify-rm-watch free-agent-bus-status--file-watch)
     (setq-local free-agent-bus-status--file-watch nil)))
 
+(defun free-agent-bus--watch-log-file (on-event &optional fallback)
+  "Call ON-EVENT on every change to the log file, and return the watch descriptor.
+ON-EVENT runs with this buffer current, and only while it is alive, so a watch
+whose buffer has gone drops the event rather than erroring inside a timer or a
+file-notify callback.  When file-notify cannot be used, FALLBACK is called if it
+is given — the log's starts its polling timer, the status pane's says so — and
+nil is returned either way, which is what an empty watch variable should hold."
+  (let ((buffer (current-buffer)))
+    (condition-case nil
+        (file-notify-add-watch (free-agent-bus--log-file) '(change)
+                               (lambda (_event)
+                                 (when (buffer-live-p buffer)
+                                   (with-current-buffer buffer
+                                     (funcall on-event)))))
+      (error
+       (when fallback (funcall fallback))
+       nil))))
+
 (defun free-agent-bus-status-start-watch ()
   "Refresh status on log messages and on a periodic repaint.
 The log watch covers a new message; `free-agent-bus-status-refresh-interval'
 covers the state that appends no log message.  file-notify is preferred but
 never required."
   (free-agent-bus-status-stop-watch)
-  (condition-case nil
-      (let ((buf (current-buffer)))
-        (setq-local free-agent-bus-status--file-watch
-                    (file-notify-add-watch
-                     (free-agent-bus--log-file) '(change)
-                     (lambda (_event)
-                       (when (buffer-live-p buf)
-                         (with-current-buffer buf
-                           (free-agent-bus-status--refresh-soon)))))))
-    (error
-     (setq-local free-agent-bus-status--file-watch nil)
-     (message "free-agent status: file-notify unavailable; repainting on a timer"))))
+  (setq-local free-agent-bus-status--file-watch
+              (free-agent-bus--watch-log-file
+               #'free-agent-bus-status--refresh-soon
+               (lambda ()
+                 (message "free-agent status: file-notify unavailable; repainting on a timer")))))
 
 (defun free-agent-bus-status-stop ()
   "Remove the status watch, stop its repaint timer, and cancel its collectors."
@@ -1792,20 +1803,15 @@ fallback timer is refused, rather than armed, when the interval is not a
 positive number: it would fire once and never again, so the tail would stop
 refreshing itself without saying so."
   (free-agent-bus-log-stop-watch)
-  (condition-case nil
-      (setq free-agent-bus-log--file-watch
-            (file-notify-add-watch (free-agent-bus--log-file)
-                                   '(change)
-                                   (lambda (_event)
-                                     (free-agent-bus-log--refresh-soon))))
-    (error
-     (or (free-agent-bus--arm-timer 'free-agent-bus-log--timer 0
-                                    free-agent-bus-log-refresh-interval
-                                    #'free-agent-bus-log-refresh)
-         (progn
-           (message "free-agent-bus: file-notify is unavailable and the log-refresh interval %S cannot repeat; the tail will refresh only when you refresh it"
-                    free-agent-bus-log-refresh-interval)
-           nil)))))
+  (setq free-agent-bus-log--file-watch
+        (free-agent-bus--watch-log-file
+         #'free-agent-bus-log--refresh-soon
+         (lambda ()
+           (or (free-agent-bus--arm-timer 'free-agent-bus-log--timer 0
+                                          free-agent-bus-log-refresh-interval
+                                          #'free-agent-bus-log-refresh)
+               (message "free-agent-bus: file-notify is unavailable and the log-refresh interval %S cannot repeat; the tail will refresh only when you refresh it"
+                        free-agent-bus-log-refresh-interval))))))
 
 (defun free-agent-bus-log-stop-watch ()
   "Stop watching the log file, and drop any refresh it still has pending."
