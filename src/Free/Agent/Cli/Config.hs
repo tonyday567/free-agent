@@ -29,6 +29,7 @@ module Free.Agent.Cli.Config
     sessionOpt,
     modelOpt,
     providerOpt,
+    reasoningOpt,
     quiesceOpt,
     pitbossOpt,
   )
@@ -64,6 +65,7 @@ data HermesConfig = HermesConfig
     hcSessionFile :: Maybe FilePath,
     hcModel :: Maybe Text,
     hcProvider :: Maybe Text,
+    hcReasoning :: Maybe Text,
     hcYolo :: Bool,
     hcQuiesce :: Maybe Int,
     hcPitboss :: Maybe Name
@@ -152,6 +154,7 @@ defaultHermesConfig =
       hcSessionFile = Nothing,
       hcModel = Nothing,
       hcProvider = Nothing,
+      hcReasoning = Nothing,
       hcYolo = True,
       hcQuiesce = Nothing,
       hcPitboss = Nothing
@@ -273,6 +276,19 @@ providerOpt =
           <> help "Provider passed to the backend"
       )
 
+-- | Hermes only: the reasoning level the seat runs at (low, high, xhigh, max,
+-- ultra). Absent, the seat inherits @agent.reasoning_effort@ from its hermes
+-- config. Forwarded verbatim as @--reasoning@; this CLI does not validate the set.
+reasoningOpt :: Parser (Maybe Text)
+reasoningOpt =
+  optional $
+    option
+      (T.pack <$> str)
+      ( long "reasoning"
+          <> metavar "LEVEL"
+          <> help "Hermes reasoning level (low|high|xhigh|max|ultra)"
+      )
+
 quiesceOpt :: Parser (Maybe Int)
 quiesceOpt =
   optional $
@@ -324,6 +340,7 @@ parseHermesConfig =
     <*> sessionOpt
     <*> modelOpt
     <*> providerOpt
+    <*> reasoningOpt
     <*> yoloOpt
     <*> quiesceOpt
     <*> pitbossOpt

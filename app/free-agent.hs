@@ -373,7 +373,7 @@ runHermesAuto threshold rebootFile budget cfg = do
       sessionFile = fromMaybe (defaultSessionFile root names) (hcSessionFile cfg)
       framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
       transcriptPath = root </> ".transcripts" </> T.unpack agentName <> ".jsonl"
-      cli = hermesCli (hcModel cfg) (hcProvider cfg) (hcYolo cfg) sessionFile
+      cli = hermesCli (hcModel cfg) (hcProvider cfg) (hcReasoning cfg) (hcYolo cfg) sessionFile
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
       automaticRefresh stored =
         case threshold of

@@ -113,14 +113,15 @@ processHost name cmd args =
     }
 
 -- | Shared CLI recipe for hermes backends.
-hermesCli :: Maybe Text -> Maybe Text -> Bool -> FilePath -> Cli
-hermesCli model provider yolo sessionFile =
+hermesCli :: Maybe Text -> Maybe Text -> Maybe Text -> Bool -> FilePath -> Cli
+hermesCli model provider reasoning yolo sessionFile =
   Cli
     { cliCommand = "hermes",
       cliArgv = \prompt mSid ->
         ["chat", "-q", T.unpack prompt]
           <> maybe [] (\m -> ["-m", T.unpack m]) model
           <> maybe [] (\p -> ["--provider", T.unpack p]) provider
+          <> maybe [] (\r -> ["--reasoning", T.unpack r]) reasoning
           <> (if yolo then ["--yolo", "-Q"] else [])
           <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
       cliStdin = const "",
