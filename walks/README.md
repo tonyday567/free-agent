@@ -85,7 +85,7 @@ process when killed. `watch` has no `--depth` option.
 
 ## the deck walks
 
-Each `deck-*.sh` loads the deck in a fresh `emacs -Q -batch` against its own scratch
+Each batch deck walk loads the deck in a fresh `emacs -Q -batch` against its own scratch
 root. `deck-lib` is their shared helper and has no `.sh` suffix, so the runner does not
 count it as a walk.
 
@@ -99,10 +99,15 @@ the filter restores every post.
 `m` marks all printed mail read, and later mail remains unread.
 ⟜ `deck-quit.sh` ⟜ view `q` buries without killing the buffer; status `q` kills the
 buffer and releases its file watch and repaint timer.
+⟜ `deck-frame.sh` ⟜ a uniquely named scratch daemon loads installed Evil, not Doom's
+init, and opens one GUI (`ns`) and one pseudo-terminal frame. Both show the three-window
+deck with focus in status; `<tab>` and `q` reach the deck in Evil normal state. The
+daemon and both clients are killed and asserted gone.
 
-Batch proves commands, buffer state and mode-map bindings. Visible window layout and
-focus, actual GUI/terminal key delivery, and Doom's evil auxiliary maps need a real
-configured frame; these walks do not claim them.
+Batch proves commands, buffer state and mode-map bindings. The frame walk measures
+window/focus state and keymap resolution in real frames. It does not inject OS keyboard
+events or load the runner's Doom configuration, so physical key delivery and
+Doom-specific extra maps remain unproven.
 
 ## the knowns, as of 31 Oct
 
@@ -111,6 +116,10 @@ quietly. shen's two verification walks (`cli-verify-inbox-cursor`,
 `cli-verify-addressing-reach`, `09e2b03`) added two of these and corrected my reading of
 a third.
 
+⟜ **terminal `TAB` is intercepted by Evil** ⟜ in a real terminal frame with Evil normal
+state, `TAB`/`C-i` resolves to `evil-jump-forward`, not `free-agent-bus-cycle-depth`;
+`<tab>` and `q` still reach the deck. `deck-frame.sh` records the defect. GUI `TAB`/`C-i`
+also follows Evil, while GUI `<tab>` reaches the deck.
 ⟜ **an absent cursor reads as caught up, permanently** ⟜ `inbox NAME` with no cursor file
 prints nothing and exits 0, and stays that way: the default is the log's latest id,
 recomputed on every call, so mail posted later never appears and `--mark-read` cannot
