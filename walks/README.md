@@ -57,6 +57,9 @@ ancestry is carried verbatim, including dangling ids, and the read of a dangling
 where it fails loudly. Three knowns.
 ⟜ `cli-retire.sh` ⟜ a retired seat leaves the live roster and keeps its cursor, mail
 and log; no process is signalled.
+⟜ `cli-watch.sh` ⟜ a watcher skips pre-watch history, prints only new addressed posts
+as raw JSON frames, creates no cursor, keeps waiting after delivery, and leaves no
+process when killed. `watch` has no `--depth` option.
 
 ## the deck walks
 
