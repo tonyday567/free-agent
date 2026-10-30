@@ -60,11 +60,12 @@ carries the long form in its header, after a flake that cost a morning.
 ⟜ `cli-inbox-flow.sh` ⟜ unread is id >= cursor, `--mark-read` sets the cursor to the
 highest printed id plus one, a caught-up name prints nothing and exits 0.
 ⟜ `cli-inbox-unset-cursor.sh` ⟜ the wound behind the runner's inbox reading zero: a
-name with mail and no cursor file receives nothing, silently, exit 0. Three knowns.
+name with mail and no cursor file receives nothing, silently, exit 0. Repaired the same
+day: the walk now pins the repaired behaviour end to end.
 ⟜ `cli-say-addressing.sh` ⟜ who a post is for: `--to NAME` delivers; an omitted `--to`
 posts publicly rather than being refused; `--to ""` is refused by name since `fcce8b0`;
 ancestry is carried verbatim, including dangling ids, and the read of a dangling id is
-where it fails loudly. Three knowns.
+where it fails loudly.
 ⟜ `cli-retire.sh` ⟜ a retired seat leaves the live roster and keeps its cursor, mail
 and log; no process is signalled.
 ⟜ `cli-watch.sh` ⟜ a watcher skips pre-watch history, prints only new addressed posts
