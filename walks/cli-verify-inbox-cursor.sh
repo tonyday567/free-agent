@@ -57,7 +57,7 @@ say alice carol "for carol"
 say alice carol "for carol again"
 "$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
 assert_eq "inbox says bob has one" "1" "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)"
-row=$("$FA" bus status -r "$ROOT" 2>&1 | grep 'bob @' | sed 's/^ *//' || true)
+row=$("$FA" bus status -r "$ROOT" --depth 1 2>&1 | grep 'bob @' | sed 's/^ *//' || true)
 assert_known "status says three" "bob @0 (3 unread)" "$row" \
   "Behind is maxId - cursor + 1, so other people's posts count as the name's unread"
 
