@@ -29,14 +29,21 @@ step "and exits 0, so nothing warns the caller"
 assert_known "the empty read is not an error" "0" "$?" \
   "a silent zero is why the runner's inbox looked empty rather than broken"
 
-step "mark-read on a missing cursor writes nothing"
+step "and it is not momentary: later mail never appears either"
+say alice bob "posted after the empty read"
+assert_known "a second post does not change the empty read" "0" \
+  "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)" \
+  "the absent-cursor default is the latest post id, recomputed on every call, so the name stays empty for good rather than catching up"
+
+step "and --mark-read cannot bootstrap it"
 "$FA" bus inbox -r "$ROOT" bob --mark-read --depth 0 >/dev/null 2>&1
 assert_known "no cursor is created" "absent" \
   "$([ -e "$ROOT/.cursor-bob" ] && echo present || echo absent)" \
-  "nothing printed means nothing to advance past, so the state stays absent"
+  "nothing printed means nothing to advance past, so the state stays absent and the wound is permanent"
 
 step "the explicit fix that works today: set the cursor first"
 "$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
-assert_eq "with cursor 0 the same mail appears" "2" "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)"
+assert_eq "with cursor 0 every addressed post appears" "0,1,2" \
+  "$("$FA" bus inbox -r "$ROOT" bob --depth 0 | dot_ids)"
 
 finish

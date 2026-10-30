@@ -16,16 +16,21 @@ new_root addressing
 say alice bob "addressed"
 assert_eq "an addressed post names its recipient" '["bob"]' "$(field 0 to)"
 
-step "omitting --to posts publicly rather than refused"
+step "omitting --to posts with no recipient, which is not the same as refused"
 say alice - "no recipient flag at all"
-assert_known "missing --to becomes a public post" '[]' "$(field 1 to)" \
-  "the card says this is refused; it is not, it is public"
+assert_known "missing --to writes an empty recipient list" '[]' "$(field 1 to)" \
+  "the card says this is refused; it is not. Nothing is refused, and nothing is delivered: read NAME and inbox NAME both answer False for to: []"
 assert_eq "and --thread is empty for a root post" '[]' "$(field 1 thread)"
 
-step "an empty --to is not the same thing as an omitted one"
+step "an empty --to is a recipient named the empty string"
 say alice "" "an empty recipient"
 assert_known '--to "" writes a recipient list holding an empty name' '[""]' "$(field 2 to)" \
-  "public is to: [], so this post is addressed to nobody and delivered to nobody"
+  "not a public post either: deliversTo is False for [\"\"] as it is for [], so both reach nobody"
+
+step "measured: neither of those two reaches bob, and the addressed post does"
+"$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
+assert_eq "bob's readable mail is the addressed post alone" "0" "$("$FA" bus read -r "$ROOT" bob | json_ids)"
+assert_eq "and inbox agrees" "0" "$("$FA" bus inbox -r "$ROOT" bob | json_ids)"
 
 step "ancestry is carried verbatim, including ids that do not exist"
 printf 'with ancestry' | "$FA" bus say -r "$ROOT" --from alice --to bob --thread 0 >/dev/null

@@ -36,8 +36,29 @@ and log; no process is signalled.
 
 ## the knowns, as of 31 Oct
 
-⟜ an absent cursor reads as caught up, not as everything-new (CLI `inbox`; the deck's
-fresh-inbox path was fixed at `1f78f6a` and the CLI was not).
-⟜ a missing `--to` is accepted as a public post, and `--to ""` produces `to: [""]` —
-mail addressed to nobody, which no surface will ever deliver.
-⟜ `--thread` accepts an id that does not exist; the failure surfaces later, at the read.
+Wrong behaviour that the walks assert, so a fix turns them red instead of passing
+quietly. shen's two verification walks (`cli-verify-inbox-cursor`,
+`cli-verify-addressing-reach`, `09e2b03`) added two of these and corrected my reading of
+a third.
+
+⟜ **an absent cursor reads as caught up, permanently** ⟜ `inbox NAME` with no cursor file
+prints nothing and exits 0, and stays that way: the default is the log's latest id,
+recomputed on every call, so mail posted later never appears and `--mark-read` cannot
+bootstrap it. The deck's fresh-inbox path was fixed to read from the first post
+(`1f78f6a`); the CLI's `inbox` was not. It is the resting state of every fresh name,
+which is what makes it the most dangerous of the set.
+⟜ **a missing `--to` is not refused** ⟜ it writes `to: []`, and `--to ""` writes
+`to: [""]`. Both are delivered to nobody: `deliversTo` answers False for each, and
+`read NAME` and `inbox NAME` show only genuinely addressed posts. "Public" is a property
+of the log view, not a delivery state.
+⟜ **`--thread` accepts an id that does not exist** ⟜ hidden in the log until something
+reads that thread, at which point `read --thread <id>` fails loudly with `🔴 no post with
+id <id>`. The late failure is the surprise, not the acceptance.
+⟜ **`status`'s unread figure is not the inbox's** ⟜ behind is counted as
+`maxId − cursor + 1`, so a name with one addressed post reports "3 unread" while its
+inbox prints one line.
+⟜ **`read` on a root with no `log.jsonl` exits 0 in silence** ⟜ `runRead` skips the
+missing file and never calls `requireBus`, unlike `say` and `inbox`, which refuse with the
+named message.
+⟜ **`read --cursor NAME` prints nothing for a fresh name** ⟜ the same log-tip default as
+the first row, reached through a different door.

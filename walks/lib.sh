@@ -100,6 +100,18 @@ count_lines() {
   "$@" 2>/dev/null | wc -l | tr -d ' '
 }
 
+# json_ids — the ids of JSON post lines on stdin, comma-joined: what a read returns.
+json_ids() {
+  python3 -c 'import sys,json; print(",".join(str(json.loads(l)["id"]) for l in sys.stdin if l.strip()))'
+}
+
+# dot_ids — the leading id of each depth-0 line on stdin, comma-joined: what a
+# depth-0 view returns (`0 alice→bob`). Asserting ids rather than a line count
+# keeps the assertion honest: a count passes for a header line or the wrong posts.
+dot_ids() {
+  awk 'NF {print $1}' | paste -sd, -
+}
+
 finish() {
   printf '\n-- %s: %d passed, %d failed, %d known\n' "$WALK" "$PASS" "$FAIL" "$KNOWN"
   [ "$FAIL" -eq 0 ] || exit 1

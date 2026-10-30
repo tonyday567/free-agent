@@ -17,7 +17,7 @@ assert_eq "post 0 is addressed to bob" '["bob"]' "$(field 0 to)"
 step "cursor set to 0, inbox bob"
 "$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
 assert_eq "cursor get reads back 0" "0" "$("$FA" bus cursor get -r "$ROOT" bob)"
-assert_eq "inbox prints both posts" "2" "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)"
+assert_eq "inbox prints exactly posts 0 and 1" "0,1" "$("$FA" bus inbox -r "$ROOT" bob --depth 0 | dot_ids)"
 
 step "mark-read advances past the highest printed id"
 "$FA" bus inbox -r "$ROOT" bob --mark-read --depth 0 >/dev/null
