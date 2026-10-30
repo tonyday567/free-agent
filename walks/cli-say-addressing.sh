@@ -22,10 +22,11 @@ assert_known "missing --to writes an empty recipient list" '[]' "$(field 1 to)" 
   "the card says this is refused; it is not. Nothing is refused, and nothing is delivered: read NAME and inbox NAME both answer False for to: []"
 assert_eq "and --thread is empty for a root post" '[]' "$(field 1 thread)"
 
-step "an empty --to is a recipient named the empty string"
-say alice "" "an empty recipient"
-assert_known '--to "" writes a recipient list holding an empty name' '[""]' "$(field 2 to)" \
-  "not a public post either: deliversTo is False for [\"\"] as it is for [], so both reach nobody"
+step "an empty --to is refused, and says which way to go instead"
+out=$("$FA" bus say -r "$ROOT" --from alice --to "" "an empty recipient" 2>&1); rc=$?
+assert_eq '--to "" exits 1' "1" "$rc"
+assert_eq "with a named refusal" "🔴 say: empty recipient name — omit --to for a public post" "$out"
+assert_eq "and it writes nothing" "2" "$(wc -l <"$ROOT/log.jsonl" | tr -d ' ')"
 
 step "measured: neither of those two reaches bob, and the addressed post does"
 # Reach is measured through the two CLI views, at an explicit depth so a change to a
@@ -44,9 +45,9 @@ assert_eq "and inbox agrees" "0" \
 
 step "ancestry is carried verbatim, including ids that do not exist"
 printf 'with ancestry' | "$FA" bus say -r "$ROOT" --from alice --to bob --thread 0 >/dev/null
-assert_eq "--thread 0 records parent 0" '[0]' "$(field 3 thread)"
+assert_eq "--thread 0 records parent 0" '[0]' "$(field 2 thread)"
 printf 'dangling ancestry' | "$FA" bus say -r "$ROOT" --from alice --to bob --thread 99 >/dev/null
-assert_known "--thread 99 is accepted though no post 99 exists" '[99]' "$(field 4 thread)" \
+assert_known "--thread 99 is accepted though no post 99 exists" '[99]' "$(field 3 thread)" \
   "the log tolerates a dangling parent; the read is where it fails"
 
 step "and the read of that dangling id fails loudly, which is the right half"

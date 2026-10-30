@@ -62,7 +62,7 @@ highest printed id plus one, a caught-up name prints nothing and exits 0.
 ⟜ `cli-inbox-unset-cursor.sh` ⟜ the wound behind the runner's inbox reading zero: a
 name with mail and no cursor file receives nothing, silently, exit 0. Three knowns.
 ⟜ `cli-say-addressing.sh` ⟜ who a post is for: `--to NAME` delivers; an omitted `--to`
-posts publicly rather than being refused; `--to ""` writes a recipient named "";
+posts publicly rather than being refused; `--to ""` is refused by name since `fcce8b0`;
 ancestry is carried verbatim, including dangling ids, and the read of a dangling id is
 where it fails loudly. Three knowns.
 ⟜ `cli-retire.sh` ⟜ a retired seat leaves the live roster and keeps its cursor, mail
@@ -105,10 +105,12 @@ recomputed on every call, so mail posted later never appears and `--mark-read` c
 bootstrap it. The deck's fresh-inbox path was fixed to read from the first post
 (`1f78f6a`); the CLI's `inbox` was not. It is the resting state of every fresh name,
 which is what makes it the most dangerous of the set.
-⟜ **a missing `--to` is not refused** ⟜ it writes `to: []`, and `--to ""` writes
-`to: [""]`. Both are delivered to nobody: `deliversTo` answers False for each, and
-`read NAME` and `inbox NAME` show only genuinely addressed posts. "Public" is a property
-of the log view, not a delivery state.
+⟜ **a missing `--to` is not refused** ⟜ it writes `to: []`, which is delivered to
+nobody: `deliversTo` answers False for it, and `read NAME` and `inbox NAME` show only
+genuinely addressed posts. "Public" is a property of the log view, not a delivery state.
+`--to ""` used to write a recipient named the empty string, a third state nothing
+delivered and nothing warned about; that half is repaired (refused by name, `fcce8b0`),
+and the walk asserts the refusal and that it writes nothing.
 ⟜ **`--thread` accepts an id that does not exist** ⟜ hidden in the log until something
 reads that thread, at which point `read --thread <id>` fails loudly with `🔴 no post with
 id <id>`. The late failure is the surprise, not the acceptance.
