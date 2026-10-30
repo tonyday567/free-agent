@@ -423,6 +423,18 @@ runSay root fromName toNames thr bodyWords = do
   when (T.null bodyText) $ do
     TIO.hPutStrLn stderr "🔴 say: empty body"
     exitFailure
+  -- A thread attaches to a post that exists. Ids are append-order, so a
+  -- parent missing at write time is a typo, not a post still to come; the
+  -- log's tolerance for the dangling link stays on the raw JSON path, which
+  -- is the caller's own statement.
+  forM_ thr $ \tid -> do
+    exists <- doesFileExist (root' </> "log.jsonl")
+    when exists $ do
+      content <- readFileStrict (root' </> "log.jsonl")
+      let ids = map (snd . stamp) (postsOf content)
+      unless (tid `elem` ids) $ do
+        TIO.hPutStrLn stderr ("🔴 say: no post with id " <> T.pack (show tid) <> " — threads attach to an existing post")
+        exitFailure
   stored <- postChecked root' (mkPost fromName toNames bodyText) {thread = maybe [] pure thr}
   TIO.putStrLn (frameStored stored)
 
