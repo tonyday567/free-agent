@@ -284,7 +284,7 @@ deliveryTopic = do
   explicitCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "EXPLICIT-CASE")
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "PREAMBLE-CASE")
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "BULLET-CASE")
-  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] (markGlyph Landed <> " done"))
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] (markGlyph Landed))
   myPath <- takeDirectory <$> getExecutablePath
   let bin = myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent"
   oldPath <- getEnv "PATH"

@@ -116,6 +116,7 @@ executable free-agent-axioma
     Axioma.Delivery
     Axioma.Diagram
     Axioma.Fare
+    Axioma.Halt
     Axioma.Lifecycle
     Axioma.Meeting
     Axioma.Persist

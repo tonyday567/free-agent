@@ -85,7 +85,7 @@ import Circuit.Agent.Framing
     unframeStored,
     pattern Stamped,
   )
-import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
+import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph)
 import Control.Concurrent (ThreadId, forkFinally, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM
@@ -440,10 +440,12 @@ runSeatBus bus agentName names sh = loop 0
              in not (T.null b) && b /= "(empty)"
           nonEmpty = filter keep outs
       traverse_ (scribeIO bus) nonEmpty
-      if any ((== Just StandDown) . markOf) outs
+      if any ((== Just StandDown) . controlMark) outs
         then pure True
         else go rest
-    halts p = maybe False (\m -> isHalt m || isEscalate m) (markOf p)
+    -- Control only in the control form: a glyph alone on the body's first
+    -- line. A mark that leads words is a status label and is delivered.
+    halts p = maybe False (\m -> isHalt m || isEscalate m) (controlMark p)
     processOne stored = do
       er <-
         try @SomeException $ do

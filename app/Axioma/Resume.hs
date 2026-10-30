@@ -50,7 +50,7 @@ resumeTopic = do
     _ <- postLocal root (mkPost "human" ["echo"] "  ")
     _ <- postLocal root (mkPost "human" ["echo"] "world")
     _ <- postLocal root (mkPost "human" ["echo"] "\t\n  ")
-    _ <- postLocal root (mkPost "human" ["echo"] (markGlyph Landed <> " done"))
+    _ <- postLocal root (mkPost "human" ["echo"] (markGlyph Landed))
     bus <- openBus root
     let host = mkHost "echo" $ \ws ->
           pure [T.unwords ws]
@@ -82,7 +82,7 @@ resumeTopic = do
   do
     root <- tempRoot "free-agent-b2-emptybody"
     _ <- postLocal root (mkPost "human" ["silent"] "ping")
-    _ <- postLocal root (mkPost "human" ["silent"] (markGlyph Landed <> " done"))
+    _ <- postLocal root (mkPost "human" ["silent"] (markGlyph Landed))
     bus <- openBus root
     -- Handler returns a post with an empty body.  Should be dropped.
     let host = mkHost "silent" $ \ws ->
@@ -124,7 +124,7 @@ resumeTopic = do
     root <- tempRoot "free-agent-b8-empty"
     _ <- postLocal root (mkPost "human" ["hermes"] "ping")
     _ <- postLocal root (mkPost "human" ["hermes"] "real")
-    _ <- postLocal root (mkPost "human" ["hermes"] (markGlyph Landed <> " done"))
+    _ <- postLocal root (mkPost "human" ["hermes"] (markGlyph Landed))
     bus <- openBus root
     let host = mkHost "hermes" $ \ws ->
           pure [cleanCliOut (if "ping" `elem` ws then "(empty)" else T.unwords ws)]

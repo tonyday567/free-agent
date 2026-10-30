@@ -13,7 +13,7 @@ where
 
 import Circuit.Agent (Name, Post (..), mkPost, sortNub)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
-import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
+import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph)
 import Control.Exception (SomeException, displayException, try)
 import Data.Foldable (forM_, traverse_)
 import Data.Maybe (fromMaybe)
@@ -47,10 +47,13 @@ import System.Posix.Process (getProcessID)
 -- delivery — the delivered post's stamped id is prepended to each reply's
 -- 'thread' (the same law 'runSeatBus' enforces), and the 🔴 relays do.
 --
--- Decided quiet: a delivered post carrying a halt mark (🟢 or 🔵) stops the
--- loop; an escalation mark (🔴) is relayed to the pitboss (when a quiescence
--- config names one) and also stops the loop. The quiescence counter is the
--- observed-quiet bridge: after N empty cycles the seat posts the verdict
+-- Decided quiet: a delivered post in the control form carrying a halt mark
+-- (🟢 or 🔵 — the glyph alone on its first line) stops the loop; an
+-- escalation mark (🔴) in the control form is relayed to the pitboss (when a
+-- quiescence config names one) and also stops the loop. A mark that leads
+-- words is a label, not an order, and is delivered to the agent. The
+-- quiescence counter is the observed-quiet bridge: after N empty cycles the
+-- seat posts the verdict
 -- body from 'quiesceAgent' — a ⌛ timeout mark, an inference from wall-clock
 -- silence, not a decided quiet — to the pitboss and exits.
 --
@@ -84,10 +87,13 @@ runAgentLoop agentName names root mQuiesce grant handlePost = do
         let qc = fromMaybe (error "quiesce action without config") mQuiesce
         _ <- postLocal root (mkPost agentName [qcPitboss qc] (decisionBody d))
         pure ()
-      -- A mark is control, not content: halt and escalation marks are not
-      -- handed to the seat handler. Silence follows the mark.
+      -- A mark is control, not content, and only in the control form: a
+      -- glyph alone on the body's first line. A peer's status report
+      -- (@🟢 tranche 1 done …@) leads with the same glyphs and is content —
+      -- it reaches the handler. Halt and escalation marks in the control
+      -- form are not handed to the seat. Silence follows the mark.
       controlFlow stored =
-        case markOf (stamped stored) of
+        case controlMark (stamped stored) of
           Just m
             | isHalt m -> pure (Just Halt)
             | isEscalate m -> do
@@ -160,7 +166,7 @@ runAgentLoop agentName names root mQuiesce grant handlePost = do
                           cite p = p {thread = sortNub (snd (stamp stored) : thread p)}
                       traverse_ (postLocal root . cite) nonEmpty
                       pure $
-                        if any ((== Just StandDown) . markOf) replies
+                        if any ((== Just StandDown) . controlMark) replies
                           then Halt
                           else Continue
                   writeCursor root agentName (snd (stamp stored) + 1)

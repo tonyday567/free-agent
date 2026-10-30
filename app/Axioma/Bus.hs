@@ -11,7 +11,7 @@ where
 import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
 import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, loop, mkChannelPost, tape, watch)
 import Circuit.Agent.Framing (Stamped, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
-import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf)
+import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph, markOf)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (bracket)
 import Data.Foldable (traverse_)
@@ -397,7 +397,7 @@ busTopic = do
   do
     root <- tempRoot "free-agent-seat-axioma"
     _ <- postLocal root (mkPost "human" ["echo"] "hello")
-    _ <- postLocal root (mkPost "human" ["echo"] "🟢 landed")
+    _ <- postLocal root (mkPost "human" ["echo"] (markGlyph Landed))
     bus <- openBus root
     runSeatBus bus "echo" ["echo"] (hostShard (mkHost "echo" (pure . map ("echo:" <>))))
     closeBusDurable bus
@@ -463,7 +463,7 @@ busTopic = do
     _ <- postLocal root (mkPost "human" ["echo"] "hello")
     _ <- postLocal root (mkPost "human" ["echo"] "finish")
     _ <- postLocal root (mkPost "human" ["echo"] "ping")
-    _ <- postLocal root (mkPost "human" ["echo"] "🟢 landed")
+    _ <- postLocal root (mkPost "human" ["echo"] (markGlyph Landed))
     bus <- openBus root
     let host = mkHost "echo" $ \ws ->
           pure $
@@ -471,7 +471,7 @@ busTopic = do
               then [markGlyph Landed <> " task done"]
               else
                 if "finish" `elem` ws
-                  then [markGlyph StandDown <> " standing down"]
+                  then [markGlyph StandDown]
                   else map ("echo:" <>) ws
     runSeatBus bus "echo" ["echo"] (hostShard host)
     closeBusDurable bus
@@ -500,7 +500,7 @@ busTopic = do
     root <- tempRoot "free-agent-meeting-axioma"
     let card = "panel"
     _ <- postLocal root (mkPost "human" [card] "discuss")
-    _ <- postLocal root (mkPost "human" [card] "🟢 landed")
+    _ <- postLocal root (mkPost "human" [card] (markGlyph Landed))
     bus <- openBus root
     let alphaSeat = hostShard (mkHost "alpha" (pure . map ("alpha:" <>)))
         betaSeat = hostShard (mkHost "beta" (pure . map ("beta:" <>)))
@@ -541,7 +541,7 @@ busTopic = do
   do
     root <- tempRoot "free-agent-r2b-audience"
     _ <- postLocal root (mkChannelPost "human" "commons" ["human", "aud"] ("ping" :: Text))
-    _ <- postLocal root (mkPost "human" ["aud"] (markGlyph Landed <> " done"))
+    _ <- postLocal root (mkPost "human" ["aud"] (markGlyph Landed))
     bus <- openBus root
     runSeatBus bus "aud" ["commons", "aud"] (hostShard (mkHost "aud" (pure . map ("ack: " <>))))
     closeBusDurable bus
@@ -570,7 +570,7 @@ busTopic = do
     let path = root </> "log.jsonl"
         plant = do
           _ <- postLocal root (mkPost "human" ["m1a"] "ask")
-          postLocal root (mkPost "human" ["m1a"] (markGlyph Landed <> " done"))
+          postLocal root (mkPost "human" ["m1a"] (markGlyph Landed))
     -- Pin the cursor to 0 up front (the Q7 idiom): fork-first + plant is
     -- a scheduling race under -threaded — if the plant wins, the seat's
     -- latestPostId cold-boot skips the script.
@@ -604,7 +604,7 @@ busTopic = do
     let path = root </> "log.jsonl"
         plant = do
           _ <- postLocal root (mkPost "human" ["m1x"] "boom-ask")
-          postLocal root (mkPost "human" ["m1x"] (markGlyph Landed <> " done"))
+          postLocal root (mkPost "human" ["m1x"] (markGlyph Landed))
     -- Pin the cursor to 0 up front (the Q7 idiom; see the ancestry test).
     writeCursor root "m1x" 0
     done <- newEmptyMVar
@@ -648,7 +648,7 @@ busTopic = do
               ioTurn (error "handler should never run on an escalation mark")
           )
           >> putMVar done ()
-    _ <- postLocal root (mkPost "human" ["m1r"] (markGlyph Escalate <> " help"))
+    _ <- postLocal root (mkPost "human" ["m1r"] (markGlyph Escalate))
     takeMVar done
     content <- TIO.readFile path
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -693,7 +693,7 @@ busTopic = do
                 (x : _) -> x
                 [] -> error "Q7: empty history"
               parentId = fromIntegral (length hist - 1) :: PostId
-           in case markOf p of
+           in case controlMark p of
                 Just m
                   | isHalt m -> []
                 _ -> [(mkPost seatName [from p] ("ack: " <> body p)) {thread = [parentId]}]
@@ -701,7 +701,7 @@ busTopic = do
         a = mkPost "human" [seatName] "one"
         b = mkPost "human" [seatName] "two"
         c = mkPost "human" [seatName] "three"
-        stopper = mkPost "human" [seatName] (markGlyph Landed <> " done")
+        stopper = mkPost "human" [seatName] (markGlyph Landed)
         -- The pure Log is newest-first (post = cons); seeding it
         -- newest-first makes the whole lifecycle consistent, and
         -- 'watch' is the calculus's own oldest-first reading.
@@ -765,7 +765,7 @@ busTopic = do
           (\stored -> ioTurn (pure (replyAct "quiet" stored "plain local response")))
           >> putMVar done ()
     causing <- postLocal root (mkPost "human" ["quiet"] "*(no post)*")
-    _ <- postLocal root (mkPost "human" ["quiet"] (markGlyph Landed <> " done"))
+    _ <- postLocal root (mkPost "human" ["quiet"] (markGlyph Landed))
     takeMVar done
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)

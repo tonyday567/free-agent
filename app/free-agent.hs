@@ -389,10 +389,13 @@ runHermesAuto threshold rebootFile budget cfg = do
                     writeRefreshRequest root agentName tokens
                     let cause = stamped stored
                     pure
+                      -- Control form: the glyph alone on the first line
+                      -- stands the seat down for the refresh; the reason
+                      -- rides on the line below it.
                       [ ( mkPost
                             agentName
                             [from cause]
-                            (markGlyph StandDown <> " automatic refresh at " <> T.pack (show tokens) <> " prompt tokens")
+                            (markGlyph StandDown <> "\nautomatic refresh at " <> T.pack (show tokens) <> " prompt tokens")
                         )
                           { channel = channel cause
                           }

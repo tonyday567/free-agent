@@ -12,6 +12,7 @@ import Axioma.Connector (connectorTopic)
 import Axioma.Delivery (deliveryTopic)
 import Axioma.Diagram (diagramTopic)
 import Axioma.Fare (fareTopic)
+import Axioma.Halt (haltTopic)
 import Axioma.Lifecycle (lifecycleTopic)
 import Axioma.Meeting (meetingTopic)
 import Axioma.Persist (persistTopic)
@@ -32,6 +33,7 @@ data Topic
   | Diagram
   | Meeting
   | Bus
+  | Halt
   | Quiesce
   | Persist
   | Refresh
@@ -52,6 +54,7 @@ topicName Delivery = "delivery"
 topicName Diagram = "diagram"
 topicName Meeting = "meeting"
 topicName Bus = "bus"
+topicName Halt = "halt"
 topicName Quiesce = "quiesce"
 topicName Persist = "persist"
 topicName Refresh = "refresh"
@@ -71,6 +74,7 @@ topicDesc Delivery = "delivery settlement: quiet response, exactly-once await, e
 topicDesc Diagram = "diagram bridge + bend with delay: machine bodies as string diagrams"
 topicDesc Meeting = "meeting skeletons, panel meeting, replay, derivations as 2-cells"
 topicDesc Bus = "bus stats + seats: supervision, self-halt, card meetings, M1a ancestry, the seam (Q7)"
+topicDesc Halt = "the halt form (Y1): a status label is content, a bare first line is control"
 topicDesc Quiesce = "tailLog draining + the quiescence Moore (Q1-Q5)"
 topicDesc Persist = "watermark persister (B1-B3), anti-pollution (B4), stamping daemon"
 topicDesc Refresh = "automatic same-name session refresh and durable handoff"
@@ -115,6 +119,7 @@ runTopic Delivery = deliveryTopic
 runTopic Diagram = diagramTopic
 runTopic Meeting = meetingTopic
 runTopic Bus = busTopic
+runTopic Halt = haltTopic
 runTopic Quiesce = quiesceTopic
 runTopic Persist = persistTopic
 runTopic Refresh = refreshTopic

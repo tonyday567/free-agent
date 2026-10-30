@@ -107,7 +107,7 @@ acpTopic = do
         when (code /= ExitSuccess) (putStrLn err)
         putMVar done code
     _ <- postLocal root (mkPost "human" ["acp1"] "ping")
-    _ <- postLocal root (mkPost "human" ["acp1"] (markGlyph Landed <> " done"))
+    _ <- postLocal root (mkPost "human" ["acp1"] (markGlyph Landed))
     code <- takeMVar done
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
