@@ -74,7 +74,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Free.Agent.Bus (postLocal, readFileStrict)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (Human (..), attachHuman, humanNames, readCursor, readHuman, removeHuman, writeCursor)
-import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbGlyph, hbText, readHeartbeat)
+import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbGlyph, hbPath, hbText, readHeartbeat)
 import Free.Agent.BusStats (SliceMode (..), slicePosts)
 import Free.Agent.Cli.Config (rootOpt)
 import Options.Applicative
@@ -119,6 +119,7 @@ data BusCommand
   | InboxCommand FilePath Text Bool Depth
   | AttachCommand FilePath Text
   | DetachCommand FilePath Text
+  | RetireCommand FilePath Text
   | ReadyCommand FilePath Depth
   | CursorGetCommand FilePath Text
   | CursorSetCommand FilePath Text PostId
@@ -248,6 +249,9 @@ attachCmd = AttachCommand <$> rootOpt <*> nameArg
 detachCmd :: Parser BusCommand
 detachCmd = DetachCommand <$> rootOpt <*> nameArg
 
+retireCmd :: Parser BusCommand
+retireCmd = RetireCommand <$> rootOpt <*> nameArg
+
 readyCmd :: Parser BusCommand
 readyCmd = ReadyCommand <$> rootOpt <*> depthOpt (Depth 1)
 
@@ -335,6 +339,7 @@ busParser =
         <> command "inbox" (info (inboxCmd <**> helper) (progDesc "Print unread posts addressed to NAME; --mark-read advances .cursor-NAME to the last printed id"))
         <> command "attach" (info (attachCmd <**> helper) (progDesc "Record NAME as the human attached to this root (evidence only; changes no delivery or READY path)"))
         <> command "detach" (info (detachCmd <**> helper) (progDesc "Remove NAME's attached-human marker (the cursor and unread mail are untouched)"))
+        <> command "retire" (info (retireCmd <**> helper) (progDesc "Write the dead marker to NAME's heartbeat: the seat leaves the live roster, its cursor, log and transcripts stay as evidence; no process is signalled"))
         <> command "ready" (info (readyCmd <**> helper) (progDesc "List unclaimed open TASKs with no unresolved blocker"))
         <> command "cursor" (info (cursorCmd <**> helper) (progDesc "Read or write agent cursor"))
         <> command "ping-watch" (info (pingWatchCmd <**> helper) (progDesc "Watch the ping file for NAME and exit on change"))
@@ -354,6 +359,7 @@ runBusCommand (ReadCommand root names since thr depth) = runRead root names sinc
 runBusCommand (InboxCommand root name markRead depth) = runInbox root name markRead depth
 runBusCommand (AttachCommand root name) = runAttach root name
 runBusCommand (DetachCommand root name) = runDetach root name
+runBusCommand (RetireCommand root name) = runRetire root name
 runBusCommand (ReadyCommand root depth) = runReady root depth
 runBusCommand (CursorGetCommand root name) = runCursorGet root name
 runBusCommand (CursorSetCommand root name pid) = runCursorSet root name pid
@@ -578,6 +584,31 @@ runDetach root name = do
         <> T.pack root'
     )
 
+-- | Retire a seat: write the @dead@ marker to its heartbeat. The seat
+-- leaves the live roster from the next @status --live@; its cursor, log
+-- posts, transcripts and the heartbeat file itself stay as evidence. No
+-- process is signalled — a genuinely live seat's next heartbeat write
+-- overwrites the marker, which is the honest outcome of a mistaken
+-- retirement. The pid recorded is the seat's last known one, not the
+-- caller's.
+runRetire :: FilePath -> Text -> IO ()
+runRetire root name = do
+  root' <- resolveRoot root
+  requireBus root'
+  mhb <- readHeartbeat root' name
+  ts <- getCurrentTime
+  let mpid = case mhb of
+        Just (_, _, p) -> p
+        Nothing -> Nothing
+  TIO.writeFile
+    (hbPath root' name)
+    ( "dead "
+        <> T.pack (iso8601Show ts)
+        <> maybe "" (\p -> " " <> T.pack (show p)) mpid
+        <> "\n"
+    )
+  TIO.putStrLn ("🔴 " <> name <> " retired on " <> T.pack root')
+
 postsOf :: Text -> [Stamped Text]
 postsOf content = mapMaybe (unframeStored @Text) (filter (not . T.null) (T.lines content))
 
@@ -586,17 +617,9 @@ runReady root depth = do
   let path = root </> "log.jsonl"
   exists <- doesFileExist path
   content <- if exists then readFileStrict path else pure ""
-  humans <- if exists then humanNames root else pure []
   let posts = postsOf content
-  traverse_ (TIO.putStrLn . renderStoredWith (humanLabel humans) depth) (readyPosts posts)
+  traverse_ (TIO.putStrLn . renderStored depth) (readyPosts posts)
   traverse_ (TIO.hPutStrLn stderr) (readyWarnings posts)
-
--- | The attached-human label for a rendered name: the name reads as a
--- person rather than a seat. Evidence only — it labels names already in a
--- row, and the row set, its order and its ids are the marker's business in
--- no way at all.
-humanLabel :: [Name] -> Name -> Text
-humanLabel humans n = if n `elem` humans then " (human)" else ""
 
 -- | Open TASK offers that have no claim, owner DONE, or unresolved blocker.
 -- A directed TASK is assigned at creation and is therefore not an open offer.
@@ -804,10 +827,10 @@ runPingWatch root name = do
 data SeatStatus = CaughtUp | Done | Behind Integer
 
 -- | Liveness from state, age, and (for current files) a process probe.
--- An explicit dead marker is retired and a dead pid is crashed. A stale
--- wake/working state with a live pid is stale, not crashed; without a
--- trustworthy probe its liveness stays unknown. Idle uses the pid probe
--- without ageing out.
+-- An explicit dead marker is retired and a dead pid is crashed. Any live
+-- state silent past the threshold reads stale — a live pid does not rescue
+-- it, because pids are recycled and a heartbeat older than the threshold
+-- is a stale seat whatever the process table says. Fresh idles stay green.
 hbVerdict :: NominalDiffTime -> UTCTime -> Maybe Heartbeat -> IO (Text, Text)
 hbVerdict threshold now mhb = case mhb of
   Nothing -> pure ("⚪", "no heartbeat")
@@ -816,17 +839,11 @@ hbVerdict threshold now mhb = case mhb of
     alive <- maybe (pure Nothing) pidAlive mpid
     let age = diffUTCTime now ts
         stale = age > threshold
-        legacyUnknown = st == Idle && stale && mpid == Nothing && alive == Nothing
-        probeUnknown = st == Idle && isJust mpid && alive == Nothing
-        ordinary = (hbGlyph st, hbText st <> " " <> fmtAge age <> " ago")
         verdict
           | alive == Just False = ("🔴", "pid " <> maybe "?" (T.pack . show) mpid <> " is not running — crashed?")
-          | st /= Idle && stale && alive == Just True =
-              ("🟡", hbText st <> " " <> fmtAge age <> " ago; pid " <> maybe "?" (T.pack . show) mpid <> " alive — stale?")
-          | st /= Idle && stale = ("⚪", hbText st <> " " <> fmtAge age <> " ago; liveness unknown — stale?")
-          | legacyUnknown = ("⚪", "idle " <> fmtAge age <> " ago; no pid — liveness unknown")
-          | probeUnknown = ("⚪", "idle " <> fmtAge age <> " ago; pid liveness unknown")
-          | otherwise = ordinary
+          | stale && alive == Just True = ("🟡", hbText st <> " " <> fmtAge age <> " ago; pid " <> maybe "?" (T.pack . show) mpid <> " alive — stale?")
+          | stale = ("⚪", hbText st <> " " <> fmtAge age <> " ago; liveness unknown — stale?")
+          | otherwise = (hbGlyph st, hbText st <> " " <> fmtAge age <> " ago")
     pure verdict
 
 pidAlive :: CPid -> IO (Maybe Bool)
@@ -889,7 +906,7 @@ runStatus root threshold live depth@(Depth d) = do
               pure (n, mcursor, mhb)
           )
           seats
-      traverse_ (renderSeat now posts humans) (filter (\(_, _, mhb) -> activeSeat mhb) rows)
+      traverse_ (renderSeat now posts) (filter (\(_, _, mhb) -> activeSeat mhb) rows)
     else when (d >= 1) $ do
       cursors <- traverse (\n -> (n,) <$> readCursor root n) cursorNames
       let statuses = map (seatStatus posts maxId) cursors
@@ -949,15 +966,11 @@ runStatus root threshold live depth@(Depth d) = do
             <> fmtAge age
             <> " ago)"
 
-    -- One seat at the requested depth. An attached human is labelled as a
-    -- person: the marker is read here, and nowhere on a delivery, READY,
-    -- claim, DONE or completion path.
-    renderSeat now posts humans (n, mcursor, mhb) = do
+    -- One seat at the requested depth. A name is its own label: attached
+    -- humans render exactly like seats, by name, with no role tag.
+    renderSeat now posts (n, mcursor, mhb) = do
       (dot, stateText) <- hbVerdict threshold now mhb
-      let isHuman = n `elem` humans
-          role = if isHuman then "human · " else ""
-          humanTag = if isHuman then " · human" else ""
-          cursorText = maybe "—" (T.pack . show) mcursor
+      let cursorText = maybe "—" (T.pack . show) mcursor
           lastText = case lastFor n posts of
             Nothing -> "no posts"
             Just s ->
@@ -969,9 +982,9 @@ runStatus root threshold live depth@(Depth d) = do
                 <> fmtAge (diffUTCTime now (fst (stamp s)))
                 <> " ago"
       if d <= 0
-        then TIO.putStrLn (dot <> " " <> n <> humanTag)
+        then TIO.putStrLn (dot <> " " <> n)
         else do
-          TIO.putStrLn (dot <> " " <> n <> " — " <> role <> stateText <> "; cursor " <> cursorText <> "; " <> lastText)
+          TIO.putStrLn (dot <> " " <> n <> " — " <> stateText <> "; cursor " <> cursorText <> "; " <> lastText)
           when (d >= 2) $ do
             forM_ mhb $ \(st, ts, mpid) ->
               TIO.putStrLn

@@ -9,9 +9,9 @@
 --
 -- Legacy files without a pid still parse, but an old idle legacy file reads
 -- as unknown rather than live. A current file lets the reader probe the pid
--- without polling or invoking the seat. Staleness remains meaningful for
--- wake and working, which promise a later transition; idle is the parking
--- state and uses pid liveness instead. A torn read parses to 'Nothing'.
+-- without polling or invoking the seat. Staleness reads stale for every
+-- live state — an old heartbeat is a stale seat even when the pid still
+-- resolves, because pids are recycled. A torn read parses to 'Nothing'.
 --
 -- The seat manager writes the same file with @dead@ when it retires a seat
 -- it launched; the seat writes @dead@ itself on a clean exit.
