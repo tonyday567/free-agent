@@ -15,6 +15,9 @@
 #   * `status` reports unread as maxId - cursor + 1, which counts other people's
 #     mail. It disagrees with `inbox` on the same root. Repaired 31 Oct:
 #     the figure is now the mail count — what `inbox` prints for the name.
+#   * `read` on a root with no log.jsonl answered silently, exit 0, while inbox,
+#     say and status refused. Repaired 31 Oct: read and its thread view now
+#     refuse with the root named (free-agent ced433d).
 
 source "$(dirname "$0")/lib.sh"
 
@@ -42,7 +45,7 @@ assert_eq "read --cursor NAME agrees" "2" \
 assert_eq "and read NAME with no --since still prints both" "2" \
   "$(count_lines "$FA" bus read -r "$ROOT" bob --depth 0)"
 
-step "a root with no log: inbox refuses, read does not"
+step "a root with no log: every view refuses it, read included"
 # Not new_root: that writes an empty log.jsonl, and this step needs a root with
 # no log at all. Same per-run pid suffix, for the same concurrency reason.
 empty="$SCRATCH/$WALK/no-bus.$$"
@@ -50,9 +53,12 @@ rm -rf "$empty"
 mkdir -p "$empty"
 "$FA" bus inbox -r "$empty" bob --depth 0 >/dev/null 2>&1
 assert_eq "inbox exits 1" "1" "$?"
-"$FA" bus read -r "$empty" bob --depth 0 >/dev/null 2>&1
-assert_known "read NAME on a non-bus root exits 0 with no output" "0" "$?" \
-  "runRead skips the missing file and never calls requireBus, unlike inbox and say"
+out=$("$FA" bus read -r "$empty" bob --depth 0 2>&1); rc=$?
+assert_eq "read NAME exits 1" "1" "$rc"
+assert_eq "and names the root and the repair" "1" \
+  "$(printf '%s' "$out" | grep -c 'no log.jsonl; not a bus. Set FREE_AGENT_BUS_ROOT or use --root' || true)"
+"$FA" bus read -r "$empty" --thread 0 --depth 0 >/dev/null 2>&1
+assert_eq "the thread view refuses it too" "1" "$?"
 
 step "status's unread figure is the mail count, as inbox"
 new_root status-count
