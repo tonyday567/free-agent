@@ -13,6 +13,7 @@ import Axioma.Delivery (deliveryTopic)
 import Axioma.Diagram (diagramTopic)
 import Axioma.Fare (fareTopic)
 import Axioma.Halt (haltTopic)
+import Axioma.Interrupt (interruptTopic)
 import Axioma.Lifecycle (lifecycleTopic)
 import Axioma.Meeting (meetingTopic)
 import Axioma.Persist (persistTopic)
@@ -34,6 +35,7 @@ data Topic
   | Meeting
   | Bus
   | Halt
+  | Interrupt
   | Quiesce
   | Persist
   | Refresh
@@ -55,6 +57,7 @@ topicName Diagram = "diagram"
 topicName Meeting = "meeting"
 topicName Bus = "bus"
 topicName Halt = "halt"
+topicName Interrupt = "interrupt"
 topicName Quiesce = "quiesce"
 topicName Persist = "persist"
 topicName Refresh = "refresh"
@@ -75,6 +78,7 @@ topicDesc Diagram = "diagram bridge + bend with delay: machine bodies as string 
 topicDesc Meeting = "meeting skeletons, panel meeting, replay, derivations as 2-cells"
 topicDesc Bus = "bus stats + seats: supervision, self-halt, card meetings, M1a ancestry, the seam (Q7)"
 topicDesc Halt = "the halt form (Y1): a status label is content, a bare first line is control"
+topicDesc Interrupt = "the interrupted handler (Z1): an interrupted turn is not retried"
 topicDesc Quiesce = "tailLog draining + the quiescence Moore (Q1-Q5)"
 topicDesc Persist = "watermark persister (B1-B3), anti-pollution (B4), stamping daemon"
 topicDesc Refresh = "automatic same-name session refresh and durable handoff"
@@ -120,6 +124,7 @@ runTopic Diagram = diagramTopic
 runTopic Meeting = meetingTopic
 runTopic Bus = busTopic
 runTopic Halt = haltTopic
+runTopic Interrupt = interruptTopic
 runTopic Quiesce = quiesceTopic
 runTopic Persist = persistTopic
 runTopic Refresh = refreshTopic

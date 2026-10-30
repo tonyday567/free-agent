@@ -17,6 +17,7 @@ module Free.Agent.Cli
 
     -- * Query
     cliDeliverTo,
+    cliInterrupted,
 
     -- * Shard adapters
 
@@ -334,6 +335,21 @@ data FailedAttempt = FailedAttempt Int ExitCode Text Int
 cliMaxRetries :: Int
 cliMaxRetries = 3
 
+-- | Was this invocation cut off by a signal rather than by its own work?
+--
+-- Exit 130 is SIGINT (128 + 2), and the CLI says so in words:
+-- @Operation interrupted: waiting for model response (N.Ns elapsed)@.
+--
+-- Such an attempt is never retried.  The interruption is the client's own
+-- signal, a resumed session inherits the cut-off turn, and every retry
+-- appends another user message to a session that may still be held by the
+-- interrupted turn.  Measured on seat @yang@, 31 Oct 2026: four attempts
+-- reading 1,196s to 5,550s, each one resuming, each one ending in the same
+-- interruption, with the public error reporting the session as the fault.
+cliInterrupted :: ExitCode -> Text -> Bool
+cliInterrupted code raw =
+  code == ExitFailure 130 || "Operation interrupted" `T.isInfixOf` raw
+
 data CliControl = CliControl
   { cliActive :: MVar Bool,
     cliCancelled :: IORef Bool,
@@ -416,7 +432,26 @@ cliQueryWithDelivery delivery mControl cli prompt = do
     -- bounded evidence either way.
     retryWithSession t0' sid (FailedAttempt n code raw elapsed) = do
       writeTranscript (TranscriptFailed, Just n) t0' code raw elapsed (Just sid)
-      if cliExhausted cli code raw
+      if cliInterrupted code raw
+        then do
+          finishCli mControl
+          fail
+            ( "cliQuery: "
+                <> cliCommand cli
+                <> " was interrupted mid-turn (exit "
+                <> show code
+                <> ") at attempt "
+                <> show n
+                <> "; not retrying — a resumed session inherits the"
+                <> " interruption, and each retry appends a user message to a"
+                <> " session that may still be held by the interrupted turn;"
+                <> " session "
+                <> T.unpack sid
+                <> "; last output: "
+                <> T.unpack (T.take 400 raw)
+            )
+        else
+          if cliExhausted cli code raw
         then do
           finishCli mControl
           fail
