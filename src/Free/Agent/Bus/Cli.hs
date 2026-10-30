@@ -888,11 +888,8 @@ fmtAge s
 -- Idle uses the heartbeat pid for liveness.
 runStatus :: FilePath -> NominalDiffTime -> Bool -> Depth -> IO ()
 runStatus root threshold live depth@(Depth d) = do
+  requireBus root
   let path = root </> "log.jsonl"
-  exists <- doesFileExist path
-  unless exists $ do
-    TIO.putStrLn ("🔴 " <> T.pack root <> " — no log.jsonl; not a bus")
-    exitFailure
   content <- readFileStrict path
   let ls = filter (not . T.null) (T.lines content)
       posts = mapMaybe (unframeStored @Text) ls
