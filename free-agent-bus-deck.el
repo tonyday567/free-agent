@@ -872,7 +872,7 @@ log message still reaches the page.")
                     (match-string 1 line)
                   line)))
       (unless (string-match-p
-               "^\\(CLAIM\\|DONE\\|LINK\\|NOTE\\|REPORT\\|ACK\\|RECEIPT\\|✓\\|🟢\\)\\($\\|[ \t·]\\)\\|^I am seated\\b\\|^Standing by\\b"
+               "^\\(CLAIM\\|DONE\\|LINK\\|NOTE\\|REPORT\\|ACK\\|RECEIPT\\|✓\\|🟢\\|🟣\\|🟡\\|🔴\\|🔵\\|🚩\\)\\($\\|[ \t·]\\)\\|^I am seated\\b\\|^Standing by\\b"
                line)
         (string-join (split-string line "[ \t\r\n]+" t) " ")))))
 
