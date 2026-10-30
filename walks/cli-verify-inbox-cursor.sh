@@ -39,8 +39,11 @@ assert_eq "while read NAME with no --since prints both" "2" \
   "$(count_lines "$FA" bus read -r "$ROOT" bob --depth 0)"
 
 step "a root with no log: inbox refuses, read does not"
-mkdir -p "$SCRATCH/$WALK/no-bus"
-empty="$SCRATCH/$WALK/no-bus"
+# Not new_root: that writes an empty log.jsonl, and this step needs a root with
+# no log at all. Same per-run pid suffix, for the same concurrency reason.
+empty="$SCRATCH/$WALK/no-bus.$$"
+rm -rf "$empty"
+mkdir -p "$empty"
 "$FA" bus inbox -r "$empty" bob --depth 0 >/dev/null 2>&1
 assert_eq "inbox exits 1" "1" "$?"
 "$FA" bus read -r "$empty" bob --depth 0 >/dev/null 2>&1

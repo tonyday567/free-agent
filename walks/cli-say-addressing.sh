@@ -28,9 +28,16 @@ assert_known '--to "" writes a recipient list holding an empty name' '[""]' "$(f
   "not a public post either: deliversTo is False for [\"\"] as it is for [], so both reach nobody"
 
 step "measured: neither of those two reaches bob, and the addressed post does"
+# Reach is measured through the two CLI views, at an explicit depth so a change to a
+# default cannot quietly change what this asserts. Both views call `deliversTo`
+# (Bus/File.hs), and the seat delivery path is a separate implementation of the same
+# predicate, so this claim transfers by shared predicate rather than by end-to-end
+# measure; `bus watch` is a third consumer if that ever needs walking for real.
 "$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
-assert_eq "bob's readable mail is the addressed post alone" "0" "$("$FA" bus read -r "$ROOT" bob | json_ids)"
-assert_eq "and inbox agrees" "0" "$("$FA" bus inbox -r "$ROOT" bob | json_ids)"
+assert_eq "bob's readable mail is the addressed post alone" "0" \
+  "$("$FA" bus read -r "$ROOT" bob --depth 2 | json_ids)"
+assert_eq "and inbox agrees" "0" \
+  "$("$FA" bus inbox -r "$ROOT" bob --depth 2 | json_ids)"
 
 step "ancestry is carried verbatim, including ids that do not exist"
 printf 'with ancestry' | "$FA" bus say -r "$ROOT" --from alice --to bob --thread 0 >/dev/null
