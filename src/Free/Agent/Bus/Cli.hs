@@ -502,16 +502,16 @@ filterStored names line = do
 -- ---------------------------------------------------------------------------
 
 -- | Read a thread (all posts sharing a root id with the given post), or
--- posts addressed to NAMEs. A thread view ignores NAMEs.
+-- posts addressed to NAMEs. A thread view ignores NAMEs. A path that is not
+-- a bus is refused like every other command refuses it.
 runRead :: FilePath -> [Text] -> Maybe Since -> Maybe PostId -> Depth -> IO ()
 runRead root names since mThread depth = do
-  let path = root </> "log.jsonl"
-  exists <- doesFileExist path
-  when (not exists && mThread == Nothing) $ pure ()
+  root' <- resolveRoot root
+  requireBus root'
+  let path = root' </> "log.jsonl"
+  content <- readFileStrict path
   case mThread of
-    Just tid -> do
-      content <- if exists then readFileStrict path else pure ""
-      runThreadView (postsOf content) tid depth
+    Just tid -> runThreadView (postsOf content) tid depth
     Nothing -> do
       when (null names) $ do
         TIO.putStrLn "🔴 read requires NAME(s) or --thread ID"
@@ -519,8 +519,7 @@ runRead root names since mThread depth = do
       sinceId <- case since of
         Nothing -> pure 0
         Just (SinceId pid) -> pure pid
-        Just (SinceCursor name) -> readCursorAll root name
-      content <- if exists then readFileStrict path else pure ""
+        Just (SinceCursor name) -> readCursorAll root' name
       let lines' = T.lines content
       traverse_ (TIO.putStrLn . renderStored depth) (mapMaybe (filterSince names sinceId) lines')
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # cli-non-bus — a directory with no log.jsonl is not a bus.
 #
-# Every write surface must refuse a root that is not a bus, with the same
-# message and a non-zero exit. read is the exception: it quietly answers
-# nothing and exits 0, which is written down here as a known so the day it
-# grows a refusal this walk goes red.
+# Every surface must refuse a root that is not a bus, with the same
+# message and a non-zero exit. read was the exception — it quietly answered
+# nothing and exited 0 — and this walk pinned that as a known until the
+# refusal was wired in (31 Oct). All four surfaces refuse here now.
 
 source "$(dirname "$0")/lib.sh"
 
@@ -30,10 +30,16 @@ assert_eq "status exits non-zero" "1" "$rc"
 assert_eq "status names the reason" \
   "1" "$(printf '%s' "$out" | grep -c 'no log.jsonl; not a bus' || true)"
 
-step "read is not refused — and that is a defect written down"
+step "read is refused, the way the other three are"
 out=$("$FA" bus read -r "$ROOT" a --depth 1 2>&1); rc=$?
-assert_known "read exits 0 on a non-bus" "0" "$rc" \
-  "runRead treats a missing log as an empty one instead of refusing; the refusal shape exists for say, inbox and status but was never wired into read"
-assert_eq "and prints nothing" "0" "$(printf '%s' "$out" | sed '/^$/d' | wc -l | tr -d ' ')"
+assert_eq "read exits non-zero" "1" "$rc"
+assert_eq "read names the reason" \
+  "1" "$(printf '%s' "$out" | grep -c 'no log.jsonl; not a bus' || true)"
+
+step "read --thread is refused the same way"
+out=$("$FA" bus read -r "$ROOT" --thread 0 --depth 1 2>&1); rc=$?
+assert_eq "read --thread exits non-zero" "1" "$rc"
+assert_eq "read --thread names the reason" \
+  "1" "$(printf '%s' "$out" | grep -c 'no log.jsonl; not a bus' || true)"
 
 finish
