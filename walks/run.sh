@@ -28,12 +28,28 @@ dirty() { [ -n "$(git -C "$here" status --porcelain -- "$1" 2>/dev/null)" ]; }
 # A walk that hangs blocks the whole suite, so each one gets a wall-clock bound. The
 # bound is a failure, not a skip: measured 31 Oct when a ping-watch walk died mid-run
 # and took the tally with it. Override with WALK_TIMEOUT seconds.
+#
+# GNU timeout also gets --kill-after, so a walk that traps SIGTERM cannot outlive its
+# bound; either way the process group goes with it, so no stray child is left on a live
+# root. Where neither gtimeout nor timeout is on PATH the bound cannot be enforced, and
+# the run says so once rather than pretending the guarantee holds.
 walk_timeout=${WALK_TIMEOUT:-120}
+timeout_bin=""
+if command -v gtimeout >/dev/null 2>&1; then
+  timeout_bin=$(command -v gtimeout)
+elif command -v timeout >/dev/null 2>&1; then
+  timeout_bin=$(command -v timeout)
+fi
+kill_after=()
+if [ -n "$timeout_bin" ] && "$timeout_bin" --version 2>/dev/null | grep -qi gnu; then
+  kill_after=(--kill-after=5)
+fi
+if [ -z "$timeout_bin" ]; then
+  printf '######## note: no timeout(1) on PATH, so walks run without a wall-clock bound\n'
+fi
 run_walk() {
-  if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$walk_timeout" bash "$1"
-  elif command -v timeout >/dev/null 2>&1; then
-    timeout "$walk_timeout" bash "$1"
+  if [ -n "$timeout_bin" ]; then
+    "$timeout_bin" "${kill_after[@]+"${kill_after[@]}"}" "$walk_timeout" bash "$1"
   else
     bash "$1"
   fi
