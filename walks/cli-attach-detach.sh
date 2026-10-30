@@ -35,12 +35,12 @@ assert_eq "and the cursor is the cursor file's value at attach time" \
 step "detach removes the marker, the evidence stays"
 out=$("$FA" bus detach -r "$ROOT" runner 2>&1)
 assert_eq "detach names what it removed" \
-  "1" "$(printf '%s' "$out" | grep -c '^✗ detached runner from' || true)"
+  "1" "$(printf '%s' "$out" | grep -c '^✓ detached as runner on ' || true)"
 assert_eq "the marker is gone" "absent" "$([ -f "$ROOT/.human-runner" ] && echo present || echo absent)"
 assert_eq "the cursor file survives" "1" "$(cat "$ROOT/.cursor-runner")"
 assert_eq "the mail survives" "0" "$(ids_of_to runner)"
 out=$("$FA" bus detach -r "$ROOT" runner 2>&1)
 assert_eq "a second detach is honest about there being nothing" \
-  "1" "$(printf '%s' "$out" | grep -c '^⚠️ runner is not attached' || true)"
+  "1" "$(printf '%s' "$out" | grep -c '^✓ not attached as runner on ' || true)"
 
 finish

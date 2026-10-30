@@ -8,10 +8,9 @@
 
 source "$(dirname "$0")/lib.sh"
 
-step "a directory with no log.jsonl"
-ROOT="$SCRATCH/$WALK/nonbus"
-rm -rf "$ROOT"
-mkdir -p "$ROOT"
+step "a directory whose log.jsonl was removed after seeding"
+new_root nonbus
+rm "$ROOT/log.jsonl"
 
 step "say is refused"
 out=$(printf 'hi' | "$FA" bus say -r "$ROOT" --from a --to b 2>&1); rc=$?
@@ -32,7 +31,7 @@ assert_eq "status names the reason" \
   "1" "$(printf '%s' "$out" | grep -c 'no log.jsonl; not a bus' || true)"
 
 step "read is not refused — and that is a defect written down"
-out=$("$FA" bus read -r "$ROOT" a 2>&1); rc=$?
+out=$("$FA" bus read -r "$ROOT" a --depth 1 2>&1); rc=$?
 assert_known "read exits 0 on a non-bus" "0" "$rc" \
   "runRead treats a missing log as an empty one instead of refusing; the refusal shape exists for say, inbox and status but was never wired into read"
 assert_eq "and prints nothing" "0" "$(printf '%s' "$out" | sed '/^$/d' | wc -l | tr -d ' ')"

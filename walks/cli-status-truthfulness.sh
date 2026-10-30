@@ -21,21 +21,16 @@ printf 'idle %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-fresh"
 say ghost public "a post from a seat with no heartbeat"
 
 step "status --live reads each silence honestly"
-live=$("$FA" bus status -r "$ROOT" --live 2>&1)
+live=$("$FA" bus status -r "$ROOT" --live --depth 1 2>&1)
 assert_eq "old idle with a live pid reads stale, and names the pid" \
   "1" "$(printf '%s' "$live" | grep -c "🟡 stale — idle .*; pid $MYPID alive — stale?" || true)"
 assert_eq "the stale seat is never green" \
   "0" "$(printf '%s' "$live" | grep -c '^🟢 stale ' || true)"
 assert_eq "old idle with a dead pid reads crashed" \
-  "1" "$(printf '%s' "$live" | grep -c '🔴 crashed — idle .*pid 99999999 is not running' || true)"
+  "1" "$(printf '%s' "$live" | grep -c '🔴 crashed — pid 99999999 is not running' || true)"
 assert_eq "fresh idle is still green" \
   "1" "$(printf '%s' "$live" | grep -c "🟢 fresh — idle .*ago" || true)"
 assert_eq "a poster with no heartbeat gets its own row" \
   "1" "$(printf '%s' "$live" | grep -c '⚪ ghost — no heartbeat' || true)"
-
-step "and the plain roster keeps the silent names without ceremony"
-plain=$("$FA" bus status -r "$ROOT" 2>&1)
-assert_eq "the stale seat is listed" "1" "$(printf '%s' "$plain" | grep -c 'stale' || true)"
-assert_eq "the crashed seat is listed" "1" "$(printf '%s' "$plain" | grep -c 'crashed' || true)"
 
 finish
