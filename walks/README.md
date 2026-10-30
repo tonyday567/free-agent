@@ -38,6 +38,17 @@ Skipped walks are listed with their reason: `work in progress` for a modified fi
 not committed` for an untracked one. If `lib.sh` itself is uncommitted, every walk is
 skipped with that reason, since they would all be running against uncommitted helpers.
 
+## installing, and what the tally is a fact about
+
+Walks run against whatever `FA` points at, defaulting to the `free-agent` on `PATH` - the
+installed binary. So the shared tally is a fact about the installed binary, and installing
+mid-repair makes it a fact about half-finished work instead. The convention that follows:
+`cabal build`, probe against the binary under `dist-newstyle` by path, and install only
+when the suite is green. A walk run can exercise the dist build directly the same way -
+`FA=<dist path> bash walks/run.sh` - so a seat can verify against work that is built but
+not installed, which is where yang landed on this after a WIP install reddened the shared
+number twice.
+
 ## waiting on a watcher
 
 A walk that waits for a watcher must converge on it, not sleep at it. FSEvents
