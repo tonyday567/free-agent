@@ -14,10 +14,12 @@ step "a root with four seats in four different silences"
 new_root status
 MYPID=$$
 TWO_HOURS_AGO=$(date -u -v-2H +%Y-%m-%dT%H:%M:%S.000000Z)
+TWO_AHEAD=$(date -u -v+2H +%Y-%m-%dT%H:%M:%S.000000Z)
 NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)
 printf 'idle %s %s' "$TWO_HOURS_AGO" "$MYPID" >"$ROOT/.hb-stale"
 printf 'idle %s 99999999' "$TWO_HOURS_AGO" >"$ROOT/.hb-crashed"
 printf 'idle %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-fresh"
+printf 'idle %s %s' "$TWO_AHEAD" "$MYPID" >"$ROOT/.hb-skewed"
 say ghost public "a post from a seat with no heartbeat"
 
 step "status --live reads each silence honestly"
@@ -32,5 +34,8 @@ assert_eq "fresh idle is still green" \
   "1" "$(printf '%s' "$live" | grep -c "🟢 fresh — idle .*ago" || true)"
 assert_eq "a poster with no heartbeat gets its own row" \
   "1" "$(printf '%s' "$live" | grep -c '⚪ ghost — no heartbeat' || true)"
+assert_known "a future heartbeat with a live pid reads green, with a negative age" \
+  "1" "$(printf '%s' "$live" | grep -c '🟢 skewed — idle -[0-9]*s ago' || true)" \
+  "runStatusLive subtracts the timestamp from now without clamping, so a clock-skewed seat sits in the roster looking healthy for as long as the skew lasts — measured 31 Oct: idle -7200s ago for a heartbeat stamped two hours ahead; clamp the negative and say why"
 
 finish
