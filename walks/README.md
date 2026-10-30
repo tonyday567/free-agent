@@ -38,6 +38,16 @@ Skipped walks are listed with their reason: `work in progress` for a modified fi
 not committed` for an untracked one. If `lib.sh` itself is uncommitted, every walk is
 skipped with that reason, since they would all be running against uncommitted helpers.
 
+## waiting on a watcher
+
+A walk that waits for a watcher must converge on it, not sleep at it. FSEvents
+registration is not observable from outside — a write inside the registration gap is
+missed entirely and never replayed, and a write that lands before registration can
+arrive historically. So a sleep is a race the bound will eventually catch under load,
+and the honest patterns are: poll for the child's exit, arm a second write if the first
+did not take, and trap EXIT so no watcher outlives a failed run. `cli-ping-watch.sh`
+carries the long form in its header, after a flake that cost a morning.
+
 ## the two assertions
 
 ⟜ `assert_eq` ⟜ the behaviour we want. A failure is a bug to fix.
