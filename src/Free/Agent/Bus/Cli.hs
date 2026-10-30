@@ -409,7 +409,7 @@ runSay :: FilePath -> Text -> [Text] -> Maybe PostId -> [Text] -> IO ()
 runSay root fromName toNames thr bodyWords = do
   root' <- resolveRoot root
   when (any T.null toNames) $ do
-    TIO.hPutStrLn stderr "🔴 say: empty recipient name — omit --to for a public post"
+    TIO.hPutStrLn stderr "🔴 say: empty recipient name — omit --to to post unaddressed (visible in the log, delivered to no seat)"
     exitFailure
   bodyText <- case bodyWords of
     (w : _) -> pure (T.unwords (w : drop 1 bodyWords))
@@ -432,7 +432,7 @@ runPost root mfrom mto mbody viaDaemon = do
   p <- case (mfrom, mbody) of
     (Just fromName, Just bodyText) -> do
       when (any T.null mto) $ do
-        TIO.hPutStrLn stderr "🔴 post: empty recipient name — omit --to for a public post"
+        TIO.hPutStrLn stderr "🔴 post: empty recipient name — omit --to to post unaddressed (visible in the log, delivered to no seat)"
         exitFailure
       pure (mkPost fromName mto bodyText)
     (Nothing, Nothing) -> do

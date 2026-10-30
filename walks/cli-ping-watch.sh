@@ -40,6 +40,14 @@ wait_gone() {
   gone
 }
 
+# reap — kill the watcher if it is still up, then collect it. A missed event
+# leaves runPingWatch blocked on its MVar forever, and a bare `wait` would
+# hang the walk the same way; the suite's 120s kill is the only other end.
+reap() {
+  kill -0 "$wpid" 2>/dev/null && kill "$wpid" 2>/dev/null
+  wait "$wpid" 2>/dev/null || true
+}
+
 step "a change wakes the watcher and it prints the content"
 new_root pingw
 out="$ROOT/pingw.out"
@@ -70,7 +78,7 @@ else
     bad "the watcher missed two changes fifteen seconds apart" "gone" "alive"
   fi
 fi
-wait "$wpid" 2>/dev/null || true
+reap
 wpid=""
 
 step "a missing ping file — the watcher wakes on its own creation"
@@ -81,8 +89,8 @@ out="$ROOT/pingw.out"
 wpid=$!
 assert_known "gone within fifteen seconds, with no external write" "gone" \
   "$(if wait_gone 15; then echo gone; else echo alive; fi)" \
-  "runPingWatch touches a missing ping file before the watch registers; the creation event lands in the fresh FSEvents window and fires the handler, so the watcher exits on its own setup instead of waiting — a seat that ping-watches cold wakes instantly on nothing. The event is historical, so it cannot be missed, only delayed"
-wait "$wpid" 2>/dev/null || true
+  "runPingWatch touches a missing ping file before the watch registers, and the creation event fires the handler when it lands in the delivered window — so the watcher exits on its own setup instead of waiting, and a seat that ping-watches cold wakes instantly on nothing. Measured 31 Oct under back-to-back load: the event can miss the window entirely, the self-fire never comes, and the watcher blocks forever — whether that startup race is a CLI defect or substrate behaviour is the open question this known guards"
+reap
 wpid=""
 assert_known "and prints nothing" "" "$(cat "$out")" \
   "the self-fire reads the just-created empty file, so the wake channel delivers an empty line — the cold-start ping carries no content either"
