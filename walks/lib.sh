@@ -44,8 +44,12 @@ assert_known() {
 
 # new_root NAME — a fresh scratch bus with an empty log, which is what the CLI
 # accepts: an empty log.jsonl is a bus, a missing one is refused.
+#
+# The path carries this shell's pid, because seats run the suite concurrently and a
+# shared path means two runs clobber each other's roots — measured 31 Oct: a suite
+# that passes three times in a row failed once while four walk processes were up.
 new_root() {
-  ROOT="$SCRATCH/$WALK/$1"
+  ROOT="$SCRATCH/$WALK/$1.$$"
   rm -rf "$ROOT"
   mkdir -p "$ROOT"
   : >"$ROOT/log.jsonl"
