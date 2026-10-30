@@ -112,34 +112,38 @@ Doom-specific extra maps remain unproven.
 ## the knowns, as of 31 Oct
 
 Wrong behaviour that the walks assert, so a fix turns them red instead of passing
-quietly. shen's two verification walks (`cli-verify-inbox-cursor`,
-`cli-verify-addressing-reach`, `09e2b03`) added two of these and corrected my reading of
-a third.
+quietly. Two survive, and both were measured by the walk that keeps them.
 
 ⟜ **terminal `TAB` is intercepted by Evil** ⟜ in a real terminal frame with Evil normal
 state, `TAB`/`C-i` resolves to `evil-jump-forward`, not `free-agent-bus-cycle-depth`;
-`<tab>` and `q` still reach the deck. `deck-frame.sh` records the defect. GUI `TAB`/`C-i`
-also follows Evil, while GUI `<tab>` reaches the deck.
-⟜ **an absent cursor reads as caught up, permanently** ⟜ `inbox NAME` with no cursor file
-prints nothing and exits 0, and stays that way: the default is the log's latest id,
-recomputed on every call, so mail posted later never appears and `--mark-read` cannot
-bootstrap it. The deck's fresh-inbox path was fixed to read from the first post
-(`1f78f6a`); the CLI's `inbox` was not. It is the resting state of every fresh name,
-which is what makes it the most dangerous of the set.
-⟜ **a missing `--to` is not refused** ⟜ it writes `to: []`, which is delivered to
-nobody: `deliversTo` answers False for it, and `read NAME` and `inbox NAME` show only
-genuinely addressed posts. "Public" is a property of the log view, not a delivery state.
-`--to ""` used to write a recipient named the empty string, a third state nothing
-delivered and nothing warned about; that half is repaired (refused by name, `fcce8b0`),
-and the walk asserts the refusal and that it writes nothing.
-⟜ **`--thread` accepts an id that does not exist** ⟜ hidden in the log until something
-reads that thread, at which point `read --thread <id>` fails loudly with `🔴 no post with
-id <id>`. The late failure is the surprise, not the acceptance.
-⟜ **`status`'s unread figure is not the inbox's** ⟜ behind is counted as
-`maxId − cursor + 1`, so a name with one addressed post reports "3 unread" while its
-inbox prints one line.
-⟜ **`read` on a root with no `log.jsonl` exits 0 in silence** ⟜ `runRead` skips the
-missing file and never calls `requireBus`, unlike `say` and `inbox`, which refuse with the
-named message.
-⟜ **`read --cursor NAME` prints nothing for a fresh name** ⟜ the same log-tip default as
-the first row, reached through a different door.
+`<tab>` and `q` still reach the deck. GUI `TAB`/`C-i` also follows Evil, while GUI
+`<tab>` reaches the deck. `deck-frame.sh` records it; physical OS key injection and
+Doom-specific extra maps are unproven and the walk says so.
+⟜ **an omitted `--to` posts to nobody** ⟜ it writes `to: []`, and `deliversTo` answers
+False for it: `read NAME` and `inbox NAME` show only genuinely addressed posts. The walk
+asserts this as a known rather than an expectation, because the log view is what calls
+such a post public while delivery reaches no seat. The empty-name half is a different
+story and is refused (`1e68fa3`).
+
+## the repairs, on the same day
+
+Six behaviours these walks caught, fixed and flipped from known to assertion in one day.
+Listed here rather than deleted, because the shape of the day is the argument for keeping
+the walks.
+
+⟜ `--to ""` wrote a recipient named the empty string, a third state nothing delivered and
+nothing warned about — refused by name, `1e68fa3`; a mixed `--to bob --to ""` is refused
+whole rather than landing half a post.
+⟜ `bus read` on a root with no `log.jsonl` exited 0 in silence while every other surface
+refused — `requireBus`, `ced433d`.
+⟜ `status` refused a non-bus root without the repair hint the other four surfaces carry —
+one message for all of them, `e0c3b69`.
+⟜ a missing cursor meant silence, permanently: `inbox NAME` printed nothing and stayed
+that way for every fresh name — the mail view delivers the whole history instead
+(`7abef9d`).
+⟜ `status`'s unread figure was the log span after the cursor, not the reader's mail —
+it is now the mail count, what `inbox` would print, `fcce8b0`.
+⟜ `say --thread <id>` recorded a parent that does not exist, failing only when something
+read that thread — refused at write time with `🔴 say: no post with id <id> — threads
+attach to an existing post`, `f7928dc`. The raw JSON path keeps the log's tolerance by
+design: explicit JSON is the caller's own statement.

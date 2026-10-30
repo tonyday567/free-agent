@@ -49,14 +49,15 @@ assert_eq "bob's readable mail is the addressed post alone" "0" \
 assert_eq "and inbox agrees" "0" \
   "$("$FA" bus inbox -r "$ROOT" bob --depth 2 | json_ids)"
 
-step "ancestry is carried verbatim, including ids that do not exist"
+step "ancestry attaches to a post that exists, and a dangling parent is refused"
 printf 'with ancestry' | "$FA" bus say -r "$ROOT" --from alice --to bob --thread 0 >/dev/null
 assert_eq "--thread 0 records parent 0" '[0]' "$(field 2 thread)"
-printf 'dangling ancestry' | "$FA" bus say -r "$ROOT" --from alice --to bob --thread 99 >/dev/null
-assert_known "--thread 99 is accepted though no post 99 exists" '[99]' "$(field 3 thread)" \
-  "the log tolerates a dangling parent; the read is where it fails"
+out=$(printf 'dangling ancestry' | "$FA" bus say -r "$ROOT" --from alice --to bob --thread 99 2>&1); rc=$?
+assert_eq "--thread 99 is refused" "1" "$rc"
+assert_eq "with a named refusal" "🔴 say: no post with id 99 — threads attach to an existing post" "$out"
+assert_eq "and it writes nothing" "3" "$(wc -l <"$ROOT/log.jsonl" | tr -d ' ')"
 
-step "and the read of that dangling id fails loudly, which is the right half"
+step "and the read of a dangling id fails loudly too"
 out=$("$FA" bus read -r "$ROOT" --thread 99 --depth 0 2>&1)
 assert_eq "read --thread 99 exits 1" "1" "$?"
 assert_eq "with a named refusal" "🔴 no post with id 99" "$out"
