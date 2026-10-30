@@ -868,7 +868,10 @@ fmtAge s
 -- | Print a bus status report.
 --
 -- A seat whose latest own post is a halt mark (🟢/🔵) is reported as @done@
--- rather than @behind@: decided quiet is a read, not an inference.
+-- rather than @behind@: decided quiet is a read, not an inference. The
+-- unread figure behind a seat is the mail count — what 'runInbox' would
+-- print for that name — so another seat's posts and public posts never
+-- read as its mail.
 --
 -- With @--live@ the active seat block is derived from the heartbeats instead:
 -- one dot per seat, a line of state, cursor and last post, and — at depth 2 —
@@ -1016,8 +1019,12 @@ runStatus root threshold live depth@(Depth d) = do
     seatStatus posts maxId (n, c)
       | isDone = (n, c, Done)
       | c > maxId = (n, c, CaughtUp)
-      | otherwise = (n, c, Behind (fromIntegral maxId - fromIntegral c + 1 :: Integer))
+      | otherwise = (n, c, Behind (fromIntegral unread))
       where
+        -- The unread figure is the mail count — what 'runInbox' would print
+        -- for the name — not the log span after the cursor, so other
+        -- people's posts and public posts do not read as this name's mail.
+        unread = length [() | s <- posts, snd (stamp s) >= c, deliversTo (stamped s) [n]]
         isDone =
           case latestBy n posts of
             Nothing -> False

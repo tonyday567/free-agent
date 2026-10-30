@@ -10,9 +10,11 @@
 #     answers differ (2 versus 3).
 #   * the absent-cursor default is not an inbox quirk: `read --cursor NAME` reads
 #     the same cursor through the same function, and is silent for a fresh name.
-#     Untested by the four walks.
+#     Untested by the four walks. Repaired 31 Oct: the mail view treats a
+#     missing cursor as nothing-seen (free-agent 7abef9d).
 #   * `status` reports unread as maxId - cursor + 1, which counts other people's
-#     mail. It disagrees with `inbox` on the same root.
+#     mail. It disagrees with `inbox` on the same root. Repaired 31 Oct:
+#     the figure is now the mail count — what `inbox` prints for the name.
 
 source "$(dirname "$0")/lib.sh"
 
@@ -52,7 +54,7 @@ assert_eq "inbox exits 1" "1" "$?"
 assert_known "read NAME on a non-bus root exits 0 with no output" "0" "$?" \
   "runRead skips the missing file and never calls requireBus, unlike inbox and say"
 
-step "status counts posts after the cursor, not posts addressed to the name"
+step "status's unread figure is the mail count, as inbox"
 new_root status-count
 say alice bob "for bob"
 say alice carol "for carol"
@@ -60,7 +62,6 @@ say alice carol "for carol again"
 "$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
 assert_eq "inbox says bob has one" "1" "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)"
 row=$("$FA" bus status -r "$ROOT" --depth 1 2>&1 | grep 'bob @' | sed 's/^ *//' || true)
-assert_known "status says three" "bob @0 (3 unread)" "$row" \
-  "Behind is maxId - cursor + 1, so other people's posts count as the name's unread"
+assert_eq "status agrees: one unread, not the log span" "bob @0 (1 unread)" "$row"
 
 finish
