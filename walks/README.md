@@ -20,6 +20,13 @@ non-zero exit on failure.
 Scratch only: never the runner's live root, live daemon or frames. CLI walks need no
 daemon at all. Deck walks load the deck in a scratch Emacs against a scratch root.
 
+## a walk that hangs
+
+Each walk gets 120 seconds of wall clock (`WALK_TIMEOUT` seconds to change it) and a kill
+is counted as a failure, with its own line: `FAIL the walk hung and was killed after Ns`.
+A walk that never returns would otherwise take the whole tally with it — measured 31 Oct
+when a ping-watch walk died mid-run and the run printed no summary at all.
+
 ## exit codes
 
 ⟜ `0` ⟜ every committed walk passed.

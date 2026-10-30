@@ -25,6 +25,20 @@ done
 
 dirty() { [ -n "$(git -C "$here" status --porcelain -- "$1" 2>/dev/null)" ]; }
 
+# A walk that hangs blocks the whole suite, so each one gets a wall-clock bound. The
+# bound is a failure, not a skip: measured 31 Oct when a ping-watch walk died mid-run
+# and took the tally with it. Override with WALK_TIMEOUT seconds.
+walk_timeout=${WALK_TIMEOUT:-120}
+run_walk() {
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$walk_timeout" bash "$1"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout "$walk_timeout" bash "$1"
+  else
+    bash "$1"
+  fi
+}
+
 # What kind of uncommitted a file is, for the label: a modified walk is work in
 # progress, an untracked one is a walk that does not exist for anyone but its author.
 uncommitted_kind() {
@@ -58,9 +72,13 @@ for walk in "$here"/$pattern; do
     continue
   fi
   printf '\n######## %s\n' "$name"
-  if bash "$walk"; then
+  if run_walk "$walk"; then
     passed=$((passed + 1))
   else
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+      printf '  FAIL   the walk hung and was killed after %ss (WALK_TIMEOUT)\n' "$walk_timeout"
+    fi
     failed=$((failed + 1))
   fi
 done
