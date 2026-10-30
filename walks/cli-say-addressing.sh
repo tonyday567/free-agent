@@ -29,12 +29,13 @@ assert_known '--to "" writes a recipient list holding an empty name' '[""]' "$(f
 
 step "measured: neither of those two reaches bob, and the addressed post does"
 # Reach is measured through the two CLI views, at an explicit depth so a change to a
-# default cannot quietly change what this asserts. Both views call `deliversTo`
-# (Bus/File.hs), and the seat delivery path is a separate implementation of the same
-# predicate, so this claim transfers by shared predicate rather than by end-to-end
-# measure; `bus watch` is a third consumer of `deliversTo` if that ever needs walking for
-# real - runWatch filters stored lines through it too (Bus/Cli.hs:491). It carries no
-# `--depth`; the depth contract belongs to `log` and `inbox`.
+# default cannot quietly change what this asserts. Both views filter through
+# `filterSince` -> `deliversTo` (Bus/Cli.hs:765), used by runRead (Cli.hs:518) and
+# runInbox (Cli.hs:532). The seat delivery path reimplements the same predicate in its
+# own filters (Bus/File.hs:428, 433), so this claim transfers by shared predicate rather
+# than by end-to-end measure. `bus watch` is a third consumer of `deliversTo`
+# (Bus/Cli.hs:491) if that ever needs walking for real; it carries no `--depth`, that
+# flag belonging to `read` and `inbox` - there is no `bus log`.
 "$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
 assert_eq "bob's readable mail is the addressed post alone" "0" \
   "$("$FA" bus read -r "$ROOT" bob --depth 2 | json_ids)"
