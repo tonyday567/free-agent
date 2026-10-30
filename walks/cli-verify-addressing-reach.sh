@@ -26,14 +26,14 @@ step "say refuses an empty recipient before anything is written"
 out=$(printf 'x' | "$FA" bus say -r "$ROOT" --from alice --to "" 2>&1); rc=$?
 assert_eq "an empty recipient exits 1" "1" "$rc"
 assert_eq "and names the repair" "1" \
-  "$(printf '%s' "$out" | grep -c 'say: empty recipient name — omit --to for a public post' || true)"
+  "$(printf '%s' "$out" | grep -c 'say: empty recipient name — omit --to to post unaddressed' || true)"
 assert_eq "nothing was appended" "2" "$(count_lines cat "$ROOT/log.jsonl")"
 
 step "post refuses it too, under its own name"
 out=$(printf '' | "$FA" bus post -r "$ROOT" --from alice --body "x" --to "" 2>&1); rc=$?
 assert_eq "post with an empty recipient exits 1" "1" "$rc"
 assert_eq "and says post, not say" "1" \
-  "$(printf '%s' "$out" | grep -c 'post: empty recipient name' || true)"
+  "$(printf '%s' "$out" | grep -c 'post: empty recipient name — omit --to to post unaddressed' || true)"
 assert_eq "and writes nothing" "2" "$(count_lines cat "$ROOT/log.jsonl")"
 
 step "one empty recipient poisons a list that also names a real one"
@@ -55,9 +55,8 @@ step "reach, read through the delivery view"
 out=$("$FA" bus read -r "$ROOT" bob --depth 0)
 assert_eq "exactly one post reaches bob" "1" "$(printf '%s' "$out" | grep -c . || true)"
 assert_eq "and it is post 0, the addressed one" "0" "$(printf '%s' "$out" | awk '{print $1}')"
-assert_known "the unflagged post reaches nobody at all" "0" \
-  "$(printf '%s' "$out" | grep -c 'no recipient flag' || true)" \
-  "deliversTo answers False for an empty audience, so 'public' is not a delivery state — the refusal text still calls an omitted --to a public post"
+assert_eq "an omitted --to is delivered to no seat" "0" \
+  "$(printf '%s' "$out" | grep -c 'no recipient flag' || true)"
 assert_known "the JSON post with one empty name reaches nobody either" "0" \
   "$(printf '%s' "$out" | grep -c 'empty name via json' || true)" \
   "deliversTo compares names, and no seat is called the empty string; the JSON form is deliberately unvalidated, so this shape stays reachable and stays unreachable mail"
