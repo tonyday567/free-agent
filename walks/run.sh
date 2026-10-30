@@ -92,9 +92,10 @@ for walk in "$here"/$pattern; do
     passed=$((passed + 1))
   else
     rc=$?
-    if [ "$rc" -eq 124 ]; then
-      printf '  FAIL   the walk hung and was killed after %ss (WALK_TIMEOUT)\n' "$walk_timeout"
-    fi
+    case "$rc" in
+      124|137|143)
+        printf '  FAIL   the walk hung and was killed after %ss (WALK_TIMEOUT)\n' "$walk_timeout" ;;
+    esac
     failed=$((failed + 1))
   fi
 done
