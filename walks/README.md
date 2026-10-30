@@ -20,6 +20,17 @@ non-zero exit on failure.
 Scratch only: never the runner's live root, live daemon or frames. CLI walks need no
 daemon at all. Deck walks load the deck in a scratch Emacs against a scratch root.
 
+## exit codes
+
+⟜ `0` ⟜ every committed walk passed.
+⟜ `1` ⟜ a walk failed.
+⟜ `2` ⟜ nothing ran, because every walk was dirty or new. A wrapper must not read that as
+  success, which is why it is not 0.
+
+Skipped walks are listed with their reason: `work in progress` for a modified file, `new,
+not committed` for an untracked one. If `lib.sh` itself is uncommitted, every walk is
+skipped with that reason, since they would all be running against uncommitted helpers.
+
 ## the two assertions
 
 ⟜ `assert_eq` ⟜ the behaviour we want. A failure is a bug to fix.

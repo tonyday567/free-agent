@@ -24,6 +24,17 @@ for arg in "$@"; do
 done
 
 dirty() { [ -n "$(git -C "$here" status --porcelain -- "$1" 2>/dev/null)" ]; }
+
+# What kind of uncommitted a file is, for the label: a modified walk is work in
+# progress, an untracked one is a walk that does not exist for anyone but its author.
+uncommitted_kind() {
+  case "$(git -C "$here" status --porcelain -- "$1" 2>/dev/null | awk '{print $1}')" in
+  '??') printf 'new, not committed' ;;
+  '') printf '' ;;
+  *) printf 'work in progress' ;;
+  esac
+}
+
 libdirty=0
 dirty "$here/lib.sh" && libdirty=1
 
@@ -36,8 +47,13 @@ for walk in "$here"/$pattern; do
   case "$name" in
   run.sh | lib.sh) continue ;;
   esac
-  if [ "$all" -eq 0 ] && { [ "$libdirty" -eq 1 ] || dirty "$walk"; }; then
-    printf '\n######## %s  (work in progress, not run)\n' "$name"
+  if [ "$all" -eq 0 ] && [ "$libdirty" -eq 1 ]; then
+    printf '\n######## %s  (skipped: lib.sh is uncommitted, so every walk would run against uncommitted helpers)\n' "$name"
+    skipped=$((skipped + 1))
+    continue
+  fi
+  if [ "$all" -eq 0 ] && [ -n "$(uncommitted_kind "$walk")" ]; then
+    printf '\n######## %s  (%s, not run; --all runs it)\n' "$name" "$(uncommitted_kind "$walk")"
     skipped=$((skipped + 1))
     continue
   fi
@@ -49,8 +65,14 @@ for walk in "$here"/$pattern; do
   fi
 done
 
+ran=$((passed + failed))
+if [ "$ran" -eq 0 ]; then
+  printf '\n######## walks: nothing ran — %d skipped as dirty or new. --all runs them.\n' "$skipped"
+  exit 2
+fi
+
 if [ "$skipped" -gt 0 ]; then
-  printf '\n######## walks: %d passed, %d failed, %d skipped as work in progress (--all runs them)\n' \
+  printf '\n######## walks: %d passed, %d failed, %d skipped as dirty or new (--all runs them)\n' \
     "$passed" "$failed" "$skipped"
 else
   printf '\n######## walks: %d passed, %d failed\n' "$passed" "$failed"
