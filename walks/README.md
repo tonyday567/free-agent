@@ -58,6 +58,27 @@ where it fails loudly. Three knowns.
 ⟜ `cli-retire.sh` ⟜ a retired seat leaves the live roster and keeps its cursor, mail
 and log; no process is signalled.
 
+## the deck walks
+
+Each `deck-*.sh` loads the deck in a fresh `emacs -Q -batch` against its own scratch
+root. `deck-lib` is their shared helper and has no `.sh` suffix, so the runner does not
+count it as a walk.
+
+⟜ `deck-send-failure.sh` ⟜ a CLI exit 3 keeps the composition intact, shows the exit
+and CLI output in the error buffer, and appends no log bytes.
+⟜ `deck-filter.sh` ⟜ audience filtering shows matching and public posts, and clearing
+the filter restores every post.
+⟜ `deck-depth.sh` ⟜ log, inbox and thread views cycle 1 → 2 → 0 → 1; both `TAB` and
+`<tab>` resolve to the cycling command in each mode map.
+⟜ `deck-inbox.sh` ⟜ a fresh inbox reads from the first post without creating a cursor;
+`m` marks all printed mail read, and later mail remains unread.
+⟜ `deck-quit.sh` ⟜ view `q` buries without killing the buffer; status `q` kills the
+buffer and releases its file watch and repaint timer.
+
+Batch proves commands, buffer state and mode-map bindings. Visible window layout and
+focus, actual GUI/terminal key delivery, and Doom's evil auxiliary maps need a real
+configured frame; these walks do not claim them.
+
 ## the knowns, as of 31 Oct
 
 Wrong behaviour that the walks assert, so a fix turns them red instead of passing
