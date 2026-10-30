@@ -3,9 +3,15 @@
 Behaviour walks for the bus CLI and the deck UI. The runner has been this UI's only
 test suite and the wounds found the gaps; these are for development to run instead.
 
-    walks/run.sh              every walk
+    walks/run.sh              the committed suite
+    walks/run.sh --all        everything, dirty files included
     walks/run.sh 'cli-*'      one family
     bash walks/cli-inbox-flow.sh
+
+`walks/run.sh` runs the **committed** suite by default: a walk whose file, or
+`lib.sh` itself, differs from `HEAD` is listed and skipped, because a red tally should
+mean the handed-in state failed rather than that an author is mid-edit. `--all` runs the
+dirty files too, which is what an author wants while writing one.
 
 Each walk sets up its own scratch root under `~/.hermes/cache/scratch/deck-walks/`,
 seeds it, invokes one surface, and prints expected versus actual per step. PASS/FAIL,
