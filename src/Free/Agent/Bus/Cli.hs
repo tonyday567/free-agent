@@ -408,6 +408,9 @@ requireBus root = do
 runSay :: FilePath -> Text -> [Text] -> Maybe PostId -> [Text] -> IO ()
 runSay root fromName toNames thr bodyWords = do
   root' <- resolveRoot root
+  when (any T.null toNames) $ do
+    TIO.hPutStrLn stderr "🔴 say: empty recipient name — omit --to for a public post"
+    exitFailure
   bodyText <- case bodyWords of
     (w : _) -> pure (T.unwords (w : drop 1 bodyWords))
     [] -> do
@@ -427,7 +430,11 @@ runPost :: FilePath -> Maybe Text -> [Text] -> Maybe Text -> Bool -> IO ()
 runPost root mfrom mto mbody viaDaemon = do
   root' <- resolveRoot root
   p <- case (mfrom, mbody) of
-    (Just fromName, Just bodyText) -> pure (mkPost fromName mto bodyText)
+    (Just fromName, Just bodyText) -> do
+      when (any T.null mto) $ do
+        TIO.hPutStrLn stderr "🔴 post: empty recipient name — omit --to for a public post"
+        exitFailure
+      pure (mkPost fromName mto bodyText)
     (Nothing, Nothing) -> do
       line <- TIO.getLine
       case parsePost line of
