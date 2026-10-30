@@ -287,17 +287,20 @@ text is kept because it names the file that is missing."
 
 (defun free-agent-bus--cli (subcommand &rest args)
   "Run `free-agent bus SUBCOMMAND --root ROOT ARGS...'.
+SUBCOMMAND is a command name or a command path such as (\"cursor\" \"set\").
 Return (STATUS . OUTPUT).  Never signals on a non-zero exit: a failing
 command stays visible to the runner instead of being hidden by an error.
 A CLI that cannot be launched at all comes back the same way — status 127
 carrying the reason — so a missing executable reaches the runner's error
 surface rather than a signal from inside a refresh."
   (free-agent-bus--check-root)
-  (let ((coding-system-for-read 'utf-8))
+  (let ((coding-system-for-read 'utf-8)
+        (commands (if (listp subcommand) subcommand (list subcommand))))
     (with-temp-buffer
       (condition-case err
           (let ((status (apply #'call-process (free-agent-bus--executable) nil t nil
-                               "bus" subcommand "--root" (free-agent-bus--expand-root) args)))
+                               (append (list "bus") commands
+                                       (list "--root" (free-agent-bus--expand-root)) args))))
             (cons status (string-trim-right (buffer-string))))
         (file-error (free-agent-bus--unlaunchable err))))))
 
@@ -1284,6 +1287,11 @@ frames when evidence rather than prose is wanted."
 (defvar-local free-agent-bus-inbox--watch nil
   "Async `bus ping-watch NAME' process owned by this inbox buffer.")
 
+(defun free-agent-bus-inbox--cursor-path ()
+  "The attached name's cursor file in the current bus root."
+  (expand-file-name (concat ".cursor-" free-agent-bus-name)
+                    (free-agent-bus--expand-root)))
+
 (defun free-agent-bus-inbox--header ()
   "Header for the inbox buffer: identity, root, and the attached line."
   (format "bus inbox %s · depth %s\n%s\n%s\n\n"
@@ -1293,15 +1301,22 @@ frames when evidence rather than prose is wanted."
           (free-agent-bus--attached-line)))
 
 (defun free-agent-bus-inbox-refresh ()
-  "Re-run `bus inbox NAME' and rerender this buffer.  Writes no cursor.
-The buffer shows the unread set exactly as the CLI reports it; marking read
-is the separate, explicit `free-agent-bus-inbox-mark-read' action, so a
-refresh — including one a ping triggers — cannot consume mail the runner has
-not seen."
+  "Re-run the unread query and rerender this buffer.  Writes no cursor.
+With an existing cursor the query is `bus inbox NAME'.  With no cursor the CLI
+would start at the log tip and report no unread mail, so the deck instead uses
+`bus read NAME --since 0': a fresh root reads from the first post without
+creating state.  Marking read remains the separate, explicit
+`free-agent-bus-inbox-mark-read' action, so a refresh — including one a ping
+triggers — cannot consume mail the runner has not seen."
   (interactive)
   (free-agent-bus--check-root)
-  (let* ((result (free-agent-bus--cli "inbox" free-agent-bus-name
-                                      "--depth" (number-to-string free-agent-bus-inbox-depth)))
+  (let* ((fresh (not (file-exists-p (free-agent-bus-inbox--cursor-path))))
+         (result (if fresh
+                     (free-agent-bus--cli "read" free-agent-bus-name
+                                          "--since" "0" "--depth"
+                                          (number-to-string free-agent-bus-inbox-depth))
+                   (free-agent-bus--cli "inbox" free-agent-bus-name
+                                        "--depth" (number-to-string free-agent-bus-inbox-depth))))
          (status (car result))
          (output (cdr result))
          (posts (free-agent-bus-log--read-index))
@@ -1313,27 +1328,44 @@ not seen."
                   (propertize "(no unread mail)\n" 'face 'shadow)
                 (concat (free-agent-bus--decorate-view-output output posts) "\n")))
       (when (/= status 0)
-        (insert (propertize (format "\n⛔ free-agent bus inbox exited %d\n" status) 'face 'error))))
+        (insert (propertize (format "\n⛔ free-agent bus %s exited %d\n"
+                                    (if fresh "read --since 0" "inbox") status)
+                            'face 'error))))
     (set-buffer-modified-p nil)))
+
+(defun free-agent-bus-inbox--ensure-cursor ()
+  "Ensure a cursor exists for an explicit mark-read, without skipping history.
+A missing cursor is initialized to post 0 through the CLI.  Ordinary inbox
+refreshes never call this function."
+  (if (file-exists-p (free-agent-bus-inbox--cursor-path))
+      t
+    (let ((result (free-agent-bus--cli '("cursor" "set") free-agent-bus-name "0")))
+      (if (= (car result) 0)
+          t
+        (free-agent-bus--report-failure "bus cursor set 0" (car result) (cdr result))
+        nil))))
 
 ;;;###autoload
 (defun free-agent-bus-inbox-mark-read ()
   "Mark this name's unread mail read: `bus inbox NAME --mark-read'.
-The CLI advances `.cursor-NAME' to the id after the highest post printed and
-never past one, so anything arriving after this run stays unread."
+A missing cursor is first set to post 0, so this explicit action cannot skip
+the history either.  The CLI then advances `.cursor-NAME' to the id after the
+highest post printed and never past one, so anything arriving after this run
+stays unread."
   (interactive)
   (free-agent-bus--check-root)
-  (let* ((result (free-agent-bus--cli "inbox" free-agent-bus-name "--mark-read"
-                                      "--depth" (number-to-string free-agent-bus-inbox-depth)))
-         (status (car result))
-         (output (cdr result)))
-    (if (/= status 0)
-        (free-agent-bus--report-failure "bus inbox --mark-read" status output)
-      (message "free-agent bus inbox: marked read (%s)"
-               (if (string-empty-p output)
-                   "no unread mail"
-                 (car (split-string output "\n"))))
-      (free-agent-bus-inbox-refresh))))
+  (when (free-agent-bus-inbox--ensure-cursor)
+    (let* ((result (free-agent-bus--cli "inbox" free-agent-bus-name "--mark-read"
+                                        "--depth" (number-to-string free-agent-bus-inbox-depth)))
+           (status (car result))
+           (output (cdr result)))
+      (if (/= status 0)
+          (free-agent-bus--report-failure "bus inbox --mark-read" status output)
+        (message "free-agent bus inbox: marked read (%s)"
+                 (if (string-empty-p output)
+                     "no unread mail"
+                   (car (split-string output "\n"))))
+        (free-agent-bus-inbox-refresh)))))
 
 (defun free-agent-bus-inbox--watch-sentinel (proc _event)
   "Refresh this inbox when its ping-watch fires, then wait again."
