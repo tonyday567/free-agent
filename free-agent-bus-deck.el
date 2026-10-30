@@ -56,9 +56,10 @@
 ;;
 ;; Marks: a post the attached human wrote renders in
 ;; `free-agent-bus-post-mine-face', and a post with ancestry renders
-;; `↩ROOT LABEL' — the thread root's id and that root's own first line — in
-;; `free-agent-bus-thread-face'.  Both read the log's own fields, `from' and
-;; `thread'; a conversation is never inferred from timestamps or sender names.
+;; `↩ROOT' in `free-agent-bus-thread-face'.  Both read the log's own fields,
+;; `from' and `thread'; a conversation is never inferred from timestamps or
+;; sender names.  RET opens the conversation, so the root's own label does not
+;; need repeating on every reply.
 ;; The log tail indexes posts as it renders them; a view or the inbox, which has
 ;; no tail, reads the log once per refresh (`free-agent-bus-log--read-index')
 ;; and adds the same mark to its own lines.
@@ -90,10 +91,9 @@ root's own label.  Quiet by default — the ancestry is context for the post
 beside it, not a second copy of the conversation."
   :group 'free-agent-bus-deck)
 
-(defcustom free-agent-bus-log-thread-label-width 32
-  "Display width of the thread label the log tail puts after `↩ROOT'.
-The label is the thread root's own first line, so a reader knows which
-conversation a post joins without looking the id up."
+(defcustom free-agent-bus-log-excerpt-width 72
+  "Display width of a post's first-line excerpt at cascade depth 1.
+The full body remains available at depth 2 and through RET on the post."
   :type 'integer
   :group 'free-agent-bus-deck)
 
@@ -161,8 +161,9 @@ recipients and no `free-agent-bus-post-public'."
   :type 'string
   :group 'free-agent-bus-deck)
 
-(defcustom free-agent-bus-inbox-depth 2
-  "Cascade depth of the inbox buffer: 0 dot, 1 one-line excerpt, 2 verbatim."
+(defcustom free-agent-bus-inbox-depth 1
+  "Initial cascade depth of the inbox: 0 dot, 1 one-line excerpt, 2 verbatim.
+Depth 1 is the reading default; TAB reaches the other depths."
   :type '(choice (const 0) (const 1) (const 2))
   :group 'free-agent-bus-deck)
 
@@ -689,7 +690,7 @@ HEAD-END is the position just after it, where an excerpt would begin."
 
 (defun free-agent-bus--decorate-view-line (line posts)
   "Propertize one CLI view LINE against index POSTS.
-An ancestry mark is added in both shapes a view renders: `↩ROOT LABEL' after a
+An ancestry mark is added in both shapes a view renders: `↩ROOT' after a
 head's audience, with a ` · ' before its excerpt — the shape the log tail uses —
 and after a raw frame (depth 2), outside its braces, so the frame itself stays
 exact.  A line carrying neither an id nor a sender is returned verbatim, so a
@@ -1259,15 +1260,15 @@ Task ids are post ids; RET opens a task's thread and its verbatim body."
 ;;;###autoload
 (defun free-agent-bus-thread (id)
   "Open the thread view for post ID, following actual `thread' ancestry.
-Depth 2 shows the verbatim log lines, so the view is evidence, not a
-retelling: a task's body, its claim, and its DONE read in log order."
+Depth 1 gives a quiet reading list; TAB reaches depth 2 for the verbatim log
+frames when evidence rather than prose is wanted."
   (interactive (list (or (free-agent-bus--id-at-point)
                          (string-to-number (read-string "Thread id (post id): ")))))
   (unless (integerp id)
     (user-error "No post id at point and none given"))
   (free-agent-bus--open-view free-agent-bus-thread-buffer-name
                              (format "thread %s" id) "read"
-                             (list "--thread" (number-to-string id)) 2))
+                             (list "--thread" (number-to-string id)) 1))
 
 ;;;###autoload
 (defun free-agent-bus-thread-at-point ()
@@ -1597,20 +1598,13 @@ sender name — and a cycle in that field stops the walk where it repeats."
     current))
 
 (defun free-agent-bus-log--ancestry-for (id posts)
-  "Ancestry text for post ID in index POSTS: `↩ROOT LABEL', or the empty string.
-ROOT is the thread root's id and LABEL that root's own first line, so a reader
-sees which conversation a post joins without looking an id up.  A post with no
-ancestry, and a post POSTS does not carry, render no ancestry at all: an id
-with no `thread' field to read is not a conversation."
+  "Ancestry text for post ID in index POSTS: `↩ROOT', or the empty string.
+ROOT is the thread root's id.  RET opens that conversation, so repeating the
+root's own first line on every reply only obscures the post being read.  A post
+with no ancestry, and a post POSTS does not carry, render no ancestry at all."
   (if-let ((thread (plist-get (gethash id posts) :thread)))
-      (let* ((root (free-agent-bus-log--thread-root id posts))
-             (label (plist-get (gethash root posts) :label)))
-        (concat "↩" (number-to-string root)
-                (if (or (null label) (string-empty-p label))
-                    ""
-                  (concat " "
-                          (truncate-string-to-width
-                           label free-agent-bus-log-thread-label-width nil nil "…")))))
+      (let ((root (free-agent-bus-log--thread-root id posts)))
+        (concat "↩" (number-to-string root)))
     ""))
 
 (defun free-agent-bus-log--format-line (line)
@@ -1651,7 +1645,9 @@ faced with `free-agent-bus-thread-face'."
                        (0 head)
                        (1 (concat head
                                   (if (string-empty-p ancestry) " " " · ")
-                                  (car (split-string body "\n"))))
+                                  (truncate-string-to-width
+                                   (car (split-string body "\n"))
+                                   free-agent-bus-log-excerpt-width nil nil "…")))
                        (_ (concat head "\n"
                                   (mapconcat (lambda (l) (concat "│ " l))
                                              (split-string body "\n") "\n"))))))
