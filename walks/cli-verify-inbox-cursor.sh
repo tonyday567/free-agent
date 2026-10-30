@@ -27,15 +27,17 @@ out=$("$FA" bus inbox -r "$ROOT" bob --mark-read --depth 0)
 assert_eq "bob's unread is exactly two posts" "2" "$(printf '%s' "$out" | grep -c . || true)"
 assert_eq "cursor is highest printed + 1 (2), not log tip + 1 (3)" "2" "$(cat "$ROOT/.cursor-bob")"
 
-step "the same absent-cursor default is reachable through read --cursor NAME"
+step "a missing cursor means the name has seen nothing"
 new_root read-cursor
 say alice bob "one"
 say alice bob "two"
+out=$("$FA" bus inbox -r "$ROOT" bob --depth 0)
+assert_eq "inbox delivers the whole history to a fresh name" "2" \
+  "$(printf '%s' "$out" | grep -c . || true)"
 out=$("$FA" bus read -r "$ROOT" bob --cursor bob --depth 0)
-assert_known "read --cursor NAME with no cursor file prints nothing" "0" \
-  "$(printf '%s' "$out" | grep -c . || true)" \
-  "readCursor's cold-boot default is the log tip, so the cursor flag is silent for a fresh name"
-assert_eq "while read NAME with no --since prints both" "2" \
+assert_eq "read --cursor NAME agrees" "2" \
+  "$(printf '%s' "$out" | grep -c . || true)"
+assert_eq "and read NAME with no --since still prints both" "2" \
   "$(count_lines "$FA" bus read -r "$ROOT" bob --depth 0)"
 
 step "a root with no log: inbox refuses, read does not"

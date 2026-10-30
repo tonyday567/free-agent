@@ -8,6 +8,7 @@ module Free.Agent.Bus.File
   ( -- * Cursor files
     cursorPath,
     readCursor,
+    readCursorAll,
     writeCursor,
 
     -- * Attached-human markers
@@ -139,8 +140,13 @@ observeQ (Body _ _ o) s = unConst (o s)
 -- | Path to the cursor file for an agent.
 --
 -- The cursor stores the next 'postId' the agent should process, so restarts
--- catch up without re-reading the whole log. A missing cursor defaults to 0,
--- meaning "start from the first post".
+-- catch up without re-reading the whole log. Two readings of a missing
+-- cursor exist, both honest:
+--
+--   * the mail view ('readCursorAll') — the name has seen nothing, so
+--     everything addressed to it is unread;
+--   * the cold-boot view ('readCursor') — a seat starts at the log tip and
+--     does not answer the past.
 cursorPath :: FilePath -> Name -> FilePath
 cursorPath root name = root </> (".cursor-" <> T.unpack name)
 
@@ -153,6 +159,17 @@ readCursor root name = do
   exists <- doesFileExist path
   if not exists
     then latestPostId root
+    else readCursorAll root name
+
+-- | The mail view of 'readCursor': a missing cursor means the name has seen
+-- nothing, so everything addressed to it is unread. Inbox and read use this;
+-- seats use 'readCursor', whose cold-boot default skips history.
+readCursorAll :: FilePath -> Name -> IO PostId
+readCursorAll root name = do
+  let path = cursorPath root name
+  exists <- doesFileExist path
+  if not exists
+    then pure 0
     else do
       txt <- readFileStrict path
       pure $ maybe 0 fromIntegral (readMaybe @Integer (T.unpack (T.strip txt)))

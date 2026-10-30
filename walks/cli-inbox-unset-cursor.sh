@@ -8,6 +8,12 @@
 #
 # The deck's fresh-inbox path was fixed to read from the first post (free-agent
 # 1f78f6a); the CLI's `inbox` was not. That divergence is the point of the walk.
+#
+# Repaired 31 Oct: the CLI's inbox and read now take the mail view of the
+# cursor — a missing cursor means the name has seen nothing, so everything
+# addressed to it is unread, and the first --mark-read bootstraps the cursor
+# file. The assertions below pin the repaired behaviour; the wound record
+# above stays as history.
 
 source "$(dirname "$0")/lib.sh"
 
@@ -20,30 +26,28 @@ assert_eq "the log holds both" "0,1" "$(ids_of_to bob)"
 
 step "inbox bob with no cursor"
 out=$("$FA" bus inbox -r "$ROOT" bob --depth 0)
-assert_known "a name with mail but no cursor gets nothing" \
-  "0" "$(printf '%s' "$out" | grep -c . || true)" \
-  "unread is id >= cursor, so an absent cursor reads as caught up; the deck reads it as everything-new"
+assert_eq "a name with mail but no cursor sees everything addressed to it" \
+  "2" "$(printf '%s' "$out" | grep -c . || true)"
 
-step "and exits 0, so nothing warns the caller"
+step "and exits 0, delivery without ceremony"
 "$FA" bus inbox -r "$ROOT" bob --depth 0 >/dev/null 2>&1
-assert_known "the empty read is not an error" "0" "$?" \
-  "a silent zero is why the runner's inbox looked empty rather than broken"
+assert_eq "the read is not an error" "0" "$?"
 
-step "and it is not momentary: later mail never appears either"
-say alice bob "posted after the empty read"
-assert_known "a second post does not change the empty read" "0" \
-  "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)" \
-  "the absent-cursor default is the latest post id, recomputed on every call, so the name stays empty for good rather than catching up"
+step "and later mail keeps arriving"
+say alice bob "posted after the first read"
+assert_eq "a second post appears on the next read" "3" \
+  "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)"
 
-step "and --mark-read cannot bootstrap it"
+step "and --mark-read bootstraps the cursor"
 "$FA" bus inbox -r "$ROOT" bob --mark-read --depth 0 >/dev/null 2>&1
-assert_known "no cursor is created" "absent" \
-  "$([ -e "$ROOT/.cursor-bob" ] && echo present || echo absent)" \
-  "nothing printed means nothing to advance past, so the state stays absent and the wound is permanent"
+assert_eq "the cursor file is created" "present" \
+  "$([ -e "$ROOT/.cursor-bob" ] && echo present || echo absent)"
+assert_eq "at the id after the highest post printed" "3" \
+  "$(cat "$ROOT/.cursor-bob")"
 
-step "the explicit fix that works today: set the cursor first"
-"$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
-assert_eq "with cursor 0 every addressed post appears" "0,1,2" \
+step "an explicit cursor still wins: set it and only newer mail appears"
+"$FA" bus cursor set -r "$ROOT" bob 2 >/dev/null
+assert_eq "only the post at or after the cursor" "2" \
   "$("$FA" bus inbox -r "$ROOT" bob --depth 0 | dot_ids)"
 
 finish

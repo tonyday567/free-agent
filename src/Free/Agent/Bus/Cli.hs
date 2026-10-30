@@ -26,7 +26,9 @@
 -- @inbox@ is the attached human's unread view: posts addressed to NAME at
 -- or after @.cursor-NAME@, printed, and — only with @--mark-read@ — the
 -- cursor advances to the id after the highest post printed, never to the
--- log tip. @attach@ writes the per-root @.human-NAME@ marker and @detach@
+-- log tip. A missing cursor means the name has seen nothing: everything
+-- addressed to it is unread, and the first @--mark-read@ bootstraps the
+-- cursor file. @attach@ writes the per-root @.human-NAME@ marker and @detach@
 -- removes it; the marker is evidence that a name is a person rather than a
 -- seat, so no delivery, READY, claim, DONE or completion path reads it.
 --
@@ -73,7 +75,7 @@ import Data.Time (LocalTime, NominalDiffTime, UTCTime, diffUTCTime, getCurrentTi
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Free.Agent.Bus (postLocal, readFileStrict)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
-import Free.Agent.Bus.File (Human (..), attachHuman, humanNames, readCursor, readHuman, removeHuman, writeCursor)
+import Free.Agent.Bus.File (Human (..), attachHuman, humanNames, readCursor, readCursorAll, readHuman, removeHuman, writeCursor)
 import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbGlyph, hbPath, hbText, readHeartbeat)
 import Free.Agent.BusStats (SliceMode (..), slicePosts)
 import Free.Agent.Cli.Config (rootOpt)
@@ -510,7 +512,7 @@ runRead root names since mThread depth = do
       sinceId <- case since of
         Nothing -> pure 0
         Just (SinceId pid) -> pure pid
-        Just (SinceCursor name) -> readCursor root name
+        Just (SinceCursor name) -> readCursorAll root name
       content <- if exists then readFileStrict path else pure ""
       let lines' = T.lines content
       traverse_ (TIO.putStrLn . renderStored depth) (mapMaybe (filterSince names sinceId) lines')
@@ -526,7 +528,7 @@ runInbox root name markRead depth = do
   root' <- resolveRoot root
   requireBus root'
   content <- readFileStrict (root' </> "log.jsonl")
-  sinceId <- readCursor root' name
+  sinceId <- readCursorAll root' name
   let shown = mapMaybe (filterSince [name] sinceId) (T.lines content)
   traverse_ (TIO.putStrLn . renderStored depth) shown
   when (markRead && not (null shown)) $
