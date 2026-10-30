@@ -25,13 +25,13 @@ assert_eq "and --thread is empty for a root post" '[]' "$(field 1 thread)"
 step "an empty --to is refused, and says which way to go instead"
 out=$("$FA" bus say -r "$ROOT" --from alice --to "" "an empty recipient" 2>&1); rc=$?
 assert_eq '--to "" exits 1' "1" "$rc"
-assert_eq "with a named refusal" "🔴 say: empty recipient name — omit --to for a public post" "$out"
+assert_eq "with a named refusal" "🔴 say: empty recipient name — omit --to to post unaddressed (visible in the log, delivered to no seat)" "$out"
 assert_eq "and it writes nothing" "2" "$(wc -l <"$ROOT/log.jsonl" | tr -d ' ')"
 
 step "an empty name poisons a list that also names a real recipient"
 out=$("$FA" bus say -r "$ROOT" --from alice --to bob --to "" "mixed" 2>&1); rc=$?
 assert_eq "a mixed --to list exits 1" "1" "$rc"
-assert_eq "with the same refusal" "🔴 say: empty recipient name — omit --to for a public post" "$out"
+assert_eq "with the same refusal" "🔴 say: empty recipient name — omit --to to post unaddressed (visible in the log, delivered to no seat)" "$out"
 assert_eq "and the post never lands, so bob's mail is untouched" "2" "$(wc -l <"$ROOT/log.jsonl" | tr -d ' ')"
 
 step "measured: neither of those two reaches bob, and the addressed post does"
