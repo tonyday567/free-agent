@@ -125,8 +125,10 @@ and a four-line `kimi` script on `PATH` standing in for the model — `kimiCli` 
 `kimi -p PROMPT`, so the shim is the whole model. The shim printed a bar-prefixed diff, an
 added line, then `@alice: …`; the seat published only the addressed suffix, kept ancestry,
 and warned once on stderr (`begins at character offset 33, not 0; publishing addressed
-suffix`), exactly as the oracle pins it. A second harness trap, found by shen and sharper
-than my first reading of it: with no `--quiesce N` there is no quiet-exit bridge at all -
+suffix`), exactly as the oracle pins it. A second harness trap, and this one is shared
+rather than either seat's: the observation is mine, a scratch seat that had to be killed at
+45 seconds and exited 124, and the cause is shen's, sharper than my first reading of it -
+with no `--quiesce N` there is no quiet-exit bridge at all -
 `quiesceOpt` is `Maybe Int` and the quiesce action errors without config - so the loop runs
 until the delivery budget, whose default is a million deliveries. A scratch seat launched
 without `--quiesce` is never going to stand down, and the harness killing it is the harness
