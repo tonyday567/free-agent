@@ -91,6 +91,9 @@ count it as a walk.
 
 ⟜ `deck-send-failure.sh` ⟜ a CLI exit 3 keeps the composition intact, shows the exit
 and CLI output in the error buffer, and appends no log bytes.
+⟜ `deck-recipients.sh` ⟜ the `ya` leader entry resolves to
+`free-agent-bus-set-recipients` and updates the shared audience from fundamental-mode,
+not just the composition buffer.
 ⟜ `deck-filter.sh` ⟜ audience filtering shows matching and public posts, and clearing
 the filter restores every post.
 ⟜ `deck-depth.sh` ⟜ log, inbox and thread views cycle 1 → 2 → 0 → 1; both `TAB` and

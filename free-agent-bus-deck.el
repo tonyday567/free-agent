@@ -1965,7 +1965,8 @@ keys reachable while evil's state maps are active."
 ;; `doom-leader-map' exists, so no Doom config edit is needed for a hot-load
 ;; or a restart.  A Doom `map!' block only adds which-key descriptions.
 (when (boundp 'doom-leader-map)
-  (dolist (pair '(("yf" . free-agent-bus-log-set-filter)
+  (dolist (pair '(("ya" . free-agent-bus-set-recipients)
+                  ("yf" . free-agent-bus-log-set-filter)
                   ("ys" . free-agent-bus-status)
                   ("yr" . free-agent-bus-ready)
                   ("yi" . free-agent-bus-inbox)
