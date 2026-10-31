@@ -154,7 +154,8 @@ directPostTo grant deliver root post = do
 -- | Interpret an explicitly addressed response as a reply act. Plain response
 -- text stays local. When a tool diff or other prefix precedes an address at the
 -- start of a later line, only that addressed suffix is published; the prefix is
--- not bus content. Inline mentions and prefix-first bullets stay local.
+-- not bus content. Inline mentions and addresses inside fenced quotations stay
+-- local.
 replyAct :: Name -> Stamped Text -> Text -> [Post Text]
 replyAct agent stored response =
   case parseAddress response <|> parseLaterLineAddress response of
@@ -181,12 +182,7 @@ replyWarning agent response =
   case parseAddress response of
     Just _ -> Nothing
     Nothing -> do
-      (offset, recipient) <-
-        listToMaybe
-          [ (T.length prefix + 1, recipient)
-          | (prefix, rest) <- T.breakOnAll "\n@" response,
-            Just (recipient, _) <- pure (parseAddress (T.drop 1 rest))
-          ]
+      (offset, recipient, _) <- laterLineAddress response
       pure
         ( "🟡 "
             <> agent
@@ -199,11 +195,23 @@ replyWarning agent response =
 
 parseLaterLineAddress :: Text -> Maybe (Name, Text)
 parseLaterLineAddress response =
+  (\(_, recipient, replyBody) -> (recipient, replyBody))
+    <$> laterLineAddress response
+
+laterLineAddress :: Text -> Maybe (Int, Name, Text)
+laterLineAddress response =
   listToMaybe
-    [ address
-    | (_, rest) <- T.breakOnAll "\n@" response,
-      Just address <- pure (parseAddress (T.drop 1 rest))
+    [ (T.length prefix + 1, recipient, replyBody)
+    | (prefix, rest) <- T.breakOnAll "\n@" response,
+      not (insideFence prefix),
+      Just (recipient, replyBody) <- pure (parseAddress (T.drop 1 rest))
     ]
+
+insideFence :: Text -> Bool
+insideFence = odd . length . filter isFence . T.lines
+
+isFence :: Text -> Bool
+isFence line = "```" `T.isPrefixOf` T.stripStart line
 
 parseAddress :: Text -> Maybe (Name, Text)
 parseAddress response = do

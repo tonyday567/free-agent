@@ -251,6 +251,16 @@ deliveryTopic = do
           && replyWarning "kimi1" "progress\n@yang: DONE\nsecond line"
             == Just "🟡 kimi1: @yang: begins at character offset 9, not 0; publishing addressed suffix"
       _ -> False
+  assert "a fenced address is ignored in favour of the real reply" $
+    case replyAct "kimi1" channelCause "```text\n@alice: hi\n```\n@bob: reply" of
+      [r] -> to r == ["bob"] && body r == "reply"
+      _ -> False
+  assert "a real address is not displaced by a later fenced quote" $
+    case replyAct "kimi1" channelCause "@bob: reply\n```text\n@carol: quoted\n```" of
+      [r] ->
+        to r == ["bob"]
+          && body r == "reply\n```text\n@carol: quoted\n```"
+      _ -> False
   assert "replyAct preserves an addressed reply's channel and ancestry" $
     case replyAct "kimi1" channelCause "@yang: explicit report" of
       [r] ->
