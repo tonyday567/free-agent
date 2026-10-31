@@ -528,10 +528,12 @@ were following."
             "")
           ""))
 
-(defun free-agent-bus--post-mode-refresh ()
-  "Update the mode line after an audience or ancestry change."
-  (setq mode-name (free-agent-bus--post-mode-name))
-  (force-mode-line-update))
+(defun free-agent-bus--post-mode-refresh (&optional buffer)
+  "Update the composition BUFFER's mode line after audience or ancestry changes.
+BUFFER defaults to the current buffer."
+  (with-current-buffer (or buffer (current-buffer))
+    (setq mode-name (free-agent-bus--post-mode-name))
+    (force-mode-line-update)))
 
 (defvar free-agent-bus-post-mode-map
   (let ((map (make-sparse-keymap)))
@@ -569,8 +571,8 @@ audience; a post needs an audience or public before it will send."
      (t
       (setq free-agent-bus-post-public nil)
       (setq free-agent-bus-post-to (split-string trimmed "[ ,]+" t)))))
-  (when (derived-mode-p 'free-agent-bus-post-mode)
-    (free-agent-bus--post-mode-refresh))
+  (when-let ((buffer (get-buffer free-agent-bus-post-buffer-name)))
+    (free-agent-bus--post-mode-refresh buffer))
   (message "Audience: %s" (free-agent-bus--current-audience)))
 
 (defun free-agent-bus-set-thread (id)
@@ -586,8 +588,8 @@ id, so replying into a task's thread is how a CLAIM or DONE is filed."
                            nil
                          (string-to-number (string-trim input))))))
   (setq free-agent-bus-post-thread id)
-  (when (derived-mode-p 'free-agent-bus-post-mode)
-    (free-agent-bus--post-mode-refresh))
+  (when-let ((buffer (get-buffer free-agent-bus-post-buffer-name)))
+    (free-agent-bus--post-mode-refresh buffer))
   (message "Thread: %s" (or free-agent-bus-post-thread "root post")))
 
 (defun free-agent-bus--current-audience ()
