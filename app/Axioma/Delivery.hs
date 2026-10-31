@@ -241,10 +241,16 @@ deliveryTopic = do
       && replyWarning "kimi1" "ordinary local prose" == Nothing
   assert "a prefix-first address publishes without a warning" $
     replyWarning "kimi1" "@yang: explicit report" == Nothing
-  assert "a later address warns with its offset and does not publish" $
-    null (replyAct "kimi1" channelCause "progress\n@yang: DONE")
-      && replyWarning "kimi1" "progress\n@yang: DONE"
-        == Just "🟡 kimi1: @yang: begins at character offset 9, not 0; response stayed local"
+  assert "a later line-leading address publishes its suffix and warns about the dropped prefix" $
+    case replyAct "kimi1" channelCause "progress\n@yang: DONE\nsecond line" of
+      [r] ->
+        body r == "DONE\nsecond line"
+          && to r == ["yang"]
+          && channel r == Just "ops"
+          && thread r == [snd (stamp channelCause)]
+          && replyWarning "kimi1" "progress\n@yang: DONE\nsecond line"
+            == Just "🟡 kimi1: @yang: begins at character offset 9, not 0; publishing addressed suffix"
+      _ -> False
   assert "replyAct preserves an addressed reply's channel and ancestry" $
     case replyAct "kimi1" channelCause "@yang: explicit report" of
       [r] ->
@@ -255,6 +261,7 @@ deliveryTopic = do
       _ -> False
   assert "replyAct does not invent DONE after a progress preamble" $
     null (replyAct "kimi1" channelCause "• working\n\n• @yang: DONE not-earned")
+      && replyWarning "kimi1" "• working\n\n• @yang: DONE not-earned" == Nothing
   removePathForcibly channelRoot
 
   kimiRoot <- tempRoot "free-agent-kimi-publication"

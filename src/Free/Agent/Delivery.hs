@@ -23,6 +23,7 @@ where
 
 import Circuit.Agent (Name, Post (..))
 import Circuit.Agent.Framing (PostBody, Stamped, stamp, stamped)
+import Control.Applicative ((<|>))
 import Control.Concurrent
   ( MVar,
     forkIO,
@@ -151,10 +152,12 @@ directPostTo grant deliver root post = do
   pure (stored, result)
 
 -- | Interpret an explicitly addressed response as a reply act. Plain response
--- text stays local; no particular quiet string receives special treatment.
+-- text stays local. When a tool diff or other prefix precedes an address at the
+-- start of a later line, only that addressed suffix is published; the prefix is
+-- not bus content. Inline mentions and prefix-first bullets stay local.
 replyAct :: Name -> Stamped Text -> Text -> [Post Text]
 replyAct agent stored response =
-  case parseAddress response of
+  case parseAddress response <|> parseLaterLineAddress response of
     Nothing -> []
     Just (recipient, replyBody) ->
       [ (Post agent (channel cause) [recipient] [snd (stamp stored)])
@@ -170,8 +173,9 @@ replyActIO agent stored response = do
   traverse_ (TIO.hPutStrLn stderr) (replyWarning agent response)
   pure (replyAct agent stored response)
 
--- | A valid address later in a response earns a warning with its zero-based
--- character offset. Prefix-first and genuinely unaddressed replies stay silent.
+-- | A valid address at the start of a later line earns a warning with its
+-- zero-based character offset. The addressed suffix publishes; the prefix does
+-- not. Inline mentions and genuinely unaddressed replies stay silent.
 replyWarning :: Name -> Text -> Maybe Text
 replyWarning agent response =
   case parseAddress response of
@@ -180,8 +184,8 @@ replyWarning agent response =
       (offset, recipient) <-
         listToMaybe
           [ (T.length prefix + 1, recipient)
-          | (prefix, rest) <- T.breakOnAll "@" (T.drop 1 response),
-            Just (recipient, _) <- pure (parseAddress rest)
+          | (prefix, rest) <- T.breakOnAll "\n@" response,
+            Just (recipient, _) <- pure (parseAddress (T.drop 1 rest))
           ]
       pure
         ( "🟡 "
@@ -190,8 +194,16 @@ replyWarning agent response =
             <> recipient
             <> ": begins at character offset "
             <> T.pack (show offset)
-            <> ", not 0; response stayed local"
+            <> ", not 0; publishing addressed suffix"
         )
+
+parseLaterLineAddress :: Text -> Maybe (Name, Text)
+parseLaterLineAddress response =
+  listToMaybe
+    [ address
+    | (_, rest) <- T.breakOnAll "\n@" response,
+      Just address <- pure (parseAddress (T.drop 1 rest))
+    ]
 
 parseAddress :: Text -> Maybe (Name, Text)
 parseAddress response = do
