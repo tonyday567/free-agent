@@ -251,6 +251,21 @@ deliveryTopic = do
           && replyWarning "kimi1" "progress\n@yang: DONE\nsecond line"
             == Just "🟡 kimi1: @yang: begins at character offset 9, not 0; publishing addressed suffix"
       _ -> False
+  assert "a bar-prefixed diff above the address publishes only the reply" $
+    case replyAct "kimi1" channelCause "│ +;; first\n│ +;; second\n@yang: DONE" of
+      [r] -> to r == ["yang"] && body r == "DONE"
+      _ -> False
+  assert "an address in a raw diff body does not displace the final reply" $
+    case replyAct "kimi1" channelCause "@@ -0,0 +1 @@\n@alice: diff body\n@bob: reply" of
+      [r] -> to r == ["bob"] && body r == "reply"
+      _ -> False
+  assert "a later self-address is not a publication target" $
+    case replyAct "kimi1" channelCause "tool\n@bob: reply\n@kimi1: self" of
+      [r] -> to r == ["bob"] && body r == "reply\n@kimi1: self"
+      _ -> False
+  assert "a Markdown blockquote address stays local and silent" $
+    null (replyAct "kimi1" channelCause "> @alice: quoted\nordinary local prose")
+      && replyWarning "kimi1" "> @alice: quoted\nordinary local prose" == Nothing
   assert "a fenced address is ignored in favour of the real reply" $
     case replyAct "kimi1" channelCause "```text\n@alice: hi\n```\n@bob: reply" of
       [r] -> to r == ["bob"] && body r == "reply"

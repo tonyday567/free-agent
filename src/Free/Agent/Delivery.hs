@@ -37,6 +37,7 @@ import Control.Concurrent
   )
 import Control.Exception (SomeException, throwIO, try)
 import Control.Monad (void)
+import Data.Char (isSpace)
 import Data.Foldable (traverse_)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
@@ -153,12 +154,12 @@ directPostTo grant deliver root post = do
 
 -- | Interpret an explicitly addressed response as a reply act. Plain response
 -- text stays local. When a tool diff or other prefix precedes an address at the
--- start of a later line, only that addressed suffix is published; the prefix is
--- not bus content. Inline mentions and addresses inside fenced quotations stay
--- local.
+-- start of a later line, only the last non-self addressed suffix outside a
+-- fenced quotation is published; the prefix is not bus content. Inline mentions
+-- and Markdown blockquote addresses stay local.
 replyAct :: Name -> Stamped Text -> Text -> [Post Text]
 replyAct agent stored response =
-  case parseAddress response <|> parseLaterLineAddress response of
+  case parseAddress response <|> parseLaterLineAddress agent response of
     Nothing -> []
     Just (recipient, replyBody) ->
       [ (Post agent (channel cause) [recipient] [snd (stamp stored)])
@@ -182,7 +183,7 @@ replyWarning agent response =
   case parseAddress response of
     Just _ -> Nothing
     Nothing -> do
-      (offset, recipient, _) <- laterLineAddress response
+      (offset, recipient, _) <- laterLineAddress agent response
       pure
         ( "🟡 "
             <> agent
@@ -193,19 +194,22 @@ replyWarning agent response =
             <> ", not 0; publishing addressed suffix"
         )
 
-parseLaterLineAddress :: Text -> Maybe (Name, Text)
-parseLaterLineAddress response =
+parseLaterLineAddress :: Name -> Text -> Maybe (Name, Text)
+parseLaterLineAddress agent response =
   (\(_, recipient, replyBody) -> (recipient, replyBody))
-    <$> laterLineAddress response
+    <$> laterLineAddress agent response
 
-laterLineAddress :: Text -> Maybe (Int, Name, Text)
-laterLineAddress response =
+laterLineAddress :: Name -> Text -> Maybe (Int, Name, Text)
+laterLineAddress agent response =
   listToMaybe
-    [ (T.length prefix + 1, recipient, replyBody)
-    | (prefix, rest) <- T.breakOnAll "\n@" response,
-      not (insideFence prefix),
-      Just (recipient, replyBody) <- pure (parseAddress (T.drop 1 rest))
-    ]
+    ( reverse
+        [ (T.length prefix + 1, recipient, replyBody)
+        | (prefix, rest) <- T.breakOnAll "\n@" response,
+          not (insideFence prefix),
+          Just (recipient, replyBody) <- pure (parseAddress (T.drop 1 rest)),
+          recipient /= agent
+        ]
+    )
 
 insideFence :: Text -> Bool
 insideFence = odd . length . filter isFence . T.lines
@@ -218,7 +222,7 @@ parseAddress response = do
   rest <- T.stripPrefix "@" response
   let (name, afterName) = T.break (== ':') rest
       recipient = T.strip name
-  if T.null recipient || T.null afterName
+  if T.null recipient || T.null afterName || T.any (\c -> isSpace c || c == '@') recipient
     then Nothing
     else Just (recipient, T.strip (T.drop 1 afterName))
 
