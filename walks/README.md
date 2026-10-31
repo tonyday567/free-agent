@@ -109,6 +109,26 @@ window/focus state and keymap resolution in real frames. It does not inject OS k
 events or load the runner's Doom configuration, so physical key delivery and
 Doom-specific extra maps remain unproven.
 
+## a run that measured nothing is not a green run
+
+The same rule as nothing-ran-is-2, one level down, found on a live seat harness rather than
+a walk: a fresh seat with no `.cursor-NAME` starts at the log tip, so every seeded post is
+already behind it, nothing is delivered, the seat stands down after two empty cycles and the
+harness exits **0**. The run measured nothing and called it success. A live harness has to
+write the cursor before it launches, and that write is part of the harness rather than a
+detail — shen hit this on the first attempt at the strand-bug acceptance and recorded it
+with its receipt (`73f5c96`).
+
+Reproduced here independently against the installed binary, which is the shape worth
+copying: a scratch root, one seeded post `alice → bob` at id 0, `.cursor-bob` written to 0,
+and a four-line `kimi` script on `PATH` standing in for the model — `kimiCli` invokes
+`kimi -p PROMPT`, so the shim is the whole model. The shim printed a bar-prefixed diff, an
+added line, then `@alice: …`; the seat published only the addressed suffix, kept ancestry,
+and warned once on stderr (`begins at character offset 33, not 0; publishing addressed
+suffix`), exactly as the oracle pins it. What that does not reach, as the receipt says: the
+model is a script, so no real tool call is made by a harness, and the diff is only what the
+adapter sees on the pipe.
+
 ## the knowns, as of 31 Oct
 
 Wrong behaviour that the walks assert, so a fix turns them red instead of passing
