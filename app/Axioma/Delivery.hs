@@ -34,7 +34,7 @@ import Free.Agent.Delivery
     replyWarning,
     turnMetrics,
   )
-import System.Directory (createDirectoryIfMissing, doesFileExist, removePathForcibly)
+import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable, removePathForcibly)
 import System.Environment (getEnv, getExecutablePath, setEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -305,6 +305,7 @@ deliveryTopic = do
           "case \"$input\" in",
           "  *PLAIN-CASE*) printf 'ordinary local prose\\n' ;;",
           "  *EXPLICIT-CASE*) printf '• @yang: explicit report\\n' ;;",
+          "  *DIFF-CASE*) printf '│ tool diff\\n@yang: recovered report\\n' ;;",
           "  *PREAMBLE-CASE*) printf '• working\\n\\n• @yang: DONE not-earned\\n' ;;",
           "  *BULLET-CASE*) printf '• ordinary bullet\\n' ;;",
           "esac",
@@ -314,11 +315,17 @@ deliveryTopic = do
   writeCursor kimiRoot "kimi1" 0
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "PLAIN-CASE")
   explicitCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "EXPLICIT-CASE")
+  diffCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "DIFF-CASE")
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "PREAMBLE-CASE")
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "BULLET-CASE")
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] (markGlyph Landed))
   myPath <- takeDirectory <$> getExecutablePath
-  let bin = myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent"
+  pathBin <- findExecutable "free-agent"
+  let bin =
+        maybe
+          (myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent")
+          id
+          pathBin
   oldPath <- getEnv "PATH"
   setEnv "PATH" (fakeBin <> ":" <> oldPath)
   (code, _out, err) <-
@@ -340,7 +347,7 @@ deliveryTopic = do
   assert ("the wired Kimi seat completes its scripted turns" <> if code == ExitSuccess then "" else ": " <> err) $
     code == ExitSuccess
   let adapterWarnings = filter ("🟡 kimi1: @yang: begins at character offset " `T.isPrefixOf`) (T.lines (T.pack err))
-  assert "the wired adapter warns once for prefix-later, not for prefix-first or local prose" $
+  assert ("the wired adapter warns once for prefix-later, not for prefix-first or local prose" <> if length adapterWarnings == 1 then "" else ": " <> err) $
     length adapterWarnings == 1
   content <- TIO.readFile (kimiRoot </> "log.jsonl")
   let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -351,12 +358,18 @@ deliveryTopic = do
         (\r -> body r `elem` ["ordinary local prose", "• ordinary bullet", "• working\n\n• @yang: DONE not-earned"])
         replies
   assert "the addressed bullet publishes with ancestry" $
-    case replies of
+    case [r | r <- replies, body r == "explicit report"] of
       [r] ->
-        body r == "explicit report"
-          && to r == ["yang"]
+        to r == ["yang"]
           && channel r == Nothing
           && thread r == [snd (stamp explicitCause)]
+      _ -> False
+  assert "the tool-prefixed reply publishes with ancestry" $
+    case [r | r <- replies, body r == "recovered report"] of
+      [r] ->
+        to r == ["yang"]
+          && channel r == Nothing
+          && thread r == [snd (stamp diffCause)]
       _ -> False
   kimiTranscript <- TIO.readFile kimiTranscriptLog
   assert "Kimi raw output preserves the addressed presentation bullet" $
