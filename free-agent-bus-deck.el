@@ -30,6 +30,8 @@
 ;;
 ;; Keys (Doom leader; also bound inside the buffer maps):
 ;;   SPC y RET / SPC y SPC   send region (or whole post buffer)
+;;   SPC y m                 mark region (or line): a support pin — buffer,
+;;                           position, quoted text — sent via bus say
 ;;   SPC y p                 composition buffer
 ;;   SPC y l                 log tail
 ;;   SPC y s                 live status
@@ -645,6 +647,49 @@ clears; on failure the draft is kept and the error buffer is shown."
               (when (derived-mode-p 'free-agent-bus-post-mode)
                 (erase-buffer)
                 (free-agent-bus--post-mode-refresh)))
+          (free-agent-bus--report-failure "bus say" (car result) (cdr result)))))))
+
+;;;###autoload
+(defun free-agent-bus-mark (begin end)
+  "Send the region (or the line at point) as a mark: agent support requested
+here.  The post body pins the place three ways — the buffer, the 1-based
+line and the begin/end buffer positions (end exclusive), and the region
+text itself.  The quoted region is the durable anchor; the positions are
+exact only at send time and drift after later edits, so a seat acks
+beneath the quote, never beneath the numbers.  Sends through
+`free-agent bus say' with the composition audience and ancestry; the
+current buffer is never erased — a mark is a request about a card, not
+a composition act."
+  (interactive "r")
+  (let* ((use-region (use-region-p))
+         (begin (if use-region begin (line-beginning-position)))
+         (end (if use-region end (line-end-position)))
+         (text (string-trim (buffer-substring-no-properties begin end))))
+    (when (string-empty-p text)
+      (user-error "Nothing to mark"))
+    (unless (or free-agent-bus-post-public free-agent-bus-post-to)
+      (user-error "No audience: set recipients first (C-c C-a) or 'public'"))
+    (let* ((line-no (line-number-at-pos begin))
+           (end-line (line-number-at-pos end))
+           (lines (if (= line-no end-line)
+                      (format "line %d" line-no)
+                    (format "lines %d-%d" line-no end-line)))
+           (file (buffer-file-name))
+           (body (concat (format "MARK %s · %s · chars %d..%d"
+                                 (buffer-name) lines begin end)
+                         (when file (format "\nfile: %s" file))
+                         "\n\n" text))
+           (args (append (list "--from" free-agent-bus-name)
+                         (seq-mapcat (lambda (r) (list "--to" r)) free-agent-bus-post-to)
+                         (when free-agent-bus-post-thread
+                           (list "--thread" (number-to-string free-agent-bus-post-thread))))))
+      (let ((result (apply #'free-agent-bus--cli-stdin body "say" args)))
+        (if (zerop (car result))
+            (progn
+              (message "%s [%s] marked · %s"
+                       free-agent-bus-name (free-agent-bus--current-audience)
+                       (free-agent-bus--receipt-line (cdr result)))
+              (free-agent-bus-log-refresh t))
           (free-agent-bus--report-failure "bus say" (car result) (cdr result)))))))
 
 (define-derived-mode free-agent-bus-post-mode text-mode (free-agent-bus--post-mode-name)
@@ -1968,6 +2013,7 @@ keys reachable while evil's state maps are active."
 ;; or a restart.  A Doom `map!' block only adds which-key descriptions.
 (when (boundp 'doom-leader-map)
   (dolist (pair '(("ya" . free-agent-bus-set-recipients)
+                  ("ym" . free-agent-bus-mark)
                   ("yf" . free-agent-bus-log-set-filter)
                   ("ys" . free-agent-bus-status)
                   ("yr" . free-agent-bus-ready)
