@@ -708,6 +708,15 @@ readyWarnings posts =
             <> " — re-post with bus say --thread "
             <> offerId
 
+-- | Absolute distance between post ids.  'Natural' subtraction is
+-- partial: @abs (a - b)@ throws underflow when @a < b@ instead of
+-- returning the distance, so the difference is taken in the larger
+-- direction.
+idDistance :: PostId -> PostId -> PostId
+idDistance a b
+  | a >= b = a - b
+  | otherwise = b - a
+
 -- | Choose the closest-looking offer without changing offer or component
 -- semantics: an explicit id wins, then shared body tokens, then id distance.
 resemblingOffer :: Stamped Text -> [Stamped Text] -> Maybe (Stamped Text)
@@ -723,7 +732,7 @@ resemblingOffer stray offers =
     strayTokens = bodyTokens (body (stamped stray))
     resemblance offer =
       let (explicitId, sharedTokens) = scores offer
-       in (Down explicitId, Down sharedTokens, abs (strayId - snd (stamp offer)))
+       in (Down explicitId, Down sharedTokens, idDistance strayId (snd (stamp offer)))
 
     scores offer =
       let offerId = snd (stamp offer)

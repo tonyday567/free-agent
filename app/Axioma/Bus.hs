@@ -13,7 +13,7 @@ import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, loop, mkChannelPost
 import Circuit.Agent.Framing (Stamped, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph, markOf)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (bracket)
+import Control.Exception (SomeException, bracket, evaluate, try)
 import Data.Foldable (traverse_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (mapMaybe)
@@ -401,6 +401,35 @@ busTopic = do
           "post 34" `T.isInfixOf` warning
             && "offer 30" `T.isInfixOf` warning
             && "--thread 30" `T.isInfixOf` warning
+        _ -> False
+
+  -------------------------------------------------------------------------
+  -- READY lint distance: a stray below its resembling offers must not
+  -- underflow the Natural subtraction in the closest-id tie-break.
+  -------------------------------------------------------------------------
+  do
+    let stored i f audience ancestors text = case parseTimeText "2026-10-28T00:00:00" of
+          Just ts -> Stamped (ts, i) (Post f Nothing audience ancestors text)
+          Nothing -> error "bad READY distance fixture timestamp"
+        near = stored 42 "moka" [] [] "TASK · omega parcel"
+        far = stored 43 "moka" [] [] "TASK · sigma parcel"
+        below = [stored 41 "mucho" ["moka"] [] "DONE · omega sigma", near, far]
+        above = [stored 44 "mucho" ["moka"] [] "DONE · omega sigma", near, far]
+    belowOutcome <- try (evaluate (length (readyWarnings below))) :: IO (Either SomeException Int)
+    assert "a stray below its offers computes the lint without underflow" $
+      case belowOutcome of
+        Right 1 ->
+          case readyWarnings below of
+            [warning] -> "post 41" `T.isInfixOf` warning && "offer 42" `T.isInfixOf` warning
+            _ -> False
+        _ -> False
+    aboveOutcome <- try (evaluate (length (readyWarnings above))) :: IO (Either SomeException Int)
+    assert "a stray above its offers still picks the nearest id" $
+      case aboveOutcome of
+        Right 1 ->
+          case readyWarnings above of
+            [warning] -> "post 44" `T.isInfixOf` warning && "offer 43" `T.isInfixOf` warning
+            _ -> False
         _ -> False
 
   -------------------------------------------------------------------------
