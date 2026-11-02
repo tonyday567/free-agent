@@ -693,11 +693,15 @@ readyWarnings posts =
   [ warning stray offer
   | stray <- posts,
     hasKind "CLAIM" stray || hasKind "DONE" stray,
-    let offers = openOffers posts,
-    all (outside stray . componentOf posts) (taskOffers posts),
+    all (outside stray) offerComponents,
     Just offer <- [resemblingOffer stray offers]
   ]
   where
+    -- Shared across strays: recomputing the components and the offer set
+    -- per stray turned a page of lint into minutes on a long log.
+    offerComponents = map (componentOf posts) (taskOffers posts)
+    offers = openOffers posts
+
     taskOffers = filter (\task -> isRootTask task && null (to (stamped task)))
 
     openOffers =
