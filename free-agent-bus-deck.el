@@ -650,25 +650,30 @@ clears; on failure the draft is kept and the error buffer is shown."
           (free-agent-bus--report-failure "bus say" (car result) (cdr result)))))))
 
 ;;;###autoload
-(defun free-agent-bus-mark (begin end)
+(defun free-agent-bus-mark (begin end &optional instant)
   "Send the region (or the line at point) as a mark: agent support requested
 here.  The post body pins the place three ways — the buffer, the 1-based
 line and the begin/end buffer positions (end exclusive), and the region
 text itself.  The quoted region is the durable anchor; the positions are
 exact only at send time and drift after later edits, so a seat acks
-beneath the quote, never beneath the numbers.  Sends through
-`free-agent bus say' with the composition audience and ancestry; the
-current buffer is never erased — a mark is a request about a card, not
-a composition act."
-  (interactive "r")
+beneath the quote, never beneath the numbers.
+
+With a region and no prefix argument, the mark goes to the composition
+buffer instead of the bus: the buffer is pre-filled with exactly the body
+described above, with point on the blank line beneath the quote, where
+the runner types the instruction.  C-<return> then sends the whole buffer
+through `free-agent-bus-send'; the composition audience and ancestry
+carry over unchanged, and nothing reaches the bus until that send.  With
+no region, or with a C-u prefix argument, the mark is sent instantly
+through `free-agent bus say', exactly as before.  The source buffer is
+never erased — a mark is a request about a card, not a composition act."
+  (interactive "r\nP")
   (let* ((use-region (use-region-p))
          (begin (if use-region begin (line-beginning-position)))
          (end (if use-region end (line-end-position)))
          (text (string-trim (buffer-substring-no-properties begin end))))
     (when (string-empty-p text)
       (user-error "Nothing to mark"))
-    (unless (or free-agent-bus-post-public free-agent-bus-post-to)
-      (user-error "No audience: set recipients first (C-c C-a) or 'public'"))
     (let* ((line-no (line-number-at-pos begin))
            (end-line (line-number-at-pos end))
            (lines (if (= line-no end-line)
@@ -678,19 +683,35 @@ a composition act."
            (body (concat (format "MARK %s · %s · chars %d..%d"
                                  (buffer-name) lines begin end)
                          (when file (format "\nfile: %s" file))
-                         "\n\n" text))
-           (args (append (list "--from" free-agent-bus-name)
-                         (seq-mapcat (lambda (r) (list "--to" r)) free-agent-bus-post-to)
-                         (when free-agent-bus-post-thread
-                           (list "--thread" (number-to-string free-agent-bus-post-thread))))))
-      (let ((result (apply #'free-agent-bus--cli-stdin body "say" args)))
-        (if (zerop (car result))
-            (progn
-              (message "%s [%s] marked · %s"
-                       free-agent-bus-name (free-agent-bus--current-audience)
-                       (free-agent-bus--receipt-line (cdr result)))
-              (free-agent-bus-log-refresh t))
-          (free-agent-bus--report-failure "bus say" (car result) (cdr result)))))))
+                         "\n\n" text)))
+      (if (and use-region (not instant))
+          (let ((buf (get-buffer-create free-agent-bus-post-buffer-name)))
+            (with-current-buffer buf
+              (erase-buffer)
+              (unless (derived-mode-p 'free-agent-bus-post-mode)
+                (free-agent-bus-post-mode))
+              (insert body "\n")
+              (free-agent-bus--post-mode-refresh))
+            (pop-to-buffer buf)
+            (message "Mark drafted in %s — type beneath the quote, C-<return> sends%s"
+                     free-agent-bus-post-buffer-name
+                     (if (or free-agent-bus-post-public free-agent-bus-post-to)
+                         ""
+                       " (no audience yet — C-c C-a)")))
+        (unless (or free-agent-bus-post-public free-agent-bus-post-to)
+          (user-error "No audience: set recipients first (C-c C-a) or 'public'"))
+        (let* ((args (append (list "--from" free-agent-bus-name)
+                             (seq-mapcat (lambda (r) (list "--to" r)) free-agent-bus-post-to)
+                             (when free-agent-bus-post-thread
+                               (list "--thread" (number-to-string free-agent-bus-post-thread))))))
+          (let ((result (apply #'free-agent-bus--cli-stdin body "say" args)))
+            (if (zerop (car result))
+                (progn
+                  (message "%s [%s] marked · %s"
+                           free-agent-bus-name (free-agent-bus--current-audience)
+                           (free-agent-bus--receipt-line (cdr result)))
+                  (free-agent-bus-log-refresh t))
+              (free-agent-bus--report-failure "bus say" (car result) (cdr result)))))))))
 
 (define-derived-mode free-agent-bus-post-mode text-mode (free-agent-bus--post-mode-name)
   "Major mode for composing free-agent bus posts.
