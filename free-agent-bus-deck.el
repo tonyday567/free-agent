@@ -577,40 +577,37 @@ prompt's initial input.")
 (defun free-agent-bus--post-header-line ()
   "Header line for the composition buffer: the respondent, named or exposed.
 Origin drives the variant; the recipient and thread variables are never
-read on their own.  A resolved reply names sender, provenance and
-thread; `own post' and no target point at C-c C-a — the carried
-audience, when there was one, waits in that prompt's initial input,
-never applied silently.  A no-region note, when a mark opened the draft
-without a region, rides along."
+read on their own.  A resolved reply names sender, provenance and thread;
+`own post' and no target are named directly.  The carried audience, when
+there was one, waits in the C-c C-a prompt's initial input, never applied
+silently.  A no-region note, when a mark opened the draft without a region,
+rides along."
   (let ((note (if free-agent-bus-post--region-note
                   (concat " · " free-agent-bus-post--region-note)
                 ""))
-        (controls "C-c C-a changes · C-<return> sends")
         (kind (plist-get free-agent-bus-post--origin :kind)))
     (cond
      (free-agent-bus-post-public
-      (format "⟜ public — everyone · thread %s%s · %s"
-              (or free-agent-bus-post-thread "—") note controls))
+      (format "⟜ public — everyone · thread %s%s"
+              (or free-agent-bus-post-thread "—") note))
      ((eq kind 'at-point)
-      (format "⟜ reply to %s (post at point) · thread %s%s · %s"
+      (format "⟜ reply to %s (post at point) · thread %s%s"
               (plist-get free-agent-bus-post--origin :sender)
               (or (plist-get free-agent-bus-post--origin :id) "—")
-              note controls))
+              note))
      ((eq kind 'visited)
-      (format "⟜ reply to %s (last visited) · thread %s%s · %s"
+      (format "⟜ reply to %s (last visited) · thread %s%s"
               (plist-get free-agent-bus-post--origin :sender)
               (plist-get free-agent-bus-post--origin :id)
-              note controls))
-     ((eq kind 'own-post)
-      (format "⟜ own post — no reply target · C-c C-a sets one%s · C-<return> sends"
               note))
+     ((eq kind 'own-post)
+      (format "⟜ own post — no reply target%s" note))
      ((and (eq kind 'manual) free-agent-bus-post-to)
-      (format "⟜ to %s (set here) · thread %s%s · %s"
+      (format "⟜ to %s (set here) · thread %s%s"
               (mapconcat #'identity free-agent-bus-post-to ",")
-              (or free-agent-bus-post-thread "—") note controls))
+              (or free-agent-bus-post-thread "—") note))
      (t
-      (format "⟜ no reply target · C-c C-a sets one%s · C-<return> sends"
-              note)))))
+      (format "⟜ no reply target%s" note)))))
 
 (defun free-agent-bus--post-mode-name ()
   "Mode-line name for the composition buffer, naming the audience."
