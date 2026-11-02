@@ -30,8 +30,11 @@
 ;;
 ;; Keys (Doom leader; also bound inside the buffer maps):
 ;;   SPC y RET / SPC y SPC   send region (or whole post buffer)
-;;   SPC y m                 mark region (or line): a support pin — buffer,
-;;                           position, quoted text — sent via bus say
+;;   SPC y m                 mark region: a support pin — buffer, position,
+;;                           quoted text — drafted with the respondent
+;;                           resolved, never inherited (no region quotes the
+;;                           line; no target clears and the header says so;
+;;                           C-u sends instantly)
 ;;   SPC y p                 composition buffer
 ;;   SPC y l                 log tail
 ;;   SPC y s                 live status
@@ -420,6 +423,34 @@ A line the deck rendered carries `free-agent-bus-sender';
 `free-agent-bus--sender-in-line' reads the name back from the text otherwise."
   (free-agent-bus--field-at-point 'free-agent-bus-sender #'free-agent-bus--sender-in-line))
 
+(defvar free-agent-bus--last-visited nil
+  "The last post opened or replied to: a plist (:id :sender :root), or nil.
+What a mark's reply-to-sender default falls back to when the mark is not
+fired on a post itself — the same record RET, SPC y t and r keep.  The
+:root slot ties the visit to the bus it was made on: a tracker from
+another root is a different bus and invalidates the fallback.")
+
+(defun free-agent-bus--visit-post (id sender)
+  "Record ID and SENDER as `free-agent-bus--last-visited'.
+Both are required: a reply target without a sender cannot name its
+respondent, so such a visit is dropped rather than half-kept.  The
+current `free-agent-bus-root' rides along; a root change invalidates
+the record — a ~/bus visit never targets ~/dev/bus."
+  (when (and id sender)
+    (setq free-agent-bus--last-visited
+          (list :id id :sender sender :root free-agent-bus-root))))
+
+(defun free-agent-bus--sender-for-id (id)
+  "Return the sender of post ID in the log, or nil when the log lacks it.
+The prompt path of SPC y t knows an id without a buffer line; the log's
+own `from' field is the authority, never a timestamp or a name match."
+  (when (file-readable-p (free-agent-bus--log-file))
+    (catch 'found
+      (dolist (line (split-string (free-agent-bus-log--read-file) "\n" t))
+        (when-let ((obj (ignore-errors (json-read-from-string line))))
+          (when (equal (alist-get 'id obj) id)
+            (throw 'found (alist-get 'from obj))))))))
+
 ;;; Failures stay visible
 
 (defun free-agent-bus--report-failure (command status output)
@@ -519,6 +550,61 @@ were following."
 
 ;;; Composition
 
+(defvar-local free-agent-bus-post--origin nil
+  "How the current draft was aimed: a plist (:id :sender :kind), or nil.
+kind is `at-point' for a post at point, `visited' for the last-visited
+fallback, `own-post' for a candidate naming this deck itself, `manual'
+for an explicit C-c C-a / C-c C-t change; nil means no reply context —
+the header says so rather than dressing an audience up as a reply.")
+
+(defvar-local free-agent-bus-post--region-note nil
+  "Note riding the draft's header line when a mark opened it without a
+region: the line at point was quoted instead, and the header says so.")
+
+(defvar free-agent-bus-post--carried nil
+  "Audience stashed when a mark opened the draft with no reply target:
+the recipient list or public flag that was live, cleared so nothing
+stale can fire, and offered — never silently applied — as the C-c C-a
+prompt's initial input.")
+
+(defun free-agent-bus--post-header-line ()
+  "Header line for the composition buffer: the respondent, named or exposed.
+Origin drives the variant; the recipient and thread variables are never
+read on their own.  A resolved reply names sender, provenance and
+thread; `own post' and no target point at C-c C-a — the carried
+audience, when there was one, waits in that prompt's initial input,
+never applied silently.  A no-region note, when a mark opened the draft
+without a region, rides along."
+  (let ((note (if free-agent-bus-post--region-note
+                  (concat " · " free-agent-bus-post--region-note)
+                ""))
+        (controls "C-c C-a changes · C-<return> sends")
+        (kind (plist-get free-agent-bus-post--origin :kind)))
+    (cond
+     (free-agent-bus-post-public
+      (format "⟜ public — everyone · thread %s%s · %s"
+              (or free-agent-bus-post-thread "—") note controls))
+     ((eq kind 'at-point)
+      (format "⟜ reply to %s (post at point) · thread %s%s · %s"
+              (plist-get free-agent-bus-post--origin :sender)
+              (or (plist-get free-agent-bus-post--origin :id) "—")
+              note controls))
+     ((eq kind 'visited)
+      (format "⟜ reply to %s (last visited) · thread %s%s · %s"
+              (plist-get free-agent-bus-post--origin :sender)
+              (plist-get free-agent-bus-post--origin :id)
+              note controls))
+     ((eq kind 'own-post)
+      (format "⟜ own post — no reply target · C-c C-a sets one%s · C-<return> sends"
+              note))
+     ((and (eq kind 'manual) free-agent-bus-post-to)
+      (format "⟜ to %s (set here) · thread %s%s · %s"
+              (mapconcat #'identity free-agent-bus-post-to ",")
+              (or free-agent-bus-post-thread "—") note controls))
+     (t
+      (format "⟜ no reply target · C-c C-a sets one%s · C-<return> sends"
+              note)))))
+
 (defun free-agent-bus--post-mode-name ()
   "Mode-line name for the composition buffer, naming the audience."
   (format "FAB-Post[%s%s%s]"
@@ -531,10 +617,11 @@ were following."
           ""))
 
 (defun free-agent-bus--post-mode-refresh (&optional buffer)
-  "Update the composition BUFFER's mode line after audience or ancestry changes.
-BUFFER defaults to the current buffer."
+  "Update the composition BUFFER's mode line and header line after audience
+or ancestry changes.  BUFFER defaults to the current buffer."
   (with-current-buffer (or buffer (current-buffer))
     (setq mode-name (free-agent-bus--post-mode-name))
+    (setq header-line-format (free-agent-bus--post-header-line))
     (force-mode-line-update)))
 
 (defvar free-agent-bus-post-mode-map
@@ -550,29 +637,46 @@ BUFFER defaults to the current buffer."
 (define-key free-agent-bus-post-mode-map (kbd "C-c C-a") #'free-agent-bus-set-recipients)
 (define-key free-agent-bus-post-mode-map (kbd "C-c C-t") #'free-agent-bus-set-thread)
 
+(defun free-agent-bus--post-note-manual ()
+  "Record a manual audience change in the composition buffer.
+Sets origin `manual' and refreshes the header — invoked from any buffer,
+as the setters are global commands."
+  (when-let ((buffer (get-buffer free-agent-bus-post-buffer-name)))
+    (with-current-buffer buffer
+      (setq-local free-agent-bus-post--origin (list :kind 'manual))
+      (free-agent-bus--post-mode-refresh))))
+
 ;;;###autoload
 (defun free-agent-bus-set-recipients (recipients)
   "Set the explicit audience for this post.
 RECIPIENTS is a comma or space separated list of names.  The single word
-`public' addresses the post to everyone (`to: []').  Empty input clears the
-audience; a post needs an audience or public before it will send."
+`public' addresses the post to everyone (`to: []').  Empty input clears
+the audience; a post needs an audience or public before it will send.
+Sets the composition origin to `manual' — the header's reply variants
+come from the mark's resolution alone, never from these variables."
   (interactive (list (read-string "Recipients (comma separated, or 'public'): "
                                   nil nil
                                   (cond (free-agent-bus-post-public "public")
                                         (free-agent-bus-post-to
                                          (mapconcat #'identity free-agent-bus-post-to ","))
+                                        (free-agent-bus-post--carried
+                                         free-agent-bus-post--carried)
                                         (t "")))))
   (let ((trimmed (string-trim recipients)))
     (cond
      ((string-empty-p trimmed)
-      (setq free-agent-bus-post-public nil)
-      (setq free-agent-bus-post-to nil))
+      (setq free-agent-bus-post-public nil
+            free-agent-bus-post-to nil
+            free-agent-bus-post--carried nil))
      ((string= (downcase trimmed) "public")
-      (setq free-agent-bus-post-public t)
-      (setq free-agent-bus-post-to nil))
+      (setq free-agent-bus-post-public t
+            free-agent-bus-post-to nil
+            free-agent-bus-post--carried nil))
      (t
-      (setq free-agent-bus-post-public nil)
-      (setq free-agent-bus-post-to (split-string trimmed "[ ,]+" t)))))
+      (setq free-agent-bus-post-public nil
+            free-agent-bus-post-to (split-string trimmed "[ ,]+" t)
+            free-agent-bus-post--carried nil))))
+  (free-agent-bus--post-note-manual)
   (when-let ((buffer (get-buffer free-agent-bus-post-buffer-name)))
     (free-agent-bus--post-mode-refresh buffer))
   (message "Audience: %s" (free-agent-bus--current-audience)))
@@ -580,7 +684,9 @@ audience; a post needs an audience or public before it will send."
 (defun free-agent-bus-set-thread (id)
   "Set the post this composition answers.
 ID is a post id; empty input clears the ancestry.  The post id is the task
-id, so replying into a task's thread is how a CLAIM or DONE is filed."
+id, so replying into a task's thread is how a CLAIM or DONE is filed.
+Sets the composition origin to `manual', as `free-agent-bus-set-recipients'
+does."
   (interactive (list (let ((input (read-string "Thread (post id, empty for a root post): "
                                               nil nil
                                               (if free-agent-bus-post-thread
@@ -590,6 +696,7 @@ id, so replying into a task's thread is how a CLAIM or DONE is filed."
                            nil
                          (string-to-number (string-trim input))))))
   (setq free-agent-bus-post-thread id)
+  (free-agent-bus--post-note-manual)
   (when-let ((buffer (get-buffer free-agent-bus-post-buffer-name)))
     (free-agent-bus--post-mode-refresh buffer))
   (message "Thread: %s" (or free-agent-bus-post-thread "root post")))
@@ -636,7 +743,7 @@ clears; on failure the draft is kept and the error buffer is shown."
       (when (string-empty-p body)
         (user-error "Nothing to send"))
       (unless (or free-agent-bus-post-public free-agent-bus-post-to)
-        (user-error "No audience: set recipients first (C-c C-a) or 'public'"))
+        (user-error "No reply target — C-c C-a sets one, or C-u on the mark sends instantly"))
       (let ((result (apply #'free-agent-bus--cli-stdin body "say" args)))
         (if (zerop (car result))
             (progn
@@ -649,6 +756,37 @@ clears; on failure the draft is kept and the error buffer is shown."
                 (free-agent-bus--post-mode-refresh)))
           (free-agent-bus--report-failure "bus say" (car result) (cdr result)))))))
 
+(defun free-agent-bus--resolve-reply-target (&optional from to)
+  "Resolve the reply target for a mark fired near FROM/TO: (:id :sender :kind).
+Reads the rendered posts' own text properties only — a line in a card or
+a note shaped like a bus post invents nothing.  Order: the post at the
+region's begin, then at point — kind `at-point'; else the last-visited
+post, when it belongs to this root — kind `visited'; else nil.  A
+candidate whose sender is `free-agent-bus-name' is not a reply target —
+kind `own-post', with no fallback to older or carried targets."
+  (let ((positions (delete-dups (delq nil (list from to))))
+        (reply nil))
+    (while (and positions (not reply))
+      (let* ((pos (pop positions))
+             (id (get-text-property pos 'free-agent-bus-post-id))
+             (sender (and id (get-text-property pos 'free-agent-bus-sender))))
+        (when (and id sender)
+          (setq reply (list :id id :sender sender :kind 'at-point)))))
+    (when (and reply (equal (plist-get reply :sender) free-agent-bus-name))
+      (plist-put reply :kind 'own-post))
+    (or reply
+        (let ((visited free-agent-bus--last-visited))
+          (when (and visited
+                     (equal (plist-get visited :root) free-agent-bus-root)
+                     (plist-get visited :sender))
+            (if (equal (plist-get visited :sender) free-agent-bus-name)
+                (list :id (plist-get visited :id)
+                      :sender (plist-get visited :sender)
+                      :kind 'own-post)
+              (list :id (plist-get visited :id)
+                    :sender (plist-get visited :sender)
+                    :kind 'visited)))))))
+
 ;;;###autoload
 (defun free-agent-bus-mark (begin end &optional instant)
   "Send the region (or the line at point) as a mark: agent support requested
@@ -658,16 +796,24 @@ text itself.  The quoted region is the durable anchor; the positions are
 exact only at send time and drift after later edits, so a seat acks
 beneath the quote, never beneath the numbers.
 
-With a region and no prefix argument, the mark goes to the composition
-buffer instead of the bus: the buffer is pre-filled with exactly the body
-described above, with point on the blank line beneath the quote, where
-the runner types the instruction.  C-<return> then sends the whole buffer
-through `free-agent-bus-send'; the composition audience and ancestry
-carry over unchanged, and nothing reaches the bus until that send.  With
-no region, or with a C-u prefix argument, the mark is sent instantly
-through `free-agent bus say', exactly as before.  The source buffer is
-never erased — a mark is a request about a card, not a composition act."
-  (interactive "r\nP")
+Without a C-u prefix the mark stops: it opens the composition buffer
+pre-filled with the body above and a header line naming the respondent.
+The respondent is resolved, not inherited: the post at point — a rendered
+text property, never a line's shape — else the last post visited (RET,
+SPC y t, r) on this bus root; else no target, whereupon the live audience
+and ancestry are cleared, the old audience waits in C-c C-a's prompt
+initial input, and the header says `no reply target'.  A candidate naming
+this deck itself is not a reply target either: `own post — no reply
+target', the same clearing rule.  With no region, the line at point is
+quoted and the header says so; nothing reaches the bus until C-<return>
+sends the whole buffer through `free-agent-bus-send', which refuses with
+no target at all.  With C-u, the mark fires instantly through
+`free-agent bus say', exactly as before.  The source buffer is never
+erased — a mark is a request about a card, not a composition act."
+  (interactive
+   (list (if (use-region-p) (region-beginning) (line-beginning-position))
+         (if (use-region-p) (region-end) (line-end-position))
+         current-prefix-arg))
   (let* ((use-region (use-region-p))
          (begin (if use-region begin (line-beginning-position)))
          (end (if use-region end (line-end-position)))
@@ -683,35 +829,55 @@ never erased — a mark is a request about a card, not a composition act."
            (body (concat (format "MARK %s · %s · chars %d..%d"
                                  (buffer-name) lines begin end)
                          (when file (format "\nfile: %s" file))
-                         "\n\n" text)))
-      (if (and use-region (not instant))
-          (let ((buf (get-buffer-create free-agent-bus-post-buffer-name)))
-            (with-current-buffer buf
-              (erase-buffer)
-              (unless (derived-mode-p 'free-agent-bus-post-mode)
-                (free-agent-bus-post-mode))
-              (insert body "\n")
-              (free-agent-bus--post-mode-refresh))
-            (pop-to-buffer buf)
-            (message "Mark drafted in %s — type beneath the quote, C-<return> sends%s"
-                     free-agent-bus-post-buffer-name
-                     (if (or free-agent-bus-post-public free-agent-bus-post-to)
-                         ""
-                       " (no audience yet — C-c C-a)")))
-        (unless (or free-agent-bus-post-public free-agent-bus-post-to)
-          (user-error "No audience: set recipients first (C-c C-a) or 'public'"))
-        (let* ((args (append (list "--from" free-agent-bus-name)
-                             (seq-mapcat (lambda (r) (list "--to" r)) free-agent-bus-post-to)
-                             (when free-agent-bus-post-thread
-                               (list "--thread" (number-to-string free-agent-bus-post-thread))))))
-          (let ((result (apply #'free-agent-bus--cli-stdin body "say" args)))
-            (if (zerop (car result))
-                (progn
-                  (message "%s [%s] marked · %s"
-                           free-agent-bus-name (free-agent-bus--current-audience)
-                           (free-agent-bus--receipt-line (cdr result)))
-                  (free-agent-bus-log-refresh t))
-              (free-agent-bus--report-failure "bus say" (car result) (cdr result)))))))))
+                         "\n\n" text))
+           (target (unless instant
+                     (free-agent-bus--resolve-reply-target begin (point)))))
+      (if instant
+          (progn
+            (unless (or free-agent-bus-post-public free-agent-bus-post-to)
+              (user-error "No audience: set recipients first (C-c C-a) or 'public'"))
+            (let* ((args (append (list "--from" free-agent-bus-name)
+                                 (seq-mapcat (lambda (r) (list "--to" r)) free-agent-bus-post-to)
+                                 (when free-agent-bus-post-thread
+                                   (list "--thread" (number-to-string free-agent-bus-post-thread))))))
+              (let ((result (apply #'free-agent-bus--cli-stdin body "say" args)))
+                (if (zerop (car result))
+                    (progn
+                      (message "%s [%s] marked · %s"
+                               free-agent-bus-name (free-agent-bus--current-audience)
+                               (free-agent-bus--receipt-line (cdr result)))
+                      (free-agent-bus-log-refresh t))
+                  (free-agent-bus--report-failure "bus say" (car result) (cdr result))))))
+        (if (and target (memq (plist-get target :kind) '(at-point visited)))
+            (setq free-agent-bus-post-public nil
+                  free-agent-bus-post-to (list (plist-get target :sender))
+                  free-agent-bus-post-thread (plist-get target :id)
+                  free-agent-bus-post--carried nil)
+          (setq free-agent-bus-post--carried
+                (cond (free-agent-bus-post-public "public")
+                      (free-agent-bus-post-to
+                       (mapconcat #'identity free-agent-bus-post-to ","))
+                      (t nil))
+                free-agent-bus-post-public nil
+                free-agent-bus-post-to nil
+                free-agent-bus-post-thread nil))
+        (let ((buf (get-buffer-create free-agent-bus-post-buffer-name)))
+          (with-current-buffer buf
+            (erase-buffer)
+            (unless (derived-mode-p 'free-agent-bus-post-mode)
+              (free-agent-bus-post-mode))
+            (setq-local free-agent-bus-post--origin target
+                        free-agent-bus-post--region-note (unless use-region
+                                                           "no region — line at point"))
+            (insert body "\n")
+            (free-agent-bus--post-mode-refresh))
+          (pop-to-buffer buf)
+          (message "Mark drafted in %s — %s, C-<return> sends%s"
+                   free-agent-bus-post-buffer-name
+                   (if use-region "type beneath the quote" "no region — line at point quoted")
+                   (if (or free-agent-bus-post-public free-agent-bus-post-to)
+                       ""
+                     " (no reply target — C-c C-a)")))))))
 
 (define-derived-mode free-agent-bus-post-mode text-mode (free-agent-bus--post-mode-name)
   "Major mode for composing free-agent bus posts.
@@ -726,6 +892,8 @@ never erased — a mark is a request about a card, not a composition act."
   (pop-to-buffer free-agent-bus-post-buffer-name)
   (unless (derived-mode-p 'free-agent-bus-post-mode)
     (free-agent-bus-post-mode))
+  (setq-local free-agent-bus-post--origin nil
+              free-agent-bus-post--region-note nil)
   (free-agent-bus--post-mode-refresh))
 
 ;;; Board file
@@ -1337,6 +1505,8 @@ frames when evidence rather than prose is wanted."
                          (string-to-number (read-string "Thread id (post id): ")))))
   (unless (integerp id)
     (user-error "No post id at point and none given"))
+  (unless (equal (plist-get free-agent-bus--last-visited :id) id)
+    (free-agent-bus--visit-post id (free-agent-bus--sender-for-id id)))
   (free-agent-bus--open-view free-agent-bus-thread-buffer-name
                              (format "thread %s" id) "read"
                              (list "--thread" (number-to-string id)) 1))
@@ -1345,9 +1515,12 @@ frames when evidence rather than prose is wanted."
 (defun free-agent-bus-thread-at-point ()
   "Open the thread of the post at point, or offer to open any thread."
   (interactive)
-  (let ((id (free-agent-bus--id-at-point)))
+  (let ((id (free-agent-bus--id-at-point))
+        (sender (free-agent-bus--sender-at-point)))
     (if id
-        (free-agent-bus-thread id)
+        (progn
+          (free-agent-bus--visit-post id sender)
+          (free-agent-bus-thread id))
       (call-interactively #'free-agent-bus-thread))))
 
 ;;; Inbox: unread mail for the human
@@ -1507,11 +1680,18 @@ than beside every open offer."
         (sender (free-agent-bus--sender-at-point)))
     (unless id
       (user-error "No post id at point — move to a post line first"))
+    (free-agent-bus--visit-post id sender)
     (setq free-agent-bus-post-thread id)
     (when sender
       (setq free-agent-bus-post-public nil)
       (setq free-agent-bus-post-to (list sender)))
     (free-agent-bus-post)
+    (when (and sender (get-buffer free-agent-bus-post-buffer-name))
+      (with-current-buffer free-agent-bus-post-buffer-name
+        (setq-local free-agent-bus-post--origin
+                    (list :id id :sender sender :kind 'at-point)
+                    free-agent-bus-post--region-note nil)
+        (free-agent-bus--post-mode-refresh)))
     (message "Reply into thread %s%s" id
              (if sender (format " to %s" sender) " (no recipients set)"))))
 
