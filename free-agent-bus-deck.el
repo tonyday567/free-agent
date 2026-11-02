@@ -31,10 +31,10 @@
 ;; Keys (Doom leader; also bound inside the buffer maps):
 ;;   SPC y RET / SPC y SPC   send region (or whole post buffer)
 ;;   SPC y m                 mark region: a support pin — buffer, position,
-;;                           quoted text — drafted with the respondent
-;;                           resolved, never inherited (no region quotes the
-;;                           line; no target clears and the header says so;
-;;                           C-u sends instantly)
+;;                           quoted text — drafted with an explicit SPC y a/t
+;;                           choice kept for one mark, else the respondent
+;;                           resolved (no region quotes the line; no target
+;;                           clears and the header says so; C-u sends instantly)
 ;;   SPC y p                 composition buffer
 ;;   SPC y l                 log tail
 ;;   SPC y s                 live status
@@ -562,6 +562,12 @@ the header says so rather than dressing an audience up as a reply.")
   "Note riding the draft's header line when a mark opened it without a
 region: the line at point was quoted instead, and the header says so.")
 
+(defvar-local free-agent-bus-post--manual-armed nil
+  "Whether an explicit audience or thread applies to the next drafted mark.
+The setters arm this one-shot choice.  A non-instant mark consumes it instead
+of replacing the choice with an automatic reply target; later marks resolve
+normally, so an old manual audience cannot become sticky.")
+
 (defvar free-agent-bus-post--carried nil
   "Audience stashed when a mark opened the draft with no reply target:
 the recipient list or public flag that was live, cleared so nothing
@@ -639,13 +645,23 @@ or ancestry changes.  BUFFER defaults to the current buffer."
 (define-key free-agent-bus-post-mode-map (kbd "C-c C-t") #'free-agent-bus-set-thread)
 
 (defun free-agent-bus--post-note-manual ()
-  "Record a manual audience change in the composition buffer.
-Sets origin `manual' and refreshes the header — invoked from any buffer,
-as the setters are global commands."
+  "Arm the composition buffer's explicit targeting for the next mark.
+Sets origin `manual', makes the one-shot choice, and refreshes the header —
+invoked from any buffer, as the setters are global commands.  Creating the
+composition buffer here makes SPC y a before the first composition work too."
+  (with-current-buffer (get-buffer-create free-agent-bus-post-buffer-name)
+    (setq-local free-agent-bus-post--origin (list :kind 'manual)
+                free-agent-bus-post--manual-armed t)
+    (free-agent-bus--post-mode-refresh)))
+
+(defun free-agent-bus--take-manual-target ()
+  "Consume and return the next mark's explicit target, or nil.
+The audience and ancestry themselves stay in their existing variables.  The
+returned provenance only tells the draft header that they were set manually."
   (when-let ((buffer (get-buffer free-agent-bus-post-buffer-name)))
     (with-current-buffer buffer
-      (setq-local free-agent-bus-post--origin (list :kind 'manual))
-      (free-agent-bus--post-mode-refresh))))
+      (prog1 (when free-agent-bus-post--manual-armed (list :kind 'manual))
+        (setq-local free-agent-bus-post--manual-armed nil)))))
 
 ;;;###autoload
 (defun free-agent-bus-set-recipients (recipients)
@@ -799,18 +815,20 @@ beneath the quote, never beneath the numbers.
 
 Without a C-u prefix the mark stops: it opens the composition buffer
 pre-filled with the body above and a header line naming the respondent.
-The respondent is resolved, not inherited: the post at point — a rendered
-text property, never a line's shape — else the last post visited (RET,
-SPC y t, r) on this bus root; else no target, whereupon the live audience
-and ancestry are cleared, the old audience waits in C-c C-a's prompt
-initial input, and the header says `no reply target'.  A candidate naming
-this deck itself is not a reply target either: `own post — no reply
-target', the same clearing rule.  With no region, the line at point is
-quoted and the header says so; nothing reaches the bus until C-<return>
-sends the whole buffer through `free-agent-bus-send', which refuses with
-no target at all.  With C-u, the mark fires instantly through
-`free-agent bus say', exactly as before.  The source buffer is never
-erased — a mark is a request about a card, not a composition act."
+An audience or thread explicitly set with SPC y a / SPC y t applies to this
+next drafted mark once; it is neither replaced nor cleared by automatic
+resolution.  Otherwise the respondent is resolved, not inherited: the post
+at point — a rendered text property, never a line's shape — else the last
+post visited (RET, SPC y t, r) on this bus root; else no target, whereupon
+the live audience and ancestry are cleared, the old audience waits in
+C-c C-a's prompt initial input, and the header says `no reply target'.
+A candidate naming this deck itself is not a reply target either: `own post
+— no reply target', the same clearing rule.  With no region, the line at
+point is quoted and the header says so; nothing reaches the bus until
+C-<return> sends the whole buffer through `free-agent-bus-send', which
+refuses with no target at all.  With C-u, the mark fires instantly through
+`free-agent bus say', exactly as before.  The source buffer is never erased
+— a mark is a request about a card, not a composition act."
   (interactive
    (list (if (use-region-p) (region-beginning) (line-beginning-position))
          (if (use-region-p) (region-end) (line-end-position))
@@ -832,7 +850,8 @@ erased — a mark is a request about a card, not a composition act."
                          (when file (format "\nfile: %s" file))
                          "\n\n" text))
            (target (unless instant
-                     (free-agent-bus--resolve-reply-target begin (point)))))
+                     (or (free-agent-bus--take-manual-target)
+                         (free-agent-bus--resolve-reply-target begin (point))))))
       (if instant
           (progn
             (unless (or free-agent-bus-post-public free-agent-bus-post-to)
@@ -849,11 +868,15 @@ erased — a mark is a request about a card, not a composition act."
                                (free-agent-bus--receipt-line (cdr result)))
                       (free-agent-bus-log-refresh t))
                   (free-agent-bus--report-failure "bus say" (car result) (cdr result))))))
-        (if (and target (memq (plist-get target :kind) '(at-point visited)))
-            (setq free-agent-bus-post-public nil
-                  free-agent-bus-post-to (list (plist-get target :sender))
-                  free-agent-bus-post-thread (plist-get target :id)
-                  free-agent-bus-post--carried nil)
+        (cond
+         ((and target (memq (plist-get target :kind) '(at-point visited)))
+          (setq free-agent-bus-post-public nil
+                free-agent-bus-post-to (list (plist-get target :sender))
+                free-agent-bus-post-thread (plist-get target :id)
+                free-agent-bus-post--carried nil))
+         ((eq (plist-get target :kind) 'manual)
+          (setq free-agent-bus-post--carried nil))
+         (t
           (setq free-agent-bus-post--carried
                 (cond (free-agent-bus-post-public "public")
                       (free-agent-bus-post-to
@@ -861,7 +884,7 @@ erased — a mark is a request about a card, not a composition act."
                       (t nil))
                 free-agent-bus-post-public nil
                 free-agent-bus-post-to nil
-                free-agent-bus-post-thread nil))
+                free-agent-bus-post-thread nil)))
         (let ((buf (get-buffer-create free-agent-bus-post-buffer-name)))
           (with-current-buffer buf
             (erase-buffer)
