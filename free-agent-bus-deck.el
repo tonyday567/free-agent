@@ -75,6 +75,7 @@
 (require 'json)
 (require 'seq)
 (require 'subr-x)
+(require 'time-date)
 
 ;;; Variables
 
@@ -217,7 +218,7 @@ watch is the only repaint."
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-status-label-width 72
-  "Display width of a status row's latest-assignment label."
+  "Display width of a status row's activity, task, assignment, and card suffix."
   :type 'integer
   :group 'free-agent-bus-deck)
 
@@ -1066,7 +1067,9 @@ TITLE names the view; the header carries root, identity, and freshness."
   "Running Hermes usage collectors, keyed by (ROOT . SEAT).")
 
 (defvar-local free-agent-bus-status--model nil
-  "Parsed status rows and their latest log-derived assignments.")
+  "Status model: (:root ROOT-ROW :rows VISIBLE-ROWS :latest NEWEST-POST).
+The root summary is distinct from seat and raw CLI rows.  NEWEST-POST comes
+from the same single log read that supplies the rows' assignment labels.")
 
 (defvar-local free-agent-bus-status--file-watch nil
   "File-notify descriptor for this status buffer.")
@@ -1116,11 +1119,15 @@ log message still reaches the page.")
                line)
         (string-join (split-string line "[ \t\r\n]+" t) " ")))))
 
-(defun free-agent-bus-status--assignments (seats)
-  "Project the latest assignment for each name in SEATS from the bus log."
-  (let ((assignments (make-hash-table :test 'equal)))
+(defun free-agent-bus-status--log-model (seats)
+  "Read the log once for SEATS' latest assignments and the newest post.
+Return (ASSIGNMENTS . NEWEST), where ASSIGNMENTS maps a seat to (LABEL . ID)
+and NEWEST is the last parseable post object, or nil for an empty log."
+  (let ((assignments (make-hash-table :test 'equal))
+        (newest nil))
     (dolist (line (split-string (free-agent-bus-log--read-file) "\n" t))
       (when-let ((obj (ignore-errors (json-read-from-string line))))
+        (setq newest obj)
         (let ((to (append (alist-get 'to obj) nil))
               (body (alist-get 'body obj))
               (id (alist-get 'id obj)))
@@ -1128,20 +1135,27 @@ log message still reaches the page.")
             (dolist (seat seats)
               (when (member seat to)
                 (puthash seat (cons label id) assignments)))))))
-    assignments))
+    (cons assignments newest)))
 
 (defun free-agent-bus-status--parse-row (line)
-  "Parse one `bus status --live' output LINE into a render model."
-  (if (string-match
-       "^\\([🟢🟡⚪]+\\) \\([^ ]+\\) — \\([^;]+\\).*; cursor \\([^;]+\\); last post .*$"
-       line)
-      (list :text line
-            :dot (match-string 1 line)
-            :seat (match-string 2 line)
-            :freshness (match-string 3 line)
-            :cursor (match-string 4 line)
-            :label nil :task-id nil)
-    (list :text line :seat nil :label nil :task-id nil)))
+  "Parse one `bus status --live' LINE as a root, seat, or raw CLI row."
+  (cond
+   ((string-match
+     "^\\([🟢🟡⚪]+\\) \\([^ ]+\\) — \\([^;]+\\).*; cursor \\([^;]+\\); last post .*$"
+     line)
+    (list :kind 'seat
+          :text line
+          :dot (match-string 1 line)
+          :seat (match-string 2 line)
+          :freshness (match-string 3 line)
+          :cursor (match-string 4 line)
+          :label nil :task-id nil
+          :activity nil :task nil :card nil))
+   ((string-match "^\\([🟢🟡⚪]+\\) " line)
+    (list :kind 'root :text line :dot (match-string 1 line)))
+   (t
+    (list :kind 'raw :text line :seat nil :label nil :task-id nil
+          :activity nil :task nil :card nil))))
 
 (defun free-agent-bus-status--session (seat freshness)
   "Classify SEAT's Hermes session without waiting on a usage process."
@@ -1187,13 +1201,83 @@ log message still reaches the page.")
       (match-string 2 freshness)
     (if (string= freshness "no heartbeat") "—" freshness)))
 
+(defun free-agent-bus-status--age-text (seconds)
+  "Render nonnegative SECONDS as a short relative age."
+  (cond
+   ((< seconds 60) (format "%ds ago" seconds))
+   ((< seconds 3600) (format "%dm ago" (/ seconds 60)))
+   ((< seconds 86400) (format "%dh ago" (/ seconds 3600)))
+   (t (format "%dd ago" (/ seconds 86400)))))
+
+(defun free-agent-bus-status--timestamp-text (timestamp now)
+  "Render TIMESTAMP as local time and relative age at NOW.
+A timestamp later than NOW renders as `future timestamp' instead of an age."
+  (let* ((decoded (parse-time-string timestamp))
+         (time (progn
+                 ;; `parse-time-string' leaves the zone nil for the log's
+                 ;; "YYYY-MM-DD HH:MM:SS UTC" spelling; nil means local to
+                 ;; `encode-time', so supply the zone the log explicitly names.
+                 (when (string-suffix-p " UTC" timestamp)
+                   (setf (nth 8 decoded) 0))
+                 (encode-time decoded)))
+         (seconds (floor (float-time (time-subtract now time)))))
+    (if (< seconds 0)
+        "future timestamp"
+      (format "%s (%s)"
+              (string-trim (format-time-string "%l:%M%P" time))
+              (free-agent-bus-status--age-text seconds)))))
+
+(defun free-agent-bus-status--header-text (root latest watch now)
+  "Render the compact header from ROOT row and LATEST post at NOW.
+WATCH controls only the unavailable warning and the help-echo detail; normal
+watcher implementation prose stays out of the header text.  Return nil when
+the CLI supplied no root summary, leaving its raw failure rows visible."
+  (when root
+    (let* ((fields (list (concat (plist-get root :dot) " "
+                                 (abbreviate-file-name (free-agent-bus--expand-root)))
+                         (format "posting as %s" free-agent-bus-name)
+                         (if latest
+                             (format "last %s" (alist-get 'id latest))
+                           "no posts")))
+           (fields (if latest
+                       (append fields
+                               (list (free-agent-bus-status--timestamp-text
+                                      (alist-get 'ts latest) now)))
+                     fields))
+           (header (string-join fields " · ")))
+      (propertize
+       (concat header (unless watch " · watch unavailable"))
+       'face 'bold
+       'help-echo (if watch
+                      "file-notify watch active; periodic refresh enabled"
+                    "file-notify unavailable; periodic refresh remains active")))))
+
+(defun free-agent-bus-status--visible-row-p (row)
+  "Whether ROW carries seat state or is a raw CLI row that must remain visible."
+  (or (not (eq (plist-get row :kind) 'seat))
+      (not (and (string= (plist-get row :freshness) "no heartbeat")
+                (string= (plist-get row :cursor) "—")))))
+
+(defun free-agent-bus-status--row-suffix (row)
+  "Render ROW's activity, task or assignment fallback, and card metadata.
+Only nonempty metadata values join the suffix.  Task replaces the assignment
+label; with neither, the existing `—' remains.  With no metadata the text is
+the old assignment-label rendering, including its display-width bound."
+  (let* ((present (lambda (value)
+                    (and (stringp value) (not (string-empty-p value)) value)))
+         (activity (funcall present (plist-get row :activity)))
+         (task (or (funcall present (plist-get row :task))
+                   (plist-get row :label)
+                   "—"))
+         (card (funcall present (plist-get row :card))))
+    (truncate-string-to-width
+     (string-join (delq nil (list activity task card)) " ⟜ ")
+     free-agent-bus-status-label-width nil nil t)))
+
 (defun free-agent-bus-status--row-text (row)
   "Render one parsed status ROW with usage and assignment context."
   (if-let ((seat (plist-get row :seat)))
-      (let* ((label (or (plist-get row :label) "—"))
-             (label (truncate-string-to-width
-                     label free-agent-bus-status-label-width nil nil t))
-             (id (plist-get row :task-id))
+      (let* ((id (plist-get row :task-id))
              (line (string-join
                     (list (concat (plist-get row :dot) " " seat)
                           (free-agent-bus-status--usage-text
@@ -1201,7 +1285,7 @@ log message still reaches the page.")
                           (free-agent-bus-status--freshness-text
                            (plist-get row :freshness))
                           (plist-get row :cursor)
-                          label)
+                          (free-agent-bus-status--row-suffix row))
                     " ⟜ ")))
         (if id
             (propertize line 'free-agent-bus-post-id id
@@ -1215,14 +1299,12 @@ log message still reaches the page.")
          (watch free-agent-bus-status--file-watch)
          (contents
           (with-temp-buffer
-            (insert (propertize
-                     (format "bus status (live) · depth 1\nroot %s · posting as %s · %s\n\n"
-                             (free-agent-bus--expand-root) free-agent-bus-name
-                             (if watch
-                                 "message-driven"
-                               "manual refresh · file-notify unavailable"))
-                     'face 'bold))
-            (dolist (row model)
+            (when-let ((header (free-agent-bus-status--header-text
+                                (plist-get model :root)
+                                (plist-get model :latest)
+                                watch (current-time))))
+              (insert header "\n\n"))
+            (dolist (row (plist-get model :rows))
               (insert (free-agent-bus-status--row-text row) "\n"))
             (buffer-string))))
     (unless (equal-including-properties contents (buffer-string))
@@ -1274,7 +1356,7 @@ log message still reaches the page.")
 
 (defun free-agent-bus-status--collect-usage ()
   "Collect fresh usage for visible Hermes seats without overlapping collectors."
-  (dolist (row free-agent-bus-status--model)
+  (dolist (row (plist-get free-agent-bus-status--model :rows))
     (when-let ((seat (plist-get row :seat)))
       (let ((session (free-agent-bus-status--session
                       seat (plist-get row :freshness))))
@@ -1284,32 +1366,42 @@ log message still reaches the page.")
 (defun free-agent-bus-status--refresh-model ()
   "Re-read the live rows and repaint.
 Usage stays asynchronous: the caller decides whether to start collectors, so a
-periodic repaint does not spawn a usage process every tick."
+periodic repaint does not spawn a usage process every tick.  One log read
+supplies both assignment labels and the newest post used by the header."
   (free-agent-bus--check-root)
   (let* ((result (free-agent-bus--cli "status" "--live" "--depth" "1"))
          (status (car result))
          (output (cdr result))
-         (rows (if (string-empty-p output)
-                   (list (list :text "(no rows)" :seat nil :label nil :task-id nil))
-                 (mapcar #'free-agent-bus-status--parse-row
-                         (split-string output "\n" t))))
+         (parsed (if (string-empty-p output)
+                     (list (list :kind 'raw :text "(no rows)" :seat nil
+                                 :label nil :task-id nil
+                                 :activity nil :task nil :card nil))
+                   (mapcar #'free-agent-bus-status--parse-row
+                           (split-string output "\n" t))))
+         (root (seq-find (lambda (row) (eq (plist-get row :kind) 'root)) parsed))
+         (rows (seq-remove (lambda (row) (eq (plist-get row :kind) 'root)) parsed))
          (seats (delq nil (mapcar (lambda (row)
                                     (and (plist-get row :seat)
                                          (not (string= (plist-get row :freshness)
                                                        "no heartbeat"))
                                          (plist-get row :seat)))
                                   rows)))
-         (assignments (free-agent-bus-status--assignments seats)))
+         (log-model (free-agent-bus-status--log-model seats))
+         (assignments (car log-model)))
     (dolist (row rows)
       (when-let ((seat (plist-get row :seat)))
         (when-let ((assignment (gethash seat assignments)))
           (plist-put row :label (car assignment))
           (plist-put row :task-id (cdr assignment)))))
     (setq-local free-agent-bus-status--model
-                (append rows
-                        (unless (zerop status)
-                          (list (list :text (format "⛔ free-agent bus status exited %d" status)
-                                      :seat nil :label nil :task-id nil)))))
+                (list :root root
+                      :rows (append (seq-filter #'free-agent-bus-status--visible-row-p rows)
+                                    (unless (zerop status)
+                                      (list (list :kind 'raw
+                                                  :text (format "⛔ free-agent bus status exited %d" status)
+                                                  :seat nil :label nil :task-id nil
+                                                  :activity nil :task nil :card nil))))
+                      :latest (cdr log-model)))
     (free-agent-bus-status--render)))
 
 (defun free-agent-bus-status-refresh ()
