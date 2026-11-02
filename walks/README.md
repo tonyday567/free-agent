@@ -96,10 +96,14 @@ and CLI output in the error buffer, and appends no log bytes.
 not just the composition buffer.
 ⟜ `deck-filter.sh` ⟜ audience filtering shows matching and public posts, and clearing
 the filter restores every post.
+⟜ `deck-status-yellow.sh` ⟜ the status model's dots read 🟣 busy, 🟢 ready, 🟡 parked,
+and `f` hides the parked rows and restores them on a second press.
 ⟜ `deck-depth.sh` ⟜ log, inbox and thread views cycle 1 → 2 → 0 → 1; both `TAB` and
 `<tab>` resolve to the cycling command in each mode map.
 ⟜ `deck-inbox.sh` ⟜ a fresh inbox reads from the first post without creating a cursor;
 `m` marks all printed mail read, and later mail remains unread.
+⟜ `deck-inbox-to-here.sh` ⟜ `M` on a middle post advances the cursor past it: mail at or
+before the point clears, later mail stays unread.
 ⟜ `deck-quit.sh` ⟜ view `q` buries without killing the buffer; status `q` kills the
 buffer and releases its file watch and repaint timer.
 ⟜ `deck-log-navigation.sh` ⟜ search runs in the read-only tail; the thread at

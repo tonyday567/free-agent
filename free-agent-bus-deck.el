@@ -54,6 +54,7 @@
 ;; In *free-agent-bus-inbox*:
 ;;   m    mark read (bus inbox NAME --mark-read)  r  reply into the thread at
 ;;   RET/t  thread at point                       point (composition buffer)
+;;   M    mark read to here: cursor after the post at point (selective clear)
 ;;
 ;; evil's state maps outrank a plain buffer-local major-mode map, so every key
 ;; above is installed a second time through evil's auxiliary keymaps in
@@ -492,12 +493,14 @@ own `from' field is the authority, never a timestamp or a name match."
   "Start of the line carrying post ID in the current buffer, or nil.
 The property is what every rendered post carries, so this searches for the
 property rather than for the text: a line re-rendered at another depth, or by
-the CLI, still finds the same id."
+the CLI, still finds the same id.  A buffer where the id no longer renders
+(an inbox after a mark-read) returns nil rather than walking past the last
+property change."
   (save-excursion
     (goto-char (point-min))
     (let ((pos (point-min))
           (found nil))
-      (while (and (not found) (< pos (point-max)))
+      (while (and (not found) pos (< pos (point-max)))
         (if (equal (get-text-property pos 'free-agent-bus-post-id) id)
             (setq found (save-excursion (goto-char pos) (line-beginning-position)))
           (setq pos (next-single-property-change pos 'free-agent-bus-post-id))))
@@ -1758,6 +1761,26 @@ stays unread."
                    (car (split-string output "\n"))))
         (free-agent-bus-inbox-refresh)))))
 
+;;;###autoload
+(defun free-agent-bus-inbox-mark-read-to-here ()
+  "Mark this name's mail read up to and including the post at point.
+Sets `.cursor-NAME' to the id after the post at point: older unread cannot
+come back, and anything after the point stays unread.  `m' remains the
+mark-everything gesture; this is the selective clear."
+  (interactive)
+  (free-agent-bus--check-root)
+  (let ((id (free-agent-bus--id-at-point)))
+    (unless id
+      (user-error "No post id at point — point at the last post you want read"))
+    (let* ((result (free-agent-bus--cli '("cursor" "set") free-agent-bus-name
+                                        (number-to-string (1+ id))))
+           (status (car result))
+           (output (cdr result)))
+      (if (/= status 0)
+          (free-agent-bus--report-failure "bus cursor set" status output)
+        (message "free-agent bus inbox: marked read to post %d" id)
+        (free-agent-bus-inbox-refresh)))))
+
 (defun free-agent-bus-inbox--watch-sentinel (proc _event)
   "Refresh this inbox when its ping-watch fires, then wait again."
   (when (memq (process-status proc) '(exit signal closed failed))
@@ -1799,18 +1822,20 @@ its sentinel refreshes the buffer and waits again.  No timer, no polling."
     (define-key map (kbd "t") #'free-agent-bus-thread-at-point)
     (define-key map (kbd "r") #'free-agent-bus-reply-at-point)
     (define-key map (kbd "m") #'free-agent-bus-inbox-mark-read)
+    (define-key map (kbd "M") #'free-agent-bus-inbox-mark-read-to-here)
     (define-key map (kbd "g") #'free-agent-bus-inbox-refresh)
     (define-key map (kbd "<tab>") #'free-agent-bus-cycle-depth)
     (define-key map (kbd "TAB") #'free-agent-bus-cycle-depth)
     map)
   "Keymap for `free-agent-bus-inbox-mode'.")
 
-;; The inbox map has no other top-level re-bind, and a `defvar' does not
-;; overwrite a live map, so this one line is what keeps the key this slice adds
-;; reachable after a reload rather than only after a restart.  The view and log
-;; maps carry their own re-binds, and the status map lives off the view map's
-;; parent, so those four surfaces come back on their own.
+;; A `defvar' does not overwrite a live map, so each key these slices add
+;; carries a top-level re-bind here: it keeps the key reachable after a reload
+;; rather than only after a restart.  The view and log maps carry their own
+;; re-binds, and the status map lives off the view map's parent, so those four
+;; surfaces come back on their own.
 (define-key free-agent-bus-inbox-mode-map (kbd "TAB") #'free-agent-bus-cycle-depth)
+(define-key free-agent-bus-inbox-mode-map (kbd "M") #'free-agent-bus-inbox-mark-read-to-here)
 
 (define-derived-mode free-agent-bus-inbox-mode special-mode "FAB-Inbox"
   "Major mode for the human's unread-mail buffer.
@@ -2531,6 +2556,7 @@ keys reachable while evil's state maps are active."
     (kbd "RET") #'free-agent-bus-thread-at-point)
   (evil-define-key* 'normal free-agent-bus-inbox-mode-map
     (kbd "m") #'free-agent-bus-inbox-mark-read
+    (kbd "M") #'free-agent-bus-inbox-mark-read-to-here
     (kbd "r") #'free-agent-bus-reply-at-point
     (kbd "t") #'free-agent-bus-thread-at-point
     (kbd "RET") #'free-agent-bus-thread-at-point)
