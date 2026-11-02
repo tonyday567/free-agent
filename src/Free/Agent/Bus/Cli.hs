@@ -61,7 +61,7 @@ import Circuit.Agent.Framing (Stamped, frameStored, parsePost, stamp, stamped, u
 import Circuit.Agent.Mark (isHalt, markOf)
 import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, SomeException, displayException, try)
 import Control.Monad (forM_, forever, guard, unless, when)
 import Data.Char (isAlphaNum)
 import Data.Foldable (traverse_)
@@ -632,14 +632,29 @@ runRetire root name = do
 postsOf :: Text -> [Stamped Text]
 postsOf content = mapMaybe (unframeStored @Text) (filter (not . T.null) (T.lines content))
 
+-- | Print the open offers, then the lint rows.  The root must be a bus
+-- like every other command requires, and a view that dies partway names
+-- its death on stderr and exits non-zero rather than trailing off like
+-- an empty queue.
 runReady :: FilePath -> Depth -> IO ()
 runReady root depth = do
-  let path = root </> "log.jsonl"
-  exists <- doesFileExist path
-  content <- if exists then readFileStrict path else pure ""
-  let posts = postsOf content
-  traverse_ (TIO.putStrLn . renderStored depth) (readyPosts posts)
-  traverse_ (TIO.hPutStrLn stderr) (readyWarnings posts)
+  root' <- resolveRoot root
+  requireBus root'
+  view <- try @SomeException $ do
+    content <- readFileStrict (root' </> "log.jsonl")
+    let posts = postsOf content
+    traverse_ (TIO.putStrLn . renderStored depth) (readyPosts posts)
+    traverse_ (TIO.hPutStrLn stderr) (readyWarnings posts)
+  case view of
+    Right () -> pure ()
+    Left e -> do
+      TIO.hPutStrLn
+        stderr
+        ( "🔴 ready: the view died: "
+            <> T.pack (displayException e)
+            <> " — the rows above are not the full view"
+        )
+      exitFailure
 
 -- | Open TASK offers that have no claim, owner DONE, or unresolved blocker.
 -- A directed TASK is assigned at creation and is therefore not an open offer.
