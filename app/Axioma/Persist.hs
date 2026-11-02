@@ -14,7 +14,7 @@ import Control.Concurrent.STM (atomically, orElse)
 import Data.Either (fromRight, isLeft, isRight)
 import Data.Foldable (traverse_)
 import Data.List (sort)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -30,7 +30,7 @@ import Free.Agent.Bus
     scribeIO,
   )
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
-import System.Directory (createDirectoryIfMissing, removeFile, removePathForcibly)
+import System.Directory (createDirectoryIfMissing, findExecutable, removeFile, removePathForcibly)
 import System.Environment (getExecutablePath, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -206,10 +206,15 @@ persistTopic = do
     busDir <- tempRoot "free-agent-b4-cli-bus"
     -- Create a bus with log.jsonl for the env var test
     _ <- postLocal busDir (mkPost "seed" [] "init")
-    -- Find the free-agent binary relative to the axioma binary
+    -- Find the free-agent binary: prefer the one on PATH (an installed
+    -- oracle must find an installed seat); fall back to the dist build
+    -- beside the axioma binary.
     myPath <- takeDirectory <$> getExecutablePath
+    pathBin <- findExecutable "free-agent"
     let freeAgentBin =
-          myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent"
+          fromMaybe
+            (myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent")
+            pathBin
     -- Test: no env var, no log.jsonl → exit 1
     unsetEnv "FREE_AGENT_BUS_ROOT"
     (code1, out1, _) <-

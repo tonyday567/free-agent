@@ -24,7 +24,7 @@ import Free.Agent.Acp (AcpClient (..), acpHost, acpInitialize, acpNewSession, de
 import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.File (writeCursor)
 import Free.Agent.Host (hostShard)
-import System.Directory (removePathForcibly)
+import System.Directory (findExecutable, removePathForcibly)
 import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -95,7 +95,11 @@ acpTopic = do
     setFileMode script 0o755
     writeCursor root "acp1" 0
     myPath <- takeDirectory <$> getExecutablePath
-    let bin = myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent"
+    pathBin <- findExecutable "free-agent"
+    let bin =
+          fromMaybe
+            (myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent")
+            pathBin
     done <- newEmptyMVar
     _ <-
       forkIO $ do
