@@ -308,7 +308,7 @@ thresholdOpt =
         <> metavar "SECS"
         <> value 900
         <> showDefault
-        <> help "Seconds of silence before the bus (and a seat heartbeat) reads as stale"
+        <> help "Seconds of silence before the bus (and a doubtful heartbeat) reads as stale"
     )
   where
     readSeconds s =
@@ -847,10 +847,13 @@ runPingWatch root name = do
 data SeatStatus = CaughtUp | Done | Behind Integer
 
 -- | Liveness from state, age, and (for current files) a process probe.
--- An explicit dead marker is retired and a dead pid is crashed. Any live
--- state silent past the threshold reads stale — a live pid does not rescue
--- it, because pids are recycled and a heartbeat older than the threshold
--- is a stale seat whatever the process table says. Fresh idles stay green.
+-- A live working seat reads 🟣 busy at any age — a long turn is not
+-- idleness — with its staleness named once the heartbeat passes the
+-- threshold. A live wake or idle seat reads 🟢 until 'idleParkedAfter',
+-- then 🟡 parked: quiet that has stopped promising the next transition.
+-- An explicit dead marker is retired and a dead pid is crashed. A stale
+-- heartbeat with unverifiable liveness reads ⚪ unknown — pids are
+-- recycled, so age alone never promotes it to a liveness claim.
 hbVerdict :: NominalDiffTime -> UTCTime -> Maybe Heartbeat -> IO (Text, Text)
 hbVerdict threshold now mhb = case mhb of
   Nothing -> pure ("⚪", "no heartbeat")
@@ -859,12 +862,20 @@ hbVerdict threshold now mhb = case mhb of
     alive <- maybe (pure Nothing) pidAlive mpid
     let age = diffUTCTime now ts
         stale = age > threshold
+        stateText = hbText st <> " " <> fmtAge age <> " ago"
         verdict
           | alive == Just False = ("🔴", "pid " <> maybe "?" (T.pack . show) mpid <> " is not running — crashed?")
-          | stale && alive == Just True = ("🟡", hbText st <> " " <> fmtAge age <> " ago; pid " <> maybe "?" (T.pack . show) mpid <> " alive — stale?")
-          | stale = ("⚪", hbText st <> " " <> fmtAge age <> " ago; liveness unknown — stale?")
-          | otherwise = (hbGlyph st, hbText st <> " " <> fmtAge age <> " ago")
+          | st == Working && alive == Just True =
+              ("🟣", stateText <> (if stale then "; pid " <> maybe "?" (T.pack . show) mpid <> " alive — stale?" else ""))
+          | (st == Wake || st == Idle) && alive == Just True = (if age > idleParkedAfter then "🟡" else "🟢", stateText)
+          | stale = ("⚪", stateText <> "; liveness unknown — stale?")
+          | otherwise = (hbGlyph st, stateText)
     pure verdict
+
+-- | An idle seat parks: 🟡 past this many seconds of silence. Below it
+-- silence still reads as readiness; past it, as storage.
+idleParkedAfter :: NominalDiffTime
+idleParkedAfter = 3600
 
 pidAlive :: CPid -> IO (Maybe Bool)
 pidAlive pid = do
@@ -894,10 +905,11 @@ fmtAge s
 -- With @--live@ the active seat block is derived from the heartbeats instead:
 -- one dot per seat, a line of state, cursor and last post, and — at depth 2 —
 -- the heartbeat file and the seat's last post verbatim. Explicitly retired
--- seats leave this view; their heartbeats and log evidence stay on disk. Stale
--- wake and working states warn as stale when their pid is alive, or as unknown
--- when the probe is inconclusive; a dead pid reads crashed and stays visible.
--- Idle uses the heartbeat pid for liveness.
+-- seats leave this view; their heartbeats and log evidence stay on disk.
+-- Dots read the loop: 🟣 working, 🟢 wake or idle ready, 🟡 idle parked
+-- (past 'idleParkedAfter'), 🔴 crashed or retired, ⚪ unknown. A working
+-- seat past the threshold names its staleness; an unverifiable stale
+-- heartbeat reads unknown; a dead pid reads crashed and stays visible.
 runStatus :: FilePath -> NominalDiffTime -> Bool -> Depth -> IO ()
 runStatus root threshold live depth@(Depth d) = do
   requireBus root

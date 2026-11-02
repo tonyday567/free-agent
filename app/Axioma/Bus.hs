@@ -187,6 +187,8 @@ busTopic = do
     now <- getCurrentTime
     pid <- getProcessID
     let old = addUTCTime (-3600) now
+        older = addUTCTime (-7200) now
+        brief = addUTCTime (-1200) now
     writeHeartbeat root "live" Idle
     current <- readHeartbeat root "live"
     assert "heartbeat writer records the seat pid" $
@@ -197,23 +199,29 @@ busTopic = do
       case parseHb "idle 2026-10-28T00:00:00Z" of
         Just (Idle, _, Nothing) -> True
         _ -> False
-    (idleDot, idleText) <- hbVerdict 900 now (Just (Idle, old, Just pid))
-    assert "a live idle seat stays green beyond the staleness threshold" $
+    (idleDot, idleText) <- hbVerdict 900 now (Just (Idle, brief, Just pid))
+    assert "a live idle seat stays green past the staleness threshold, under the hour" $
       idleDot == "🟢" && not ("crashed?" `T.isInfixOf` idleText)
+    (parkedDot, parkedText) <- hbVerdict 900 now (Just (Idle, older, Just pid))
+    -- Mutation: greening a long-idle seat, or crashing it, fails this oracle.
+    assert "a live idle seat past the hour parks yellow" $
+      parkedDot == "🟡" && "idle" `T.isInfixOf` parkedText && not ("crashed?" `T.isInfixOf` parkedText)
     (legacyDot, _) <- hbVerdict 900 now (Just (Idle, old, Nothing))
     assert "an unverifiable stale legacy idle reads unknown, not live" $ legacyDot == "⚪"
+    (wakeDot, _) <- hbVerdict 900 now (Just (Wake, now, Just pid))
+    assert "a starting seat reads green ready" $ wakeDot == "🟢"
     (workingDot, workingText) <- hbVerdict 900 now (Just (Working, old, Just pid))
-    -- Mutation: restoring the stale-non-idle crash branch fails this oracle.
-    assert "a stale working seat with a live pid reads stale, not crashed" $
-      workingDot == "🟡" && "stale?" `T.isInfixOf` workingText && not ("crashed?" `T.isInfixOf` workingText)
+    -- Mutation: folding long work into the parked yellow fails this oracle.
+    assert "a working seat past the threshold with a live pid reads busy, not crashed" $
+      workingDot == "🟣" && "stale?" `T.isInfixOf` workingText && not ("crashed?" `T.isInfixOf` workingText)
     (legacyWorkingDot, legacyWorkingText) <- hbVerdict 900 now (Just (Working, old, Nothing))
     -- Mutation: treating missing pid evidence as a crash fails this oracle.
     assert "a stale legacy working seat keeps liveness unknown" $
       legacyWorkingDot == "⚪" && "stale?" `T.isInfixOf` legacyWorkingText && not ("crashed?" `T.isInfixOf` legacyWorkingText)
     (freshDot, freshText) <- hbVerdict 900 now (Just (Working, now, Just pid))
     -- Mutation: ignoring heartbeat age and warning on every live pid fails this.
-    assert "a fresh working seat reads working without a staleness warning" $
-      freshDot == "🟡" && not ("stale?" `T.isInfixOf` freshText) && not ("crashed?" `T.isInfixOf` freshText)
+    assert "a fresh working seat reads busy without a staleness warning" $
+      freshDot == "🟣" && not ("stale?" `T.isInfixOf` freshText) && not ("crashed?" `T.isInfixOf` freshText)
     (_, _, _, ph) <- createProcess (proc "sleep" ["0.01"])
     mpid <- getPid ph
     _ <- waitForProcess ph
@@ -239,34 +247,43 @@ busTopic = do
     _ <- postLocal root (mkPost "retired" [] "retired historical evidence")
     _ <- postLocal root (mkPost "participant" [] "participant historical evidence")
     writeHeartbeat root "idle" Idle
-    writeHeartbeat root "stale" Working
+    writeHeartbeat root "busy" Working
     writeHeartbeat root "retired" Dead
     writeCursor root "unknown" 0
     now <- getCurrentTime
+    pid <- getProcessID
     (_, _, _, ph) <- createProcess (proc "sleep" ["0.01"])
     mpid <- getPid ph
     _ <- waitForProcess ph
     case mpid of
       Nothing -> assert "active-status oracle acquired a child pid" False
-      Just deadPid ->
+      Just deadPid -> do
         TIO.writeFile
           (hbPath root "crashed")
           ("working " <> T.pack (iso8601Show now) <> " " <> T.pack (show deadPid) <> "\n")
+        TIO.writeFile
+          (hbPath root "parked")
+          ("idle " <> T.pack (iso8601Show (addUTCTime (-7200) now)) <> " " <> T.pack (show pid) <> "\n")
     before <- readFileStrict (root </> "log.jsonl")
     report <- captureLiveStatus root
     after <- readFileStrict (root </> "log.jsonl")
     let seatLines name = [line | line <- T.lines report, (" " <> name <> " —") `T.isInfixOf` line]
     -- Mutation: dropping the explicit-dead filter fails this oracle.
     assert "an explicitly retired seat leaves the default live view" $ null (seatLines "retired")
-    -- Mutation: filtering idle seats or dropping live-pid evidence fails this oracle.
+    -- Mutation: filtering idle seats, or parking them under the hour, fails this oracle.
     assert "a live idle seat stays visible and green" $
       case seatLines "idle" of
         [line] -> "🟢" `T.isPrefixOf` line && not ("stale?" `T.isInfixOf` line)
         _ -> False
-    -- Mutation: treating stale work as retirement or a crash fails this oracle.
-    assert "a stale working seat with a live pid stays visible as stale" $
-      case seatLines "stale" of
-        [line] -> "🟡" `T.isPrefixOf` line && "stale?" `T.isInfixOf` line && not ("crashed?" `T.isInfixOf` line)
+    -- Mutation: hiding a parked seat, or greening it, fails this oracle.
+    assert "a parked idle seat stays visible with the parked dot" $
+      case seatLines "parked" of
+        [line] -> "🟡" `T.isPrefixOf` line && "idle 2h ago" `T.isInfixOf` line && not ("crashed?" `T.isInfixOf` line)
+        _ -> False
+    -- Mutation: treating long work as retirement or a crash fails this oracle.
+    assert "a working seat with a live pid stays visible and busy" $
+      case seatLines "busy" of
+        [line] -> "🟣" `T.isPrefixOf` line && "stale?" `T.isInfixOf` line && not ("crashed?" `T.isInfixOf` line)
         _ -> False
     -- Mutation: filtering every dead pid rather than only explicit retirement fails this oracle.
     assert "a dead pid without explicit retirement stays visible as crashed" $
@@ -423,7 +440,7 @@ busTopic = do
     _ <- postLocal root (mkPost "human" ["fragile"] "hello")
     _ <- postLocal root (mkPost "human" ["fragile"] "boom")
     _ <- postLocal root (mkPost "human" ["fragile"] "world")
-    _ <- postLocal root (mkPost "human" ["fragile"] "🟢 landed")
+    _ <- postLocal root (mkPost "human" ["fragile"] (markGlyph Landed))
     bus <- openBus root
     let fragileHost = mkHost "fragile" $ \ws ->
           if ws == ["boom"]

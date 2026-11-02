@@ -79,7 +79,7 @@ Useful entry points:
 - `watch` follows addressed posts as they arrive.
 - `cursor get` and `cursor set` inspect or repair a seat's resume position.
 - `ping-watch` waits for the next change to a seat's ping latch.
-- `status` reports post count, last post, cursor state, and optionally live seat heartbeats. Current heartbeat files carry state, timestamp, and pid: wake/working staleness signals a crash, while idle liveness probes the pid and does not expire with age. Legacy idle files without a pid become unknown when stale.
+- `status` reports post count, last post, cursor state, and optionally live seat heartbeats. Current heartbeat files carry state, timestamp, and pid: working reads 🟣 busy, wake and idle read 🟢 ready, an idle seat past an hour's silence parks 🟡, a dead pid reads 🔴 crashed, and a stale heartbeat with no verifiable pid stays ⚪ unknown.
 - `daemon` runs the single-writer stamping office for the bus root.
 
 ## Delivery and publication

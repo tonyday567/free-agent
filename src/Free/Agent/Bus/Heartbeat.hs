@@ -58,13 +58,14 @@ data HbState
 type Heartbeat = (HbState, UTCTime, Maybe CPid)
 
 -- | The glyph a state renders as in a dot column: ready and starting are
--- both 🟢 (there is a process and it is not busy), working is 🟡, retired
--- is 🔴.
+-- both 🟢 (there is a process and it is not busy), working is 🟣 busy,
+-- retired is 🔴. Age enters the glyph only in 'hbVerdict': a parked idle
+-- renders 🟡 there once it passes the hour.
 hbGlyph :: HbState -> Text
 hbGlyph = \case
   Wake -> "\x1F7E2" -- 🟢
   Idle -> "\x1F7E2" -- 🟢
-  Working -> "\x1F7E1" -- 🟡
+  Working -> "\x1F7E3" -- 🟣
   Dead -> "\x1F534" -- 🔴
 
 -- | The wire token for a state, as written in the heartbeat file.

@@ -49,6 +49,8 @@
 ;; In *free-agent-bus-log* and the view buffers:
 ;;   RET  open the thread of the post at point      TAB  cycle cascade depth
 ;;   t/f  timestamps / filter (log only)            q  quit the window
+;; In *free-agent-bus-status*:
+;;   f    hide/show yellow rows (idle over an hour) q  close the window
 ;; In *free-agent-bus-inbox*:
 ;;   m    mark read (bus inbox NAME --mark-read)  r  reply into the thread at
 ;;   RET/t  thread at point                       point (composition buffer)
@@ -68,6 +70,12 @@
 ;; The log tail indexes posts as it renders them; a view or the inbox, which has
 ;; no tail, reads the log once per refresh (`free-agent-bus-log--read-index')
 ;; and adds the same mark to its own lines.
+;;
+;; References: a post body cites files, and a resolvable citation is a link.
+;; A Markdown link or a plain path — absolute, or relative under
+;; `free-agent-bus-reference-roots' — carries a link keymap; RET on it opens
+;; the file, jumping to its §section when the anchor names a heading.  An
+;; unresolved reference stays plain text, so a link is never a guess.
 
 ;;; Code:
 
@@ -240,6 +248,16 @@ the deck was reading — while the log's own senders are the truth and the promp
 takes any name typed in full.  Set this to the names you filter by.
 Public posts (`to: []') are shown whatever the filter."
   :type '(repeat string)
+  :group 'free-agent-bus-deck)
+
+(defcustom free-agent-bus-reference-roots
+  '("~/coffee" "~/coffee/loom" "~/coffee/buff" "~/coffee/stuff" "~/coffee/cake")
+  "Directories a relative file reference is resolved under, in order.
+A reference resolves only when it names an existing file, so a mention that
+resolves to nothing stays plain text.  A path with a slash takes the first
+root that has it; a bare file name resolves only when exactly one root
+carries that name — an ambiguous citation is no citation."
+  :type '(repeat directory)
   :group 'free-agent-bus-deck)
 
 (defvar-local free-agent-bus-log-filter nil
@@ -983,7 +1001,7 @@ view never invents a post."
           (add-text-properties ancestry-start (+ ancestry-start (length ancestry))
                                (list 'face 'free-agent-bus-thread-face)
                                text))
-        text))))
+        (free-agent-bus--link-references text)))))
 
 (defun free-agent-bus--decorate-view-output (output posts)
   "Propertize a CLI view's OUTPUT line by line, against index POSTS."
@@ -1007,10 +1025,11 @@ buffer is never left silently stale."
          (inhibit-read-only t))
     (free-agent-bus--preserving-position
       (erase-buffer)
-      (insert (propertize (format "%s · depth %s\n%s\n\n"
+      (insert (propertize (format "%s · depth %s\n%s\n"
                                   (plist-get spec :title) depth
                                   (free-agent-bus--context-line))
                           'face 'bold))
+      (insert (propertize "RET: thread at point · TAB: depth · q: close\n\n" 'face 'shadow))
       (insert (if (string-empty-p output)
                   (propertize "(no rows)\n" 'face 'shadow)
                 (concat (free-agent-bus--decorate-view-output output posts) "\n")))
@@ -1110,6 +1129,7 @@ log message still reaches the page.")
   (setq-local revert-buffer-function
               (lambda (&rest _) (free-agent-bus-status-refresh)))
   (local-set-key (kbd "q") #'kill-current-buffer)
+  (local-set-key (kbd "f") #'free-agent-bus-status-toggle-yellow)
   (add-hook 'kill-buffer-hook #'free-agent-bus-status-stop nil t))
 
 (defun free-agent-bus-status--key (seat)
@@ -1161,7 +1181,7 @@ and NEWEST is the last parseable post object, or nil for an empty log."
   "Parse one `bus status --live' LINE as a root, seat, or raw CLI row."
   (cond
    ((string-match
-     "^\\([🟢🟡⚪]+\\) \\([^ ]+\\) — \\([^;]+\\).*; cursor \\([^;]+\\); last post .*$"
+     "^\\([🟢🟡⚪🟣]+\\) \\([^ ]+\\) — \\([^;]+\\).*; cursor \\([^;]+\\); \\(?:last post\\|no posts\\).*$"
      line)
     (list :kind 'seat
           :text line
@@ -1272,11 +1292,29 @@ the CLI supplied no root summary, leaving its raw failure rows visible."
                       "file-notify watch active; periodic refresh enabled"
                     "file-notify unavailable; periodic refresh remains active")))))
 
+(defvar-local free-agent-bus-status-hide-yellow nil
+  "When non-nil, this status page drops rows whose dot is yellow.
+Yellow marks an idle seat parked past an hour; hiding keeps the busy and
+ready rows in view.  Toggle with `free-agent-bus-status-toggle-yellow'.")
+
+(defun free-agent-bus-status-toggle-yellow ()
+  "Toggle hiding yellow rows (seats idle over an hour) in this status page."
+  (interactive)
+  (setq-local free-agent-bus-status-hide-yellow
+              (not free-agent-bus-status-hide-yellow))
+  (free-agent-bus-status-refresh)
+  (message "status: %s yellow rows"
+           (if free-agent-bus-status-hide-yellow "hiding" "showing")))
+
 (defun free-agent-bus-status--visible-row-p (row)
-  "Whether ROW carries seat state or is a raw CLI row that must remain visible."
+  "Whether ROW carries seat state or is a raw CLI row that must remain visible.
+With `free-agent-bus-status-hide-yellow' set, yellow seat rows (idle over an
+hour) drop out of the model; raw and root rows always stay."
   (or (not (eq (plist-get row :kind) 'seat))
-      (not (and (string= (plist-get row :freshness) "no heartbeat")
-                (string= (plist-get row :cursor) "—")))))
+      (and (not (and free-agent-bus-status-hide-yellow
+                     (equal (plist-get row :dot) "🟡")))
+           (not (and (string= (plist-get row :freshness) "no heartbeat")
+                     (string= (plist-get row :cursor) "—"))))))
 
 (defun free-agent-bus-status--row-suffix (row)
   "Render ROW's activity, task or assignment fallback, and card metadata.
@@ -1999,6 +2037,186 @@ with no ancestry, and a post POSTS does not carry, render no ancestry at all."
         (concat "↩" (number-to-string root)))
     ""))
 
+;;; File references
+
+(defconst free-agent-bus--reference-markdown
+  "\\[\\([^][]*\\)\\](\\([^()\n]*\\))"
+  "Markdown link `[label](target)': group 1 the label, group 2 the target.  Used
+for a whole-span claim, so an unresolved target never half-links its own text.")
+
+(defconst free-agent-bus--reference-boundary
+  "\\(?:\\`\\|[^[:alnum:]/:~._-]\\)"
+  "Boundary before a plain-path match: start of text, or a character that
+cannot continue a word or a path.  The guard is not part of the match.")
+
+(defconst free-agent-bus--reference-path
+  (concat free-agent-bus--reference-boundary "\\(~?/[^ \t\n\"'`|<>()]*\\)")
+  "An absolute or `~' path: group 1 is the path text, punctuation still
+attached.")
+
+(defconst free-agent-bus--reference-relative
+  (concat free-agent-bus--reference-boundary "\\([[:alnum:]_][[:alnum:]_./-]*/[[:alnum:]_./-]+\\)")
+  "A relative path with a slash, such as `loom/mac-survey.md': group 1.")
+
+(defconst free-agent-bus--reference-name
+  (concat free-agent-bus--reference-boundary "\\([[:alnum:]_][[:alnum:]_/-]*\\.[[:alnum:]][[:alnum:]]*\\)")
+  "A bare file name with an extension, such as `mac-survey.md': group 1.")
+
+(defconst free-agent-bus--reference-punctuation
+  "[\"'’`.,;:!?)}]*\\'"
+  "Trailing punctuation a sentence adds to a citation.")
+
+(defvar free-agent-bus-reference-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'free-agent-bus-open-reference)
+    (define-key map (kbd "<return>") #'free-agent-bus-open-reference)
+    (define-key map (kbd "mouse-1") #'free-agent-bus-open-reference)
+    (define-key map (kbd "mouse-2") #'free-agent-bus-open-reference)
+    map)
+  "Keymap a resolved file reference carries as its `keymap' text property.
+Installed per reference, so it answers above the mode's own RET (thread at
+point) only while point is on the reference itself.")
+
+(defun free-agent-bus--reference-trim (path)
+  "PATH without the punctuation a sentence adds to a citation."
+  (replace-regexp-in-string free-agent-bus--reference-punctuation "" path))
+
+(defun free-agent-bus--reference-file (path)
+  "Resolve reference PATH to an existing file name, or nil.
+Absolute paths (including `~') resolve directly.  A relative path resolves
+under `free-agent-bus-reference-roots': the first root that has it when the
+path carries a slash, and — for a bare file name — only when exactly one
+root has a file of that name.  Only an existing file resolves, so a mention
+that happens to look like a path stays plain text."
+  (let ((path (string-trim path)))
+    (when (and (not (string-empty-p path))
+               (not (string-match-p "\\`#" path))
+               (not (string-match-p "\\`[[:alpha:]][[:alnum:]+.-]*://" path)))
+      (seq-find
+       #'file-exists-p
+       (cond
+        ((file-name-absolute-p path)
+         (list (expand-file-name path)))
+        ((string-match-p "/" path)
+         (mapcar (lambda (root) (expand-file-name path root))
+                 free-agent-bus-reference-roots))
+        (t (let ((hits (seq-filter
+                        #'file-exists-p
+                        (mapcar (lambda (root) (expand-file-name path root))
+                                free-agent-bus-reference-roots))))
+             (and (= (length hits) 1) hits))))))))
+
+(defun free-agent-bus--reference-slug (text)
+  "Slug of a heading TEXT: the anchor a Markdown link uses for it.
+Lowercase, punctuation dropped, whitespace runs become single dashes."
+  (let ((s (downcase text)))
+    (setq s (replace-regexp-in-string "[^[:alnum:] _-]" "" s))
+    (setq s (replace-regexp-in-string "[[:space:]]+" "-" s))
+    (replace-regexp-in-string "\\`-+\\|-+\\'" "" s)))
+
+(defun free-agent-bus--reference-goto-anchor (anchor file)
+  "Move to ANCHOR's heading in the current buffer, else to the top.
+Only an exact slug match jumps; a miss says so rather than landing
+somewhere approximate."
+  (goto-char (point-min))
+  (let ((case-fold-search t)
+        (hit nil))
+    (while (and (not hit) (re-search-forward "^#+[ \t]+\\(.+\\)$" nil t))
+      (when (string= (free-agent-bus--reference-slug (string-trim (match-string 1))) anchor)
+        (setq hit (match-beginning 0))))
+    (if hit
+        (goto-char hit)
+      (message "free-agent-bus: no heading matches #%s in %s; opened at the top"
+               anchor (abbreviate-file-name file)))))
+
+(defun free-agent-bus-open-reference ()
+  "Open the file reference at point, jumping to its section when it has one.
+A reference is a resolved citation in a rendered post — see
+`free-agent-bus--link-references'; one that does not resolve is plain text
+and never reaches this command."
+  (interactive)
+  (let ((file (get-text-property (point) 'free-agent-bus-target-file))
+        (anchor (get-text-property (point) 'free-agent-bus-target-anchor)))
+    (unless file
+      (user-error "No file reference at point"))
+    (find-file-other-window file)
+    (if (and anchor (not (string-empty-p anchor)))
+        (free-agent-bus--reference-goto-anchor anchor file)
+      (goto-char (point-min)))))
+
+(defun free-agent-bus--reference-region (text beg end file anchor)
+  "Make TEXT's BEG..END a link to FILE, with ANCHOR for its section.
+The help-echo names the resolved file and section, so the reader sees where
+the link goes before pressing RET."
+  (add-text-properties
+   beg end
+   (list 'keymap free-agent-bus-reference-map
+         'mouse-face 'highlight
+         'free-agent-bus-target-file file
+         'free-agent-bus-target-anchor anchor
+         'help-echo (if (and anchor (not (string-empty-p anchor)))
+                        (format "RET: open %s §%s"
+                                (abbreviate-file-name file) anchor)
+                      (format "RET: open %s" (abbreviate-file-name file))))
+   text)
+  (put-text-property beg end 'face 'link text)
+  text)
+
+(defun free-agent-bus--reference-scan (text)
+  "Return TEXT's linkable spans as (BEG END FILE ANCHOR) records.
+Markdown links first — the whole `[label](target)' span is the link — then
+plain paths, trimmed of the punctuation a sentence adds, then bare file
+names.  A span overlapping one already taken is skipped, and every match's
+positions are read before the body runs: the body itself matches strings
+and leaves its own match data behind."
+  (let (records)
+    (let ((pos 0))
+      (while (string-match free-agent-bus--reference-markdown text pos)
+        (let* ((mstart (match-beginning 0))
+               (mend (match-end 0))
+               (target (substring-no-properties text (match-beginning 2) (match-end 2)))
+               (hash (string-match "#" target))
+               (path (free-agent-bus--reference-trim
+                      (if hash (substring target 0 hash) target)))
+               (anchor (and hash (substring target (1+ hash))))
+               (file (free-agent-bus--reference-file path)))
+          (when file
+            (push (list mstart mend file anchor) records))
+          (setq pos mend))))
+    (dolist (pattern (list free-agent-bus--reference-path
+                           free-agent-bus--reference-relative
+                           free-agent-bus--reference-name))
+      (let ((pos 0))
+        (while (string-match pattern text pos)
+          (let* ((mstart (match-beginning 0))
+                 (cbeg (match-beginning 1))
+                 (cend (match-end 1))
+                 (raw (free-agent-bus--reference-trim (substring-no-properties text cbeg cend)))
+                 (end (+ cbeg (length raw)))
+                 (file (free-agent-bus--reference-file raw)))
+            (when (and file (> (length raw) 2) (> end cbeg))
+              (push (list cbeg end file nil) records))
+            (setq pos (1+ mstart))))))
+    (let ((sorted (sort records (lambda (a b)
+                                  (or (< (car a) (car b))
+                                      (and (= (car a) (car b))
+                                           (> (nth 1 a) (nth 1 b)))))))
+          (kept nil)
+          (edge -1))
+      (dolist (r sorted)
+        (when (>= (car r) edge)
+          (push r kept)
+          (setq edge (nth 1 r))))
+      (nreverse kept))))
+
+(defun free-agent-bus--link-references (text)
+  "Return TEXT with each resolvable file reference carrying a link keymap.
+See `free-agent-bus--reference-scan' for what counts, and
+`free-agent-bus-open-reference' for where RET goes.  TEXT is otherwise
+unchanged: unresolved citations stay exactly as written."
+  (dolist (r (free-agent-bus--reference-scan text) text)
+    (free-agent-bus--reference-region text (nth 0 r) (nth 1 r) (nth 2 r) (nth 3 r))))
+
 (defun free-agent-bus-log--format-line (line)
   "Format one raw log LINE at the buffer's cascade depth, carrying properties.
 0 = dot, 1 = one-line excerpt, 2 = verbatim body.  Unparseable lines are
@@ -2062,7 +2280,7 @@ faced with `free-agent-bus-thread-face'."
             (add-text-properties ancestry-start (+ ancestry-start (length ancestry))
                                  (list 'face 'free-agent-bus-thread-face)
                                  text))
-          text))))))
+          (free-agent-bus--link-references text)))))))
 
 (defvar-local free-agent-bus-log--raw-offset nil
   "Byte offset of the log snapshot used for the current render.")
@@ -2317,7 +2535,8 @@ keys reachable while evil's state maps are active."
     (kbd "t") #'free-agent-bus-thread-at-point
     (kbd "RET") #'free-agent-bus-thread-at-point)
   (evil-define-key* 'normal free-agent-bus-status-mode-map
-    (kbd "q") #'kill-current-buffer))
+    (kbd "q") #'kill-current-buffer
+    (kbd "f") #'free-agent-bus-status-toggle-yellow))
 
 (with-eval-after-load 'evil (free-agent-bus--evil-bind-keys))
 

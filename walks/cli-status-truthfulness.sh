@@ -1,33 +1,43 @@
 #!/usr/bin/env bash
-# cli-status-truthfulness — the live roster answers for silence, not the process table.
+# cli-status-truthfulness — the live roster reads loop state: busy, ready, parked,
+# crashed, unknown; age decides only where readiness stops.
 #
 # The 30 Oct wound: carafe, dripper and tamper showed 🟢 idle 22 hours after
 # their processes vanished, because idle heartbeats were exempt from the stale
-# check and pids get recycled. e63c207 made idle age out like every other
-# state. This walk pins: old idle + live pid reads 🟡 stale with the pid
-# named; old idle + dead pid reads 🔴 crashed; fresh idle stays 🟢; a poster
-# with no heartbeat at all still gets its own ⚪ row.
+# check and pids get recycled. e63c207 aged idle out. 3 Nov moved the boundary
+# back where readiness can still be read: under the hour an idle seat stays 🟢,
+# past it the dot parks 🟡, and the crashed and unknown readings keep naming
+# the failures. This walk pins: idle 2h + live pid reads 🟡 parked; idle 2h +
+# dead pid reads 🔴 crashed; fresh idle stays 🟢; fresh working reads 🟣 busy;
+# a poster with no heartbeat at all still gets its own ⚪ row.
 
 source "$(dirname "$0")/lib.sh"
 
-step "a root with four seats in four different silences"
+step "a root with six seats in six different states"
 new_root status
 MYPID=$$
 TWO_HOURS_AGO=$(date -u -v-2H +%Y-%m-%dT%H:%M:%S.000000Z)
 TWO_AHEAD=$(date -u -v+2H +%Y-%m-%dT%H:%M:%S.000000Z)
 NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)
-printf 'idle %s %s' "$TWO_HOURS_AGO" "$MYPID" >"$ROOT/.hb-stale"
+printf 'idle %s %s' "$TWO_HOURS_AGO" "$MYPID" >"$ROOT/.hb-parked"
 printf 'idle %s 99999999' "$TWO_HOURS_AGO" >"$ROOT/.hb-crashed"
 printf 'idle %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-fresh"
+printf 'working %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-busy"
 printf 'idle %s %s' "$TWO_AHEAD" "$MYPID" >"$ROOT/.hb-skewed"
 say ghost public "a post from a seat with no heartbeat"
 
 step "status --live reads each silence honestly"
 live=$("$FA" bus status -r "$ROOT" --live --depth 1 2>&1)
-assert_eq "old idle with a live pid reads stale, and names the pid" \
-  "1" "$(printf '%s' "$live" | grep -c "🟡 stale — idle .*; pid $MYPID alive — stale?" || true)"
-assert_eq "the stale seat is never green" \
-  "0" "$(printf '%s' "$live" | grep -c '^🟢 stale ' || true)"
+assert_eq "idle past the hour with a live pid reads parked yellow" \
+  "1" "$(printf '%s' "$live" | grep -c '^🟡 parked — idle 2h ago' || true)"
+assert_eq "the parked seat is never green" \
+  "0" "$(printf '%s' "$live" | grep -c '^🟢 parked ' || true)"
+assert_eq "the parked reading carries no staleness note" \
+  "0" "$(printf '%s' "$live" | grep -c '^🟡 parked .*stale?' || true)"
+assert_eq "a working seat reads busy purple" \
+  "1" "$(printf '%s' "$live" | grep -c '^🟣 busy — working .*ago' || true)"
+assert_eq "the busy seat is never yellow" \
+  "0" "$(printf '%s' "$live" | grep -c '^🟡 busy ' || true)"
 assert_eq "old idle with a dead pid reads crashed" \
   "1" "$(printf '%s' "$live" | grep -c '🔴 crashed — pid 99999999 is not running' || true)"
 assert_eq "fresh idle is still green" \
