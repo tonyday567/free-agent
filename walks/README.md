@@ -102,6 +102,10 @@ the filter restores every post.
 `m` marks all printed mail read, and later mail remains unread.
 ⟜ `deck-quit.sh` ⟜ view `q` buries without killing the buffer; status `q` kills the
 buffer and releases its file watch and repaint timer.
+⟜ `deck-log-navigation.sh` ⟜ search runs in the read-only tail; the thread at
+point opens, its header names its keys, and `q` buries it; a resolved file reference —
+Markdown or plain — opens at its section, while an unresolved or ambiguous one stays
+plain text.
 ⟜ `deck-frame.sh` ⟜ a uniquely named scratch daemon loads installed Evil, not Doom's
 init, and opens one GUI (`ns`) and one pseudo-terminal frame. Both show the three-window
 deck with focus in status; `<tab>` and `q` reach the deck in Evil normal state. The
