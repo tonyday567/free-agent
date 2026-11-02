@@ -13,7 +13,7 @@ import Circuit.Agent.Framing (stamp, stamped, unframeStored)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
 import Control.Concurrent (threadDelay)
 import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -337,9 +337,8 @@ deliveryTopic = do
   myPath <- takeDirectory <$> getExecutablePath
   pathBin <- findExecutable "free-agent"
   let bin =
-        maybe
+        fromMaybe
           (myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent")
-          id
           pathBin
   oldPath <- getEnv "PATH"
   setEnv "PATH" (fakeBin <> ":" <> oldPath)

@@ -21,6 +21,7 @@ import Circuit.Agent.Mark (Mark (..), controlMark, markGlyph, markOf)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (unless)
 import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (postLocal)
@@ -84,6 +85,6 @@ haltTopic = do
   assert "Y1f both status reports were handed to the seat" $
     length answered == 2 && all (`elem` answered) [yin215, yin223]
   assert "Y1g the seat stopped on the control form, cursor past all three" $
-    maybe False (const True) exited && cursor == 3
+    isJust exited && cursor == 3
   exists <- doesDirectoryExist root
   unless (not exists) (removePathForcibly root)

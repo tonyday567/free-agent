@@ -452,53 +452,53 @@ cliQueryWithDelivery delivery mControl cli prompt = do
             )
         else
           if cliExhausted cli code raw
-        then do
-          finishCli mControl
-          fail
-            ( "cliQuery: "
-                <> cliCommand cli
-                <> " session context exhausted at attempt "
-                <> show n
-                <> " (turn_end reason max-tokens); session "
-                <> T.unpack sid
-                <> "; not retrying — the window is full and each retry"
-                <> " appends tokens; evidence retained in the transcript;"
-                <> " last output: "
-                <> T.unpack (T.takeEnd 400 raw)
-            )
-        else
-          if n > cliMaxRetries
             then do
               finishCli mControl
               fail
                 ( "cliQuery: "
                     <> cliCommand cli
-                    <> " resumed session failed after "
-                    <> show (1 + cliMaxRetries)
-                    <> " attempts (1 initial + "
-                    <> show cliMaxRetries
-                    <> " retries); last attempt "
+                    <> " session context exhausted at attempt "
                     <> show n
-                    <> " exited "
-                    <> show code
-                    <> "; session "
+                    <> " (turn_end reason max-tokens); session "
                     <> T.unpack sid
-                    <> "; last output: "
-                    <> T.unpack (T.take 400 raw)
+                    <> "; not retrying — the window is full and each retry"
+                    <> " appends tokens; evidence retained in the transcript;"
+                    <> " last output: "
+                    <> T.unpack (T.takeEnd 400 raw)
                 )
-            else do
-              threadDelay (100000 * n)
-              (code', raw', routedOut', elapsed') <- run t0' (Just sid)
-              cancelled <- isCliCancelled mControl
-              if cancelled
-                then cancelledTurn t0' code' raw' elapsed'
-                else
-                  if cliStale cli code' raw'
-                    then fresh t0'
+            else
+              if n > cliMaxRetries
+                then do
+                  finishCli mControl
+                  fail
+                    ( "cliQuery: "
+                        <> cliCommand cli
+                        <> " resumed session failed after "
+                        <> show (1 + cliMaxRetries)
+                        <> " attempts (1 initial + "
+                        <> show cliMaxRetries
+                        <> " retries); last attempt "
+                        <> show n
+                        <> " exited "
+                        <> show code
+                        <> "; session "
+                        <> T.unpack sid
+                        <> "; last output: "
+                        <> T.unpack (T.take 400 raw)
+                    )
+                else do
+                  threadDelay (100000 * n)
+                  (code', raw', routedOut', elapsed') <- run t0' (Just sid)
+                  cancelled <- isCliCancelled mControl
+                  if cancelled
+                    then cancelledTurn t0' code' raw' elapsed'
                     else
-                      if code' /= ExitSuccess
-                        then retryWithSession t0' sid (FailedAttempt (n + 1) code' raw' elapsed')
-                        else settle t0' code' raw' routedOut' elapsed'
+                      if cliStale cli code' raw'
+                        then fresh t0'
+                        else
+                          if code' /= ExitSuccess
+                            then retryWithSession t0' sid (FailedAttempt (n + 1) code' raw' elapsed')
+                            else settle t0' code' raw' routedOut' elapsed'
     run t0' mSid = do
       cancelled <- isCliCancelled mControl
       if cancelled
