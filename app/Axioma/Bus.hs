@@ -779,7 +779,7 @@ busTopic = do
           ["quiet"]
           root
           Nothing
-          (\stored -> ioTurn (pure (replyAct "quiet" stored "plain local response")))
+          (\stored -> ioTurn (pure (replyAct "quiet" stored "LOCAL\nplain local response")))
           >> putMVar done ()
     causing <- postLocal root (mkPost "human" ["quiet"] "*(no post)*")
     _ <- postLocal root (mkPost "human" ["quiet"] (markGlyph Landed))
@@ -787,7 +787,7 @@ busTopic = do
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "quiet"]
-    assert "plain response text publishes no reply act" $ replies == []
+    assert "LOCAL response text publishes no reply act" $ replies == []
     let acts = replyAct "quiet" causing "@human: acknowledged"
     assert "an addressed response is a cited explicit reply" $
       case acts of

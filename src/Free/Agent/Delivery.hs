@@ -152,21 +152,41 @@ directPostTo grant deliver root post = do
     Left refusal -> pure (Left refusal)
   pure (stored, result)
 
--- | Interpret an explicitly addressed response as a reply act. Plain response
--- text stays local. When a tool diff or other prefix precedes an address at the
--- start of a later line, only the last non-self addressed suffix outside a
--- fenced quotation is published; the prefix is not bus content. Inline mentions
--- and Markdown blockquote addresses stay local.
+-- | Interpret a response as a reply act. An explicit address chooses the
+-- recipient. On a direct delivery, otherwise, non-empty prose replies to the
+-- causing sender; a first line of @LOCAL@ keeps the whole response local.
+-- Public and self-caused deliveries retain the local default. When a tool diff
+-- or other prefix precedes an address at the start of a later line, only the
+-- last non-self addressed suffix outside a fenced quotation is published;
+-- the prefix is not bus content. Inline mentions and Markdown blockquote
+-- addresses are not explicit addresses.
 replyAct :: Name -> Stamped Text -> Text -> [Post Text]
 replyAct agent stored response =
   case parseAddress response <|> parseLaterLineAddress agent response of
-    Nothing -> []
-    Just (recipient, replyBody) ->
-      [ (Post agent (channel cause) [recipient] [snd (stamp stored)])
-          replyBody
-      ]
+    Nothing -> maybe [] pure (defaultReply agent stored response)
+    Just (recipient, replyBody) -> pure (reply recipient replyBody)
   where
     cause = stamped stored
+    reply recipient replyBody =
+      Post agent (channel cause) [recipient] [snd (stamp stored)] replyBody
+
+-- | The direct-delivery default: answer the sender, unless publication is
+-- explicitly suppressed. Empty responses and public or self-caused turns stay
+-- local.
+defaultReply :: Name -> Stamped Text -> Text -> Maybe (Post Text)
+defaultReply agent stored response
+  | agent `notElem` to cause = Nothing
+  | from cause == agent = Nothing
+  | localResponse response = Nothing
+  | T.null (T.strip response) = Nothing
+  | otherwise =
+      Just $ Post agent (channel cause) [from cause] [snd (stamp stored)] (T.strip response)
+  where
+    cause = stamped stored
+
+localResponse :: Text -> Bool
+localResponse response =
+  T.strip (T.takeWhile (/= '\n') (T.stripStart response)) == "LOCAL"
 
 -- | Publish a reply act after making a misplaced address visible. Publication
 -- and ancestry are exactly 'replyAct'; the warning is the only added effect.
@@ -177,7 +197,8 @@ replyActIO agent stored response = do
 
 -- | A valid address at the start of a later line earns a warning with its
 -- zero-based character offset. The addressed suffix publishes; the prefix does
--- not. Inline mentions and genuinely unaddressed replies stay silent.
+-- not. Inline mentions and genuinely unaddressed replies do not produce this
+-- warning; the latter may still use the direct-delivery default.
 replyWarning :: Name -> Text -> Maybe Text
 replyWarning agent response =
   case parseAddress response of

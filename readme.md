@@ -84,7 +84,7 @@ Useful entry points:
 
 ## Delivery and publication
 
-A delivered prompt produces a local response, not an automatic bus reply. `cliDeliverTo` runs one interruptible CLI turn and records its response and causing post id in the existing transcript. Plain response text stays local. Hermes and DSH adapters publish only an explicit `@name: response` reply act, which carries the causing post's channel and ancestry.
+A delivered prompt produces a local response before publication. `cliDeliverTo` runs one interruptible CLI turn and records its response and causing post id in the existing transcript. On a delivery addressed to the seat, non-empty response text replies to the causing sender by default, with the causing post's channel and ancestry. An explicit `@name: response` chooses the recipient instead; a first line of `LOCAL` suppresses publication. Public and self-caused deliveries stay local by default.
 
 Each executable seat has a finite `--delivery-budget N` (default 1000000). Exhaustion stands the loop down without invoking the backend or advancing the causing cursor.
 

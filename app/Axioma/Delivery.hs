@@ -224,21 +224,34 @@ deliveryTopic = do
   removePathForcibly grantRoot
 
   -------------------------------------------------------------------------
-  -- Kimi publication through the wired binary: plain prose stays local,
-  -- while one addressed presentation bullet is removed before replyAct.
+  -- Kimi publication through the wired binary: direct prose replies to the
+  -- sender, while one addressed presentation bullet is removed before replyAct.
   -- The transcript retains raw CLI output; delivery receives the scrubbed form.
   --
-  -- Mutation guards: restoring defaultReply publishes the plain and
-  -- preambled cases; removing the guarded kimiText strip loses the only
-  -- public reply; dropping replyAct's channel or ancestry fails the reply
-  -- assertions; replacing raw with scrubbed output fails the raw assertion.
+  -- Mutation guards: removing defaultReply loses the plain, bullet, and
+  -- preambled replies; removing the guarded kimiText strip loses the explicitly
+  -- addressed reply's body; dropping replyAct's channel or ancestry fails the
+  -- reply assertions; replacing raw with scrubbed output fails the raw assertion.
   -------------------------------------------------------------------------
   putStrLn "Kimi reply-act publication"
   channelRoot <- tempRoot "free-agent-kimi-channel"
   channelCause <- postTo channelRoot ((mkPost "yang" ["kimi1", "ops"] "cause") {channel = Just "ops"})
-  assert "replyAct keeps unaddressed prose local and silent" $
-    null (replyAct "kimi1" channelCause "ordinary local prose")
-      && replyWarning "kimi1" "ordinary local prose" == Nothing
+  publicCause <- postTo channelRoot (mkPost "yang" [] "public")
+  selfCause <- postTo channelRoot (mkPost "kimi1" ["kimi1"] "self")
+  assert "replyAct publishes an unaddressed direct answer to the sender" $
+    case replyAct "kimi1" channelCause "ordinary direct answer" of
+      [r] ->
+        body r == "ordinary direct answer"
+          && to r == ["yang"]
+          && channel r == Just "ops"
+          && thread r == [snd (stamp channelCause)]
+          && replyWarning "kimi1" "ordinary direct answer" == Nothing
+      _ -> False
+  assert "LOCAL suppresses the directed default, including leading whitespace" $
+    null (replyAct "kimi1" channelCause "  LOCAL\nordinary local prose")
+      && null (replyAct "kimi1" publicCause "public prose")
+      && null (replyAct "kimi1" selfCause "self prose")
+      && null (replyAct "kimi1" channelCause " \n")
   assert "a prefix-first address publishes without a warning" $
     replyWarning "kimi1" "@yang: explicit report" == Nothing
   assert "a later line-leading address publishes its suffix and warns about the dropped prefix" $
@@ -263,9 +276,10 @@ deliveryTopic = do
     case replyAct "kimi1" channelCause "tool\n@bob: reply\n@kimi1: self" of
       [r] -> to r == ["bob"] && body r == "reply\n@kimi1: self"
       _ -> False
-  assert "a Markdown blockquote address stays local and silent" $
-    null (replyAct "kimi1" channelCause "> @alice: quoted\nordinary local prose")
-      && replyWarning "kimi1" "> @alice: quoted\nordinary local prose" == Nothing
+  assert "a Markdown blockquote address is not an explicit recipient" $
+    case replyAct "kimi1" channelCause "> @alice: quoted\nordinary direct prose" of
+      [r] -> to r == ["yang"] && body r == "> @alice: quoted\nordinary direct prose"
+      _ -> False
   assert "a fenced address is ignored in favour of the real reply" $
     case replyAct "kimi1" channelCause "```text\n@alice: hi\n```\n@bob: reply" of
       [r] -> to r == ["bob"] && body r == "reply"
@@ -284,9 +298,10 @@ deliveryTopic = do
           && channel r == Just "ops"
           && thread r == [snd (stamp channelCause)]
       _ -> False
-  assert "replyAct does not invent DONE after a progress preamble" $
-    null (replyAct "kimi1" channelCause "• working\n\n• @yang: DONE not-earned")
-      && replyWarning "kimi1" "• working\n\n• @yang: DONE not-earned" == Nothing
+  assert "an inline address does not displace the directed default" $
+    case replyAct "kimi1" channelCause "• working\n\n• @yang: DONE not-earned" of
+      [r] -> to r == ["yang"] && body r == "• working\n\n• @yang: DONE not-earned"
+      _ -> False
   removePathForcibly channelRoot
 
   kimiRoot <- tempRoot "free-agent-kimi-publication"
@@ -352,11 +367,14 @@ deliveryTopic = do
   content <- TIO.readFile (kimiRoot </> "log.jsonl")
   let parsed = mapMaybe (unframeStored @Text) (T.lines content)
       replies = [stamped s | s <- parsed, from (stamped s) == "kimi1"]
-  assert "plain and preambled Kimi prose remain local" $
-    not $
-      any
-        (\r -> body r `elem` ["ordinary local prose", "• ordinary bullet", "• working\n\n• @yang: DONE not-earned"])
-        replies
+  assert ("plain, preambled, and ordinary bullet prose use the directed default: " <> show (map body replies)) $
+    map body replies
+      == [ "ordinary local prose",
+           "explicit report",
+           "recovered report",
+           "• working\n\n• @yang: DONE not-earned",
+           "• ordinary bullet"
+         ]
   assert "the addressed bullet publishes with ancestry" $
     case [r | r <- replies, body r == "explicit report"] of
       [r] ->
