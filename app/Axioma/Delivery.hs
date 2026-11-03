@@ -47,6 +47,13 @@ import System.Posix.Files (setFileMode)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 
+-- | The exact note line the harness delivers for a stranded reply.
+noteLine :: (Show a) => a -> Text
+noteLine pid =
+  "🟡 your reply for delivery "
+    <> T.pack (show pid)
+    <> " published from its `@yang:` address onward only; the text above the address did not reach the bus."
+
 deliveryTopic :: IO ()
 deliveryTopic = do
   putStrLn "delivery settlement and publication"
@@ -400,6 +407,8 @@ deliveryTopic = do
           "  *WRITE-CASE*) printf '│ notes.md\\n│ +hello\\n' >&2; printf 'hello\\n' >> \"" <> kimiNotes <> "\"; printf '@yang: DONE — notes.md written\\n' ;;",
           "  *STRAND-CASE*) printf 'planning notes\\n@yang: stranded report\\n' ;;",
           "  *CHECK-CASE*) printf 'checked\\n' ;;",
+          "  *INDENT-CASE*) printf 'tool\\n  @yang: kimi indented report\\n' ;;",
+          "  *SPACES-CASE*) printf '  @yang: kimi front-line spaces\\n' ;;",
           "esac",
           "printf 'To resume this session: kimi -r fake-kimi-integration\\n'"
         ]
@@ -413,6 +422,8 @@ deliveryTopic = do
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "WRITE-CASE")
   kimiStrandCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "STRAND-CASE")
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "CHECK-CASE")
+  kimiIndentCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "INDENT-CASE")
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "SPACES-CASE")
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] (markGlyph Landed))
   myPath <- takeDirectory <$> getExecutablePath
   pathBin <- findExecutable "free-agent"
@@ -441,8 +452,10 @@ deliveryTopic = do
   assert ("the wired Kimi seat completes its scripted turns" <> if code == ExitSuccess then "" else ": " <> err) $
     code == ExitSuccess
   let adapterWarnings = filter ("🟡 kimi1: @yang: begins at character offset " `T.isPrefixOf`) (T.lines (T.pack err))
-  assert (("the wired adapter warns for each recovered prefix-later reply (diff, strand), not for prefix-first or local prose" <> if length adapterWarnings == 2 then "" else ": " <> err)) $
-    length adapterWarnings == 2
+  assert (("the wired adapter warns for each recovered prefix-later reply (diff, strand, indented), not for prefix-first or local prose" <> if length adapterWarnings == 3 then "" else ": " <> err)) $
+    length adapterWarnings == 3
+  assert "the indented later-line row recovers at its offset on the wire" $
+    any ("offset 7, not 0" `T.isInfixOf`) adapterWarnings
   content <- TIO.readFile (kimiRoot </> "log.jsonl")
   let parsed = mapMaybe (unframeStored @Text) (T.lines content)
       replies = [stamped s | s <- parsed, from (stamped s) == "kimi1"]
@@ -455,7 +468,9 @@ deliveryTopic = do
            "• ordinary bullet",
            "DONE — notes.md written",
            "stranded report",
-           "checked"
+           "checked",
+           "kimi indented report",
+           "kimi front-line spaces"
          ]
   assert "the addressed bullet publishes with ancestry" $
     case [r | r <- replies, body r == "explicit report"] of
@@ -481,14 +496,15 @@ deliveryTopic = do
   assert "the writing turn wrote its file" $ kimiNotesText == "hello\n"
   kimiDossierText <- TIO.readFile kimiDossier
   let kimiCalls = filter (not . T.null . T.strip) (T.splitOn "===CALL===" kimiDossierText)
-  assert "the seat ran one scripted turn per cause" $ length kimiCalls == 8
+  assert "the seat ran one scripted turn per cause" $ length kimiCalls == 10
   assert "each stranded note rides exactly the next delivery, once" $
-    [i | (i, c) <- zip [0 :: Int ..] kimiCalls, "Harness notes:" `T.isInfixOf` c] == [3, 7]
-  assert "the diff and strand notes name their deliveries, recipient, and loss" $
-    case (kimiCalls !! 3, kimiCalls !! 7) of
-      (preambleCall, checkCall) ->
-        ("for delivery " <> T.pack (show (snd (stamp diffCause))) <> " published from its `@yang:` address onward only; the text above the address did not reach the bus.") `T.isInfixOf` preambleCall
-          && ("for delivery " <> T.pack (show (snd (stamp kimiStrandCause))) <> " published from its `@yang:` address onward only; the text above the address did not reach the bus.") `T.isInfixOf` checkCall
+    [i | (i, c) <- zip [0 :: Int ..] kimiCalls, "Harness notes:" `T.isInfixOf` c] == [3, 7, 9]
+  assert "the diff, strand, and indented notes name their deliveries, recipient, and loss" $
+    case (kimiCalls !! 3, kimiCalls !! 7, kimiCalls !! 9) of
+      (preambleCall, checkCall, spacesCall) ->
+        noteLine (snd (stamp diffCause)) `T.isInfixOf` preambleCall
+          && noteLine (snd (stamp kimiStrandCause)) `T.isInfixOf` checkCall
+          && noteLine (snd (stamp kimiIndentCause)) `T.isInfixOf` spacesCall
   kimiStrandGone <- doesFileExist (strandNotePath kimiRoot "kimi1")
   assert "the stranded note is cleared once delivered" $ not kimiStrandGone
   removePathForcibly kimiRoot
@@ -607,8 +623,8 @@ deliveryTopic = do
   assert "the later-line and strand notes name their deliveries, recipient, and loss" $
     case (hermesCalls !! 3, hermesCalls !! 4) of
       (strandCall, checkCall) ->
-        ("for delivery " <> T.pack (show (snd (stamp hermesLaterCause))) <> " published from its `@yang:` address onward only; the text above the address did not reach the bus.") `T.isInfixOf` strandCall
-          && ("for delivery " <> T.pack (show (snd (stamp hermesStrandCause))) <> " published from its `@yang:` address onward only; the text above the address did not reach the bus.") `T.isInfixOf` checkCall
+        noteLine (snd (stamp hermesLaterCause)) `T.isInfixOf` strandCall
+          && noteLine (snd (stamp hermesStrandCause)) `T.isInfixOf` checkCall
   hermesStrandGone <- doesFileExist (strandNotePath hermesRoot "hermes1")
   assert "the Hermes stranded note is cleared once delivered" $ not hermesStrandGone
   removePathForcibly hermesRoot
