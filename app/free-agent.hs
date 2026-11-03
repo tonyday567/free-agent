@@ -46,7 +46,7 @@ import Free.Agent.Cli.Config
     parseHermesConfig,
     parseLlmConfig,
   )
-import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurn, mapTurnIO, newDeliveryGrant, replyActIO)
+import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurn, mapTurnIO, newDeliveryGrant, noteStrand, replyActIO, strandBlock, takeStrandNotes)
 import Free.Agent.Gateway
   ( GatewayClient (..),
     GatewayConfig (..),
@@ -403,14 +403,16 @@ runHermesAuto threshold rebootFile budget cfg = do
       handle stored = do
         isFirst <- readIORef firstDelivery
         writeIORef firstDelivery False
+        strandNotes <- takeStrandNotes root agentName
         let delivered = decorateSender stored
             note = if isFirst then rebootNote else ""
-            prompt = framedPrompt <> note <> "\n\nUser messages:\n" <> body (stamped delivered)
+            prompt = framedPrompt <> note <> strandBlock strandNotes <> "\n\nUser messages:\n" <> body (stamped delivered)
         turn <- cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
         pure $
           mapTurnIO
             ( \response -> do
                 posts <- replyActIO agentName stored response
+                noteStrand root agentName stored response
                 refreshPosts <- automaticRefresh stored
                 pure (posts <> refreshPosts)
             )
@@ -465,11 +467,17 @@ runKimi budget cfg = do
       transcriptPath = kcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
       cli = kimiCli (kcModel cfg) (kcProvider cfg) sessionFile
       mQuiesce = buildQuiesce (kcQuiesce cfg) (kcPitboss cfg)
-      handle stored =
+      handle stored = do
+        strandNotes <- takeStrandNotes (kcRoot cfg) agentName
         let delivered = decorateSender stored
-            prompt = systemPrompt <> "\n\nUser message:\n" <> body (stamped delivered)
-         in mapTurnIO (replyActIO agentName stored)
-              <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
+            prompt = systemPrompt <> strandBlock strandNotes <> "\n\nUser message:\n" <> body (stamped delivered)
+        mapTurnIO
+          ( \response -> do
+              posts <- replyActIO agentName stored response
+              noteStrand (kcRoot cfg) agentName stored response
+              pure posts
+          )
+          <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
   createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
   runSeat budget agentName names (kcRoot cfg) mQuiesce handle
@@ -488,10 +496,19 @@ runDsh budget cfg = do
       sessionPath = dcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".sid"
       cli = dshCli (Just systemPrompt) (dcDshPatch cfg) (dcDshModelPatch cfg) sessionPath
       mQuiesce = buildQuiesce (dcQuiesce cfg) (dcPitboss cfg)
-      handle stored =
+      handle stored = do
+        strandNotes <- takeStrandNotes (dcRoot cfg) agentName
         let delivered = decorateSender stored
-         in mapTurnIO (replyActIO agentName stored)
-              <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) (body (stamped delivered))
+            block = strandBlock strandNotes
+            message = body (stamped delivered)
+            prompt = if T.null block then message else block <> "\n\n" <> message
+        mapTurnIO
+          ( \response -> do
+              posts <- replyActIO agentName stored response
+              noteStrand (dcRoot cfg) agentName stored response
+              pure posts
+          )
+          <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
   createDirectoryIfMissing True (takeDirectory transcriptPath)
   TIO.putStrLn $ "   patch: " <> T.pack (dcDshPatch cfg)
   forM_ (dcDshModelPatch cfg) $ \p ->

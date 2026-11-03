@@ -17,6 +17,11 @@ module Free.Agent.Delivery
     replyAct,
     replyActIO,
     replyWarning,
+    strandedNote,
+    noteStrand,
+    strandNotePath,
+    strandBlock,
+    takeStrandNotes,
     postTo,
   )
 where
@@ -35,7 +40,7 @@ import Control.Concurrent
     tryPutMVar,
     tryReadMVar,
   )
-import Control.Exception (SomeException, throwIO, try)
+import Control.Exception (IOException, SomeException, catch, throwIO, try)
 import Control.Monad (void)
 import Data.Char (isSpace)
 import Data.Foldable (traverse_)
@@ -45,6 +50,8 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Free.Agent.Bus (postLocal)
+import System.Directory (removeFile)
+import System.FilePath ((</>))
 import System.IO (stderr)
 
 -- | One backend invocation and its cancellation request. Cancellation returns
@@ -153,13 +160,14 @@ directPostTo grant deliver root post = do
   pure (stored, result)
 
 -- | Interpret a response as a reply act. An explicit address chooses the
--- recipient. On a direct delivery, otherwise, non-empty prose replies to the
--- causing sender; a first line of @LOCAL@ keeps the whole response local.
--- Public and self-caused deliveries retain the local default. When a tool diff
--- or other prefix precedes an address at the start of a later line, only the
--- last non-self addressed suffix outside a fenced quotation is published;
--- the prefix is not bus content. Inline mentions and Markdown blockquote
--- addresses are not explicit addresses.
+-- recipient, and leading whitespace before it is tolerated. On a direct
+-- delivery, otherwise, non-empty prose replies to the causing sender; a first
+-- line of @LOCAL@ keeps the whole response local. Public and self-caused
+-- deliveries retain the local default. When a tool diff or other prefix
+-- precedes an address at the start of a later line, only the last non-self
+-- addressed suffix outside a fenced quotation is published; the prefix is not
+-- bus content. Inline mentions and Markdown blockquote addresses are not
+-- explicit addresses.
 replyAct :: Name -> Stamped Text -> Text -> [Post Text]
 replyAct agent stored response =
   case parseAddress response <|> parseLaterLineAddress agent response of
@@ -224,13 +232,17 @@ laterLineAddress :: Name -> Text -> Maybe (Int, Name, Text)
 laterLineAddress agent response =
   listToMaybe
     ( reverse
-        [ (T.length prefix + 1, recipient, replyBody)
-        | (prefix, rest) <- T.breakOnAll "\n@" response,
+        [ (T.length prefix + 1 + indent, recipient, replyBody)
+        | (prefix, rest) <- newlineTails response,
           not (insideFence prefix),
-          Just (recipient, replyBody) <- pure (parseAddress (T.drop 1 rest)),
+          let (spaces, line) = T.span isSpace rest,
+          let indent = T.length spaces,
+          Just (recipient, replyBody) <- pure (parseAddress line),
           recipient /= agent
         ]
     )
+  where
+    newlineTails t = [(pre, T.drop 1 post) | (pre, post) <- T.breakOnAll "\n" t]
 
 insideFence :: Text -> Bool
 insideFence = odd . length . filter isFence . T.lines
@@ -238,14 +250,73 @@ insideFence = odd . length . filter isFence . T.lines
 isFence :: Text -> Bool
 isFence line = "```" `T.isPrefixOf` T.stripStart line
 
+-- | An address at the start of the response, allowing leading whitespace:
+-- @\@@, a non-empty name without spaces, and a colon.
 parseAddress :: Text -> Maybe (Name, Text)
 parseAddress response = do
-  rest <- T.stripPrefix "@" response
+  rest <- T.stripPrefix "@" (T.stripStart response)
   let (name, afterName) = T.break (== ':') rest
       recipient = T.strip name
   if T.null recipient || T.null afterName || T.any (\c -> isSpace c || c == '@') recipient
     then Nothing
     else Just (recipient, T.strip (T.drop 1 afterName))
+
+-- ---------------------------------------------------------------------------
+-- Stranded replies, told on the next delivery
+-- ---------------------------------------------------------------------------
+
+-- | Where a seat's pending stranded-reply notes live under a bus root.
+strandNotePath :: FilePath -> Name -> FilePath
+strandNotePath root name = root </> (".strand-" <> T.unpack name)
+
+-- | The delivered note for a stranded reply: publication recovered a later
+-- line's addressed suffix and the text above the address stayed local. It is
+-- a harness fact for the seat's next delivery, never formatting blame; a
+-- prefix-first address, plain prose, and local responses leave no note.
+strandedNote :: Name -> Stamped Text -> Text -> Maybe Text
+strandedNote agent stored response =
+  case parseAddress response of
+    Just _ -> Nothing
+    Nothing ->
+      ( \(_, recipient, _) ->
+          "🟡 your reply for delivery "
+            <> T.pack (show (snd (stamp stored)))
+            <> " published from its `@"
+            <> recipient
+            <> ":` address onward only; the text above the address did not reach the bus."
+      )
+        <$> laterLineAddress agent response
+
+-- | Record a stranded reply for the seat's next delivery; silence otherwise.
+-- A failed write is bookkeeping loss, not turn failure.
+noteStrand :: FilePath -> Name -> Stamped Text -> Text -> IO ()
+noteStrand root agent stored response =
+  catch
+    ( traverse_
+        (\note -> TIO.appendFile (strandNotePath root agent) (note <> "\n"))
+        (strandedNote agent stored response)
+    )
+    (\(_ :: IOException) -> pure ())
+
+-- | Read and clear the pending stranded-reply notes for a seat.
+takeStrandNotes :: FilePath -> Name -> IO [Text]
+takeStrandNotes root agent =
+  catch
+    ( do
+        contents <- TIO.readFile path
+        catch (removeFile path) (\(_ :: IOException) -> pure ())
+        pure (filter (not . T.null) (T.lines contents))
+    )
+    (\(_ :: IOException) -> pure [])
+  where
+    path = strandNotePath root agent
+
+-- | Compose the delivered prompt block for stranded-reply notes; empty when
+-- there are none. Begins with a blank line so callers place it after any
+-- prompt prefix and before their own message header.
+strandBlock :: [Text] -> Text
+strandBlock [] = ""
+strandBlock notes = "\n\nHarness notes:\n" <> T.intercalate "\n" notes
 
 -- | Append a post to the public tape. This operation never invokes an agent.
 postTo :: (PostBody a) => FilePath -> Post a -> IO (Stamped a)
