@@ -13,7 +13,7 @@
 -- common read is a verdict), and a failing build makes the lint
 -- gates moot.
 --
--- Scoping decisions, recorded on cake/fare.md:
+-- Scoping decisions, recorded on storage/coffee-cards/fare.md:
 --
 --   ⟜ docspec is opt-in: --docspec selects the repository package and
 --     excludes linked local projects; --docspec-full selects the whole

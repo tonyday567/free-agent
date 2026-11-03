@@ -10,7 +10,7 @@
 -- temp file the agent can slice with @fare read@ — deeper layers are
 -- one ask away, not in the response.
 --
--- Deliberate deviations from grep, recorded on cake/fare.md:
+-- Deliberate deviations from grep, recorded on storage/coffee-cards/fare.md:
 --
 --   ⟜ substring match, case-sensitive — no regex (wave-1 definition
 --     hunts are literal identifiers; regex is a morph if usage asks)

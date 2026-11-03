@@ -3,12 +3,12 @@
 -- | fare CLI — free-agent restricted equipment, a parsimonious tool menu.
 --
 -- The distilled answer is the interface and deeper layers are one ask away
--- (cake/fare.md §design principles). Each item's layer-1 answer is bounded
+-- (storage/coffee-cards/fare.md §design principles). Each item's layer-1 answer is bounded
 -- by its own distillation, including which end the slice takes; --head and
 -- --tail exist only as testing knobs for untried seats and harnessings,
 -- overriding the end with no steady-state default.
 --
--- Subcommands (cake/fare.md; all live):
+-- Subcommands (storage/coffee-cards/fare.md; all live):
 --
 --   search PATTERN [PATH] [--head|--tail]   bounded recursive substring search
 --   read FILE [RANGE] [--head|--tail]       file slices, never whole files

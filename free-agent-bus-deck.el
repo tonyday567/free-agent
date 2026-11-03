@@ -252,7 +252,7 @@ Public posts (`to: []') are shown whatever the filter."
   :group 'free-agent-bus-deck)
 
 (defcustom free-agent-bus-reference-roots
-  '("~/coffee" "~/coffee/loom" "~/coffee/buff" "~/coffee/stuff" "~/coffee/cake")
+  '("~/coffee" "~/coffee/loom" "~/coffee/buff" "~/coffee/stuff" "~/storage/coffee-cards")
   "Directories a relative file reference is resolved under, in order.
 A reference resolves only when it names an existing file, so a mention that
 resolves to nothing stays plain text.  A path with a slash takes the first
