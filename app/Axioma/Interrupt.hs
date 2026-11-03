@@ -45,7 +45,8 @@ stubCli sessionFile script =
       cliExhausted = \_ _ -> False,
       cliScrub = id,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing
+      cliStderrTee = Nothing,
+      cliSessionReport = Nothing
     }
 
 -- | Run one delivery against a stub and report (result, invocations counted).

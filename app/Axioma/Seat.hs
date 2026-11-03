@@ -115,7 +115,8 @@ seatTopic = do
               cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing
+              cliStderrTee = Nothing,
+              cliSessionReport = Nothing
             }
         transcriptLog = dir </> "transcript.jsonl"
     result1 <- cliDeliverTo cli transcriptLog 1 "hello\nworld" >>= awaitTurn

@@ -70,7 +70,8 @@ deliveryTopic = do
             cliExhausted = \_ _ -> False,
             cliScrub = cleanCliOut,
             cliStderr = StderrDrop,
-            cliStderrTee = Nothing
+            cliStderrTee = Nothing,
+            cliSessionReport = Nothing
           }
   causing <- postTo root (mkPost "human" ["seat"] "quiet turn")
   invokedByPost <- doesFileExist calls
@@ -145,7 +146,8 @@ deliveryTopic = do
             cliExhausted = \_ _ -> False,
             cliScrub = cleanCliOut,
             cliStderr = StderrMerge,
-            cliStderrTee = Nothing
+            cliStderrTee = Nothing,
+            cliSessionReport = Nothing
           }
   cancelCause <- postTo cancelRoot (mkPost "human" ["seat"] "interrupt")
   interrupted <- cliDeliverTo cancelCli cancelTranscript (snd (stamp cancelCause)) "interrupt"

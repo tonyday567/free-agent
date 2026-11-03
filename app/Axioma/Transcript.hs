@@ -44,7 +44,8 @@ transcriptTopic = do
               cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing
+              cliStderrTee = Nothing,
+              cliSessionReport = Nothing
             }
     result <- cliDeliverTo cli transcriptLog 42 "hi there" >>= awaitTurn
     assert "delivery returns the response and writes its transcript" $
@@ -95,7 +96,8 @@ transcriptTopic = do
               cliExhausted = \_ _ -> False,
               cliScrub = cleanCliOut,
               cliStderr = StderrDrop,
-              cliStderrTee = Nothing
+              cliStderrTee = Nothing,
+              cliSessionReport = Nothing
             }
     result1 <- cliDeliverTo cli transcriptLog 1 "hello" >>= awaitTurn
     result2 <- cliDeliverTo cli transcriptLog 2 "world" >>= awaitTurn

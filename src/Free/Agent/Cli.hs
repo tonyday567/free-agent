@@ -62,6 +62,7 @@ import Control.Concurrent
   )
 import Control.Exception (IOException, SomeException, catch, onException, try)
 import Control.Monad (void, when)
+import Data.Aeson (FromJSON (parseJSON), decodeStrict, withObject, (.:!))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.Foldable (for_)
@@ -73,7 +74,7 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (-<.>))
 import System.IO (hClose, hPutStr)
@@ -110,7 +111,12 @@ data Cli = Cli
     -- | Optional tee: raw stderr appended to this log file on every call,
     -- regardless of the policy (interiority stays searchable, never
     -- silently dropped).
-    cliStderrTee :: Maybe FilePath
+    cliStderrTee :: Maybe FilePath,
+    -- | Optional JSON report containing @session_id@. The report is removed
+    -- before each invocation and read afterwards; its id is appended only to
+    -- the raw evidence, where 'cliSessionId' can recover it without exposing
+    -- bookkeeping in the reply body.
+    cliSessionReport :: Maybe FilePath
   }
 
 -- | stderr routing for a CLI agent's output channels.
@@ -153,7 +159,8 @@ kimiCli model provider sessionFile =
       cliScrub = kimiText,
       cliStderr = StderrDrop,
       -- Interiority log: NAME.sid -> NAME.stderr.log
-      cliStderrTee = Just (sessionFile -<.> "stderr.log")
+      cliStderrTee = Just (sessionFile -<.> "stderr.log"),
+      cliSessionReport = Nothing
     }
 
 -- | Scrape the @To resume this session: kimi -r \<id\>@ hint line.
@@ -196,7 +203,8 @@ grokCli model sessionFile =
       cliExhausted = \_ _ -> False,
       cliScrub = grokText,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing
+      cliStderrTee = Nothing,
+      cliSessionReport = Nothing
     }
 
 -- | Reply text is the JSON @text@ field, unescaped; if there is no such
@@ -285,7 +293,8 @@ dshCli mCard basePatch mModelPatch sessionFile =
       cliExhausted = \_ out -> "\"reason\":{\"kind\":\"max-tokens\"}" `T.isInfixOf` out,
       cliScrub = dshText,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing
+      cliStderrTee = Nothing,
+      cliSessionReport = Nothing
     }
   where
     taskFor mSid prompt = case (mCard, mSid) of
@@ -506,6 +515,8 @@ cliQueryWithDelivery delivery mControl cli prompt = do
           t1 <- getCurrentTime
           pure (ExitFailure 130, "", "", elapsedMs t0' t1)
         else do
+          for_ (cliSessionReport cli) $ \path ->
+            catch (removeFile path) (\(_ :: IOException) -> pure ())
           created <-
             createProcess
               (proc (cliCommand cli) (cliArgv cli prompt mSid))
@@ -535,7 +546,8 @@ cliQueryWithDelivery delivery mControl cli prompt = do
                 for_ mControl $ \(CliControl _ _ processRef) -> writeIORef processRef Nothing
                 t1 <- getCurrentTime
                 tee err
-                pure (code, out <> err, out <> routed err, elapsedMs t0' t1)
+                sessionNote <- maybe (pure "") readSessionReport (cliSessionReport cli)
+                pure (code, out <> err <> sessionNote, out <> routed err, elapsedMs t0' t1)
             _ -> fail "cliQuery: createProcess did not return all requested pipes"
     elapsedMs t0' t1 = floor (realToFrac (diffUTCTime t1 t0') * (1000 :: Double))
     tee err =
@@ -616,6 +628,25 @@ cliQueryWithDelivery delivery mControl cli prompt = do
               (\(_ :: SomeException) -> pure ())
       let (pid, path) = delivery
       writeAt (fromIntegral pid) path
+
+newtype SessionReport = SessionReport (Maybe Text)
+
+instance FromJSON SessionReport where
+  parseJSON = withObject "CLI session report" $ \o ->
+    SessionReport <$> o .:! "session_id"
+
+-- | Keep session bookkeeping in the raw evidence without adding it to the
+-- agent's response. A missing or malformed report yields no synthetic id.
+readSessionReport :: FilePath -> IO Text
+readSessionReport path =
+  catch
+    ( do
+        contents <- BS.readFile path
+        pure $ case decodeStrict contents of
+          Just (SessionReport (Just sid)) -> "\nsession_id:" <> sid
+          _ -> ""
+    )
+    (\(_ :: IOException) -> pure "")
 
 readStoredSession :: FilePath -> IO (Maybe Text)
 readStoredSession path = do

@@ -31,6 +31,7 @@ import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, parseSessionId)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
+import System.FilePath ((-<.>))
 import System.Process (readProcess)
 
 -- $setup
@@ -112,17 +113,21 @@ processHost name cmd args =
         pure (map T.pack (lines out))
     }
 
--- | Shared CLI recipe for hermes backends.
+-- | Shared CLI recipe for hermes backends. Oneshot mode returns the final
+-- message rather than the rendered tool turn. Its JSON usage report carries
+-- the session id, preserving fresh-session capture and resume without putting
+-- bookkeeping in the reply body.
 hermesCli :: Maybe Text -> Maybe Text -> Maybe Text -> Bool -> FilePath -> Cli
 hermesCli model provider reasoning yolo sessionFile =
   Cli
     { cliCommand = "hermes",
       cliArgv = \prompt mSid ->
-        ["chat", "-q", T.unpack prompt]
+        ["-z", T.unpack prompt]
           <> maybe [] (\m -> ["-m", T.unpack m]) model
           <> maybe [] (\p -> ["--provider", T.unpack p]) provider
           <> maybe [] (\r -> ["--reasoning", T.unpack r]) reasoning
-          <> (if yolo then ["--yolo", "-Q"] else [])
+          <> ["--usage-file", usageFile]
+          <> (if yolo then ["--yolo"] else [])
           <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
       cliStdin = const "",
       cliSessionFile = sessionFile,
@@ -133,8 +138,11 @@ hermesCli model provider reasoning yolo sessionFile =
       cliExhausted = \_ _ -> False,
       cliScrub = cleanCliOut,
       cliStderr = StderrMerge,
-      cliStderrTee = Nothing
+      cliStderrTee = Nothing,
+      cliSessionReport = Just usageFile
     }
+  where
+    usageFile = sessionFile -<.> "usage.json"
 
 -- | Connection configuration for a direct API host.
 data BareConfig = BareConfig

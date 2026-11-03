@@ -186,7 +186,8 @@ resumeTopic = do
               cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing
+              cliStderrTee = Nothing,
+              cliSessionReport = Nothing
             }
     result <- queryDelivery cli dir "hello-b6a"
     -- Second invocation must carry the --resume flag with our seeded id.
@@ -228,7 +229,8 @@ resumeTopic = do
               cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing
+              cliStderrTee = Nothing,
+              cliSessionReport = Nothing
             }
     result <- queryDelivery cli dir "hello-b6b"
     -- Must NOT carry the old --resume flag (it was a fresh call).
@@ -282,7 +284,8 @@ resumeTopic = do
               cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing
+              cliStderrTee = Nothing,
+              cliSessionReport = Nothing
             }
     result <- queryDelivery cli dir "hello-b6c"
     -- With code-is-stale, the first invocation's exit 1 triggers stale →
@@ -348,7 +351,8 @@ resumeTopic = do
               cliExhausted = \_ _ -> False,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing
+              cliStderrTee = Nothing,
+              cliSessionReport = Nothing
             }
     res <-
       try (cliDeliverTo cli (dir </> "transcript.jsonl") 1 "hello-stinky" >>= awaitTurn) ::
@@ -443,7 +447,8 @@ resumeTopic = do
               cliExhausted = \_ out -> "\"reason\":{\"kind\":\"max-tokens\"}" `T.isInfixOf` out,
               cliScrub = id,
               cliStderr = StderrMerge,
-              cliStderrTee = Nothing
+              cliStderrTee = Nothing,
+              cliSessionReport = Nothing
             }
     -- (a) Resumed exhausted session: exactly one invocation, named error.
     resA <-
