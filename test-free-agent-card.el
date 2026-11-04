@@ -1,4 +1,7 @@
 ;;; test-free-agent-card.el --- Card rendering tests -*- lexical-binding: t; -*-
+;; Run from this directory. `-L .` is the load path that lets the require
+;; below find free-agent-card.el; without it batch Emacs dies on the require.
+;;   emacs -Q --batch -L . -l test-free-agent-card.el -f ert-run-tests-batch-and-exit
 
 (require 'cl-lib)
 (require 'ert)
