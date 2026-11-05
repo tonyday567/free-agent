@@ -26,6 +26,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
+import Data.Version (showVersion)
 import Free.Agent.Acp (AcpConfig (..), acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, openAcp)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus.Cli (BusCommand, Depth (..), busParser, depthOpt, liveOpt, runBusCommand, runStatus)
@@ -58,6 +59,7 @@ import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, def
 import Free.Agent.Refresh (preserveForRefresh, refreshDue, refreshRequestPath, writeRefreshRequest)
 import Free.Agent.Usage (readHermesUsage, readUsageIdentity, renderUsageIdentity)
 import Options.Applicative
+import Paths_free_agent (version)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory)
 import System.Environment (getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure, exitWith)
@@ -258,10 +260,22 @@ hermesUsageSourceParser =
 opts :: ParserInfo Command
 opts =
   info
-    (commandParser <**> helper)
+    ((commandParser <**> helper) <**> versionOption)
     ( fullDesc
         <> progDesc "Unified free-agent CLI"
         <> header "free-agent - bus, seats, and status"
+    )
+
+-- | The build witness. A verdict is worth what the tool that produced it can
+-- name about itself, so @--version@ answers with the package version the
+-- binary was linked from and exits 0 without touching a bus.
+versionOption :: Parser (a -> a)
+versionOption =
+  infoOption
+    ("free-agent " <> showVersion version)
+    ( long "version"
+        <> short 'V'
+        <> help "Print the build version and exit"
     )
 
 -- ---------------------------------------------------------------------------
