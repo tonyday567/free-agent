@@ -18,7 +18,7 @@
 --     the week audit showed grep's exit-1 mostly manufacturing
 --     isError noise
 --   ⟜ binary files are skipped, not mojibake'd (invalid UTF-8)
-module Free.Agent.Fare.Search (runSearch) where
+module Free.Agent.Fare.Search (collectFiles, runSearch) where
 
 import Control.Monad (forM, when)
 import Data.ByteString qualified as B

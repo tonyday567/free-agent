@@ -93,18 +93,25 @@ unknown brackets and unresolved paths remain unannotated text."
              beg end
              (lambda (_) (bus-conversation-open-post id))
              (format "Open post #%d in its conversation" id)))))
-      ;; A seat is known from the log, not guessed from lowercase prose.
+      ;; A seat is known from the log, not guessed from lowercase prose.  The
+      ;; 📬 mark asks for the direct runner ↔ seat view; a bare name keeps the
+      ;; wider involvement view.
       (goto-char (point-min))
-      (while (re-search-forward "\\[\\(?:📬 \\)?\\([a-z][a-z0-9-]*\\)]" nil t)
-        (let ((seat (match-string 1))
+      (while (re-search-forward "\\[\\(📬 \\)?\\([a-z][a-z0-9-]*\\)]" nil t)
+        (let ((direct (match-string 1))
+              (seat (match-string 2))
               (beg (match-beginning 0))
               (end (match-end 0)))
           (when (and (gethash seat seats)
                      (not (equal seat "next")))
             (free-agent-card--button
              beg end
-             (lambda (_) (bus-conversation-open-seat-involvement seat))
-             (format "Open %s status and thread involvement" seat))))))))
+             (if direct
+                 (lambda (_) (bus-conversation-open-seat seat))
+               (lambda (_) (bus-conversation-open-seat-involvement seat)))
+             (if direct
+                 (format "Open the runner ↔ %s conversation" seat)
+               (format "Open %s status and thread involvement" seat)))))))))
 
 (defun free-agent-card--render-into (buffer source directory text)
   "Render SOURCE's TEXT into BUFFER using DIRECTORY for file links."

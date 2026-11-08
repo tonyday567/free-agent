@@ -17,7 +17,7 @@ NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)
 printf 'working %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-busy"
 printf 'idle %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-fresh"
 printf 'idle %s %s' "$TWO_HOURS_AGO" "$MYPID" >"$ROOT/.hb-parked"
-say alice - "seed"
+post alice - "seed"
 
 step "the model carries the dots, and f hides only the parked"
 out=$(deck_eval '(progn

@@ -5,11 +5,15 @@
 -- loop. Used by the long-running agent executables that watch the JSONL log
 -- directly instead of sharing STM state with the scribe.
 module Free.Agent.Bus.File
-  ( -- * Cursor files
+  ( -- * Cursor and transaction files
     cursorPath,
     readCursor,
     readCursorAll,
     writeCursor,
+    transactionPath,
+    readTransaction,
+    writeTransaction,
+    recoverTransaction,
 
     -- * Attached-human markers
     Human (..),
@@ -198,6 +202,42 @@ writeCursor :: FilePath -> Name -> PostId -> IO ()
 writeCursor root name pid =
   TIO.writeFile (cursorPath root name) (T.pack (show pid))
 
+-- | Path to a seat's completed-turn marker. Its value is the cursor that the
+-- completed batch authorises. It is recovery evidence, not a decision ledger.
+transactionPath :: FilePath -> Name -> FilePath
+transactionPath root name = root </> (".transaction-" <> T.unpack name)
+
+-- | Read the cursor authorised by the last completed agent turn.
+readTransaction :: FilePath -> Name -> IO (Maybe PostId)
+readTransaction root name = do
+  let path = transactionPath root name
+  exists <- doesFileExist path
+  if not exists
+    then pure Nothing
+    else do
+      txt <- readFileStrict path
+      pure $ fromIntegral <$> readMaybe @Integer (T.unpack (T.strip txt))
+
+-- | Mark a batch complete before advancing its cursor. The marker remains as
+-- the last completed-turn boundary; a later batch overwrites it on completion.
+writeTransaction :: FilePath -> Name -> PostId -> IO ()
+writeTransaction root name pid =
+  TIO.writeFile (transactionPath root name) (T.pack (show pid))
+
+-- | Finish the cursor half of a completed transaction after a crash. A marker
+-- ahead of the cursor proves the turn completed, so recovery advances without
+-- invoking the agent again. A missing or older marker authorises no skip: the
+-- ordinary cursor path presents the uncemented mail again.
+recoverTransaction :: FilePath -> Name -> IO ()
+recoverTransaction root name = do
+  completed <- readTransaction root name
+  case completed of
+    Nothing -> pure ()
+    Just pid -> do
+      hasCursor <- doesFileExist (cursorPath root name)
+      current <- if hasCursor then readCursorAll root name else pure 0
+      when (not hasCursor || pid > current) $ writeCursor root name pid
+
 -- ---------------------------------------------------------------------------
 -- Attached-human markers
 -- ---------------------------------------------------------------------------
@@ -290,14 +330,14 @@ attachHuman root name = do
   writeHuman h
   pure h
 
--- | Event-tail a log file and invoke the callback for every new stored post
--- addressed to any of the subscribed names.
+-- | Event-tail a log file and invoke the callback with each drained batch of
+-- stored posts addressed to any of the subscribed names.
 --
--- On startup the file is scanned from the beginning; posts with 'stamp'
--- greater than or equal to the supplied cursor and addressed to any subscribed
--- name are delivered. After catch-up, fsnotify wakes a drain for new lines,
--- and one more drain runs after watch registration so a post appended in
--- the registration gap is not stranded.
+-- On startup the file is scanned from the beginning; addressed posts with
+-- 'stamp' greater than or equal to the supplied cursor are delivered together,
+-- oldest first. After catch-up, every fsnotify or poll drain likewise presents
+-- its complete addressed batch in one callback. A live singleton is therefore
+-- a batch of one, not a separate delivery path.
 --
 -- Reading is offset-based: each drain opens the file, reads the complete
 -- lines appended since the last offset, and closes the handle /before/
@@ -326,8 +366,8 @@ tailLog ::
   PostId ->
   -- | Optional quiescence config and verdict action.
   Maybe (QuiesceConfig, Decision -> IO ()) ->
-  -- | Callback for each delivered stored post; return 'Halt' to stop.
-  (Stamped Text -> IO Flow) ->
+  -- | Callback for one drained batch; return 'Halt' to stop.
+  ([Stamped Text] -> IO Flow) ->
   IO ()
 tailLog path names startCursor mQuiesce cb = do
   exists <- doesFileExist path
@@ -346,18 +386,14 @@ tailLog path names startCursor mQuiesce cb = do
     -- a wake; only deliveries reset the quiescence count.
     delivered <- newTVarIO 0 :: IO (TVar Int)
     _ <- watchDir mgr dir (\ev -> takeFileName (eventPath ev) == logName) $ \_ev -> do
-      already <- readTVarIO halted
-      unless already $ do
-        (h, _, nDeliv) <- drainLocked lock offRef filterStored
-        atomically $ do
-          modifyTVar' delivered (+ nDeliv)
-          when h (writeTVar halted True)
-          _ <- tryPutTMVar signal ()
-          pure ()
+      (_, _, nDeliv) <- drainLocked lock offRef halted filterStored
+      atomically $ do
+        modifyTVar' delivered (+ nDeliv)
+        _ <- tryPutTMVar signal ()
+        pure ()
     -- Registration gap: a post appended before the watch was registered
     -- fired no event; read it by offset.
-    (h0, _, _) <- drainLocked lock offRef filterStored
-    atomically $ when h0 (writeTVar halted True)
+    _ <- drainLocked lock offRef halted filterStored
     case mQuiesce of
       Nothing -> pollLoop lock offRef signal halted
       Just (qc, onQuiesce) -> quiescePump qc signal delivered halted lock offRef onQuiesce
@@ -370,15 +406,10 @@ tailLog path names startCursor mQuiesce cb = do
       if h
         then pure ()
         else do
-          m <- timeout 1_000_000 (atomically (takeTMVar signal))
-          case m of
-            Just () -> do
-              (h', _, _) <- drainLocked lock offRef filterStored
-              when h' (atomically (writeTVar halted True))
-            Nothing -> do
-              -- timeout: poll the file manually
-              (h', _, _) <- drainLocked lock offRef filterStored
-              when h' (atomically (writeTVar halted True))
+          -- An event or the poll fallback: both are one drain. A decided
+          -- halt is written by the drain that decided it, under the lock.
+          _ <- timeout 1_000_000 (atomically (takeTMVar signal))
+          _ <- drainLocked lock offRef halted filterStored
           pollLoop lock offRef signal halted
     -- Deliveries are serialized: the offset is read, the log drained,
     -- and the offset advanced under one lock, so the fsnotify watcher
@@ -386,25 +417,35 @@ tailLog path names startCursor mQuiesce cb = do
     -- runs longer than the poll interval. The drain also reports how many
     -- complete lines it saw and how many addressed posts it delivered, so
     -- the quiescence pump can tell delivery from chatter.
-    drainLocked lock offRef filt = withMVar lock $ \_ -> do
-      off <- readIORef offRef
-      (off', h, nAll, nDeliv) <- drainFrom off filt
-      writeIORef offRef off'
-      pure (h, nAll, nDeliv)
+    --
+    -- The halt decision is read and written under that same lock. A callback
+    -- that returns 'Halt' closes the exchange before the lock is released, so
+    -- a drain already waiting on it sees the decision and delivers nothing:
+    -- no batch drained behind a decided halt reaches the handler, and its
+    -- cursor stays where it was for the next seat. Measured without this gate
+    -- on ~/net, 6 Nov 2026: seats @moss@ and @reed@ ran 103s and 768s of work
+    -- after their loops had already decided to stop.
+    drainLocked lock offRef halted filt = withMVar lock $ \_ -> do
+      haltedNow <- readTVarIO halted
+      if haltedNow
+        then pure (True, 0, 0)
+        else do
+          off <- readIORef offRef
+          (off', h, nAll, nDeliv) <- drainFrom off filt
+          writeIORef offRef off'
+          when h (atomically (writeTVar halted True))
+          pure (h, nAll, nDeliv)
     drainFrom off filt = do
       (ls, off') <- readCompleteLines off
       (nDeliv, halted) <- deliver (mapMaybe filt ls)
       pure (off', halted, length ls, nDeliv)
 
-    -- Deliver posts oldest first; stop early on 'Halt'.
+    -- Present each complete drained batch oldest first. An empty drain does
+    -- not invoke the callback.
     deliver [] = pure (0, False)
-    deliver (p : ps) = do
-      flow <- cb p
-      case flow of
-        Halt -> pure (1, True)
-        Continue -> do
-          (n, h) <- deliver ps
-          pure (n + 1, h)
+    deliver ps = do
+      flow <- cb ps
+      pure (length ps, flow == Halt)
 
     readCompleteLines off = withLogRead path $ \h -> do
       hSeek h AbsoluteSeek off
@@ -455,9 +496,9 @@ tailLog path names startCursor mQuiesce cb = do
               case m of
                 Just True -> pure ()
                 _ -> do
-                  (h', nAll, nDelivLocal) <- drainLocked lock offRef filterStored
+                  (h', nAll, nDelivLocal) <- drainLocked lock offRef halted filterStored
                   if h'
-                    then atomically (writeTVar halted True)
+                    then pure ()
                     else do
                       nDeliv <- atomically $ do
                         n <- readTVar delivered

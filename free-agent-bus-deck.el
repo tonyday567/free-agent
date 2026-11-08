@@ -12,7 +12,7 @@
 ;;   *free-agent-bus-thread*  ancestry of one post         (bus read --thread ID)
 ;;   *free-agent-bus-log*     tail of the log, depth-aware
 ;;   *free-agent-bus-inbox*   unread mail for this name    (bus inbox NAME)
-;;   *free-agent-bus-post*    composition buffer           (bus say)
+;;   *free-agent-bus-post*    composition buffer           (bus post)
 ;;
 ;; Cascade depth is explicit everywhere: 0 dot, 1 one-line excerpt, 2 verbatim.
 ;; No view advances an agent delivery cursor and no view invokes a model.
@@ -759,7 +759,7 @@ post, and the mode line has to say so before the send refuses it."
   "Send the active region (or the whole post buffer) to the bus as an explicit act.
 The post carries sender `free-agent-bus-name', the explicit audience from
 `free-agent-bus-post-to' (or public), and the optional ancestry from
-`free-agent-bus-post-thread'.  Sends through `free-agent bus say'; `bus post'
+`free-agent-bus-post-thread'.  Sends through `free-agent bus post'; `bus post'
 remains the JSON escape hatch.  On success only this composition buffer
 clears; on failure the draft is kept and the error buffer is shown."
   (interactive "r")
@@ -779,7 +779,7 @@ clears; on failure the draft is kept and the error buffer is shown."
         (user-error "Nothing to send"))
       (unless (or free-agent-bus-post-public free-agent-bus-post-to)
         (user-error "No reply target — C-c C-a sets one, or C-u on the mark sends instantly"))
-      (let ((result (apply #'free-agent-bus--cli-stdin body "say" args)))
+      (let ((result (apply #'free-agent-bus--cli-stdin body "post" args)))
         (if (zerop (car result))
             (progn
               (message "%s [%s] posted · %s"
@@ -789,7 +789,7 @@ clears; on failure the draft is kept and the error buffer is shown."
               (when (derived-mode-p 'free-agent-bus-post-mode)
                 (erase-buffer)
                 (free-agent-bus--post-mode-refresh)))
-          (free-agent-bus--report-failure "bus say" (car result) (cdr result)))))))
+          (free-agent-bus--report-failure "bus post" (car result) (cdr result)))))))
 
 (defun free-agent-bus--resolve-reply-target (&optional from to)
   "Resolve the reply target for a mark fired near FROM/TO: (:id :sender :kind).
@@ -845,7 +845,7 @@ A candidate naming this deck itself is not a reply target either: `own post
 point is quoted and the header says so; nothing reaches the bus until
 C-<return> sends the whole buffer through `free-agent-bus-send', which
 refuses with no target at all.  With C-u, the mark fires instantly through
-`free-agent bus say', exactly as before.  The source buffer is never erased
+`free-agent bus post', exactly as before.  The source buffer is never erased
 — a mark is a request about a card, not a composition act."
   (interactive
    (list (if (use-region-p) (region-beginning) (line-beginning-position))
@@ -878,14 +878,14 @@ refuses with no target at all.  With C-u, the mark fires instantly through
                                  (seq-mapcat (lambda (r) (list "--to" r)) free-agent-bus-post-to)
                                  (when free-agent-bus-post-thread
                                    (list "--thread" (number-to-string free-agent-bus-post-thread))))))
-              (let ((result (apply #'free-agent-bus--cli-stdin body "say" args)))
+              (let ((result (apply #'free-agent-bus--cli-stdin body "post" args)))
                 (if (zerop (car result))
                     (progn
                       (message "%s [%s] marked · %s"
                                free-agent-bus-name (free-agent-bus--current-audience)
                                (free-agent-bus--receipt-line (cdr result)))
                       (free-agent-bus-log-refresh t))
-                  (free-agent-bus--report-failure "bus say" (car result) (cdr result))))))
+                  (free-agent-bus--report-failure "bus post" (car result) (cdr result))))))
         (cond
          ((and target (memq (plist-get target :kind) '(at-point visited)))
           (setq free-agent-bus-post-public nil
@@ -1848,7 +1848,7 @@ its sentinel refreshes the buffer and waits again.  No timer, no polling."
   "Reply into the thread of the post at point.
 Sets the composition buffer's ancestry to that post id and its audience to
 the post's sender, then opens the composition buffer.  Sending goes through
-`bus say --thread ID', so the reply lands in the thread component rather
+`bus post --thread ID', so the reply lands in the thread component rather
 than beside every open offer."
   (interactive)
   (let ((id (free-agent-bus--id-at-point))

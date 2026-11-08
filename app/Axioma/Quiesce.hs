@@ -21,10 +21,11 @@ import System.FilePath ((</>))
 quiesceTopic :: IO ()
 quiesceTopic = do
   -------------------------------------------------------------------------
-  -- tailLog: offset draining, partial trailing line, halt mid-batch.
+  -- tailLog: offset draining, partial trailing line, whole-batch halt.
   --
   -- tailLog reads complete lines only; a writer mid-append is left for the
-  -- next drain. A callback that returns 'Halt' stops further delivery.
+  -- next drain. A callback that returns 'Halt' stops after the whole drained
+  -- batch; control-within-batch belongs to runAgentLoop, not this file tail.
   -------------------------------------------------------------------------
   putStrLn "tailLog"
   do
@@ -44,14 +45,14 @@ quiesceTopic = do
     collected <- newMVar []
     tid <-
       forkIO $
-        tailLog path ["test"] 0 Nothing $ \stored -> do
-          modifyMVar_ collected (pure . (stored :))
-          pure (if body (stamped stored) == "halt" then Halt else Continue)
+        tailLog path ["test"] 0 Nothing $ \storedBatch -> do
+          modifyMVar_ collected (pure . (storedBatch :))
+          pure (if any ((== "halt") . body . stamped) storedBatch then Halt else Continue)
     -- Wait for the initial drain to finish before appending.
     threadDelay 200000
     initial <- readMVar collected
     assert "offset drain: the complete line is delivered, the partial line is not" $
-      map (body . stamped) (reverse initial) == ["one"]
+      map (body . stamped) (concat (reverse initial)) == ["one"]
     -- Complete the partial line and append a halt plus one more post.
     TIO.appendFile
       path
@@ -65,11 +66,11 @@ quiesceTopic = do
     threadDelay 1000000
     killThread tid
     final <- readMVar collected
-    let bodies = map (body . stamped) (reverse final)
+    let bodies = map (body . stamped) (concat (reverse final))
     assert "partial trailing line is delivered once it is completed" $
-      bodies == ["one", "two", "halt"]
-    assert "halt mid-batch stops delivery" $
-      "four" `notElem` bodies
+      bodies == ["one", "two", "halt", "four"]
+    assert "a batch halt presents the complete drained batch before stopping" $
+      "four" `elem` bodies
 
   -------------------------------------------------------------------------
   -- quiesceAgent: the quiescence Moore (Q1-Q5)

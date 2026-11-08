@@ -15,12 +15,14 @@
 --   gate [ROOT] [--docspec|--docspec-full|--no-docspec]
 --                                               distilled build/lint verdict
 --   state [ROOT] [--head|--tail]            distilled git status/log/diff
+--   index KEYWORD [ROOT] [--cutoff N]       decayed-area query over kimi wires
 module Free.Agent.Fare.Cli
   ( SearchConfig (..),
     ReadConfig (..),
     GateDocspec (..),
     GateConfig (..),
     StateConfig (..),
+    IndexConfig (..),
     FareCommand (..),
     fareParser,
     runFareCommand,
@@ -32,6 +34,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Free.Agent.Fare.Config (End, endOpt, readGateDocspec, rootArg)
 import Free.Agent.Fare.Gate (DocspecScope (..), runGate)
+import Free.Agent.Fare.Index (runIndex)
 import Free.Agent.Fare.Read (runRead)
 import Free.Agent.Fare.Search (runSearch)
 import Free.Agent.Fare.State (runState)
@@ -81,11 +84,20 @@ data StateConfig = StateConfig
   }
   deriving (Show)
 
+-- | index configuration: the decayed-area query over a wire store.
+data IndexConfig = IndexConfig
+  { inKeyword :: Text,
+    inRoot :: FilePath,
+    inCutoff :: Maybe Double
+  }
+  deriving (Show)
+
 data FareCommand
   = SearchCmd SearchConfig
   | ReadCmd ReadConfig
   | GateCmd GateConfig
   | StateCmd StateConfig
+  | IndexCmd IndexConfig
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -151,6 +163,27 @@ stateParser =
   StateCmd
     <$> (StateConfig <$> rootArg <*> endOpt)
 
+indexParser :: Parser FareCommand
+indexParser =
+  IndexCmd
+    <$> ( IndexConfig
+            <$> argument (T.pack <$> str) (metavar "KEYWORD" <> help "Keyword: one token, no whitespace; matched case-insensitively inside each token")
+            <*> argument
+              str
+              ( metavar "ROOT"
+                  <> value ""
+                  <> help "Wire store to search (default: ~/.kimi-code/sessions)"
+              )
+            <*> optional
+              ( option
+                  auto
+                  ( long "cutoff"
+                      <> metavar "N"
+                      <> help "Area cutoff: a run scores strictly above N (default 0.5)"
+                  )
+              )
+        )
+
 -- ---------------------------------------------------------------------------
 -- Top-level parser
 -- ---------------------------------------------------------------------------
@@ -169,6 +202,15 @@ fareParser =
               )
           )
         <> command "state" (info (stateParser <**> helper) (progDesc "Distilled git status/log/diff"))
+        <> command
+          "index"
+          ( info
+              (indexParser <**> helper)
+              ( fullDesc
+                  <> progDesc
+                    "Decayed-area query over kimi wires: lowercase tokens, literal substring inside a token, runs scoring strictly above the cutoff. Evidence boundary: content.part text inside context.append_loop_event records only, zero-based token offsets; not a whole-event or whole-dialect search."
+              )
+          )
     )
 
 -- ---------------------------------------------------------------------------
@@ -189,3 +231,5 @@ runFareCommand = \case
     runGate (gaRoot cfg) scope
   StateCmd cfg ->
     runState (stRoot cfg) (stEnd cfg)
+  IndexCmd cfg ->
+    runIndex (inKeyword cfg) (inRoot cfg) (inCutoff cfg)

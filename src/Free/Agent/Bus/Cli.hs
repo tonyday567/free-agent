@@ -6,7 +6,6 @@
 --
 -- Subcommands:
 --
---   say [ROOT] BODY... [--to NAME]... [--from NAME] [--thread ID]
 --   post [ROOT] [--from NAME] [--to NAME]... [--body TEXT]
 --   watch [ROOT] NAME [NAME...]
 --   read [ROOT] [NAME...] [--since ID | --cursor NAME] [--thread ID] [--depth 0|1|2]
@@ -19,9 +18,11 @@
 --   ping-watch [ROOT] NAME
 --   status [ROOT] [--threshold SECS] [--live] [--depth 0|1|2]
 --
--- @say@ is the act path for the deck: one short posting command, sender
--- defaulting to @runner@, body as positional words or on stdin. @post@ stays
--- the explicit form (JSON on stdin, or flags).
+-- @post@ is the only posting command: the body is @--body TEXT@ or piped on
+-- stdin with @--from@, and a whole post line on stdin is the JSON mode where
+-- the caller states its own ancestry and channel. @--to@ and @--channel@ are
+-- alternative addresses, never both: delivery follows the channel, so the
+-- pair is refused rather than accepted with the addressee dropped.
 --
 -- @inbox@ is the attached human's unread view: posts addressed to NAME at
 -- or after @.cursor-NAME@, printed, and — only with @--mark-read@ — the
@@ -45,7 +46,10 @@
 module Free.Agent.Bus.Cli
   ( BusCommand (..),
     Depth (..),
+    addressConflict,
+    applyPostFlags,
     busParser,
+    checkThreadId,
     depthOpt,
     hbVerdict,
     liveOpt,
@@ -114,8 +118,7 @@ data Since = SinceId PostId | SinceCursor Text
   deriving (Show)
 
 data BusCommand
-  = SayCommand FilePath Text [Text] (Maybe PostId) [Text]
-  | PostCommand FilePath (Maybe Text) [Text] (Maybe Text) Bool
+  = PostCommand FilePath (Maybe Text) [Text] (Maybe Text) (Maybe PostId) (Maybe Text) Bool
   | WatchCommand FilePath [Text]
   | ReadCommand FilePath [Text] (Maybe Since) (Maybe PostId) Depth
   | InboxCommand FilePath Text Bool Depth
@@ -171,27 +174,67 @@ threadOpt =
         )
     )
 
-sayCmd :: Parser BusCommand
-sayCmd = do
-  root <- rootOpt
-  fromName <-
-    option
-      (T.pack <$> str)
-      ( long "from"
-          <> metavar "NAME"
-          <> value "runner"
-          <> showDefault
-          <> help "Sender name"
-      )
-  toNames <-
-    many
-      ( option
-          (T.pack <$> str)
-          (long "to" <> metavar "NAME" <> help "Recipient name (repeatable)")
-      )
-  thr <- threadOpt
-  body <- many (argument (T.pack <$> str) (metavar "BODY..." <> help "Post body (or pipe it on stdin)"))
-  pure (SayCommand root fromName toNames thr body)
+-- | @--channel NAME@: the channel is the address, and a post in a channel
+-- needs no @--to@. Delivery follows the channel: 'deliversTo' matches a channel
+-- post against a seat's subscriptions, and ignores its @to@ list.
+channelOpt :: Parser (Maybe Text)
+channelOpt =
+  optional
+    ( option
+        (T.pack <$> str)
+        ( long "channel"
+            <> metavar "NAME"
+            <> help "Channel name: the channel is the whole address, so it needs no --to"
+        )
+    )
+
+-- | The @--thread@ rule shared by the flag path and the JSON path, so the two
+-- paths agree on one thing: the parent must exist in the log. Ids are
+-- append-order, so a parent missing at write time is a typo, not a post still
+-- to come. The raw JSON path
+-- keeps the log's tolerance for a dangling link: that ancestry is the caller's
+-- own statement, while a flag is this tool's.
+-- | Fold the @--thread@ and @--channel@ flags into a post. A flag is this
+-- tool's statement, so it wins over whatever the JSON said; with neither flag
+-- the post is exactly what the caller wrote, which is the compatibility rule
+-- the JSON path relies on.
+applyPostFlags :: Maybe PostId -> Maybe Text -> Post a -> Post a
+applyPostFlags mthr mchan p =
+  p
+    { thread = maybe (thread p) pure mthr,
+      channel = mchan <|> channel p
+    }
+
+-- | A post addressed two ways at once. Delivery follows the channel
+-- ('deliversTo' matches it before @to@), so a @--to@ list beside a
+-- @--channel@ would be written to the log and silently dropped. Rather than
+-- choosing for the caller, the pair is refused with a diagnostic that names
+-- both addresses: an accepted-then-ignored addressee is the failure a seat
+-- cannot see.
+addressConflict :: Maybe Text -> [Text] -> Maybe Text
+addressConflict mchan tos = case (mchan, filter (not . T.null) tos) of
+  (Just chan, named@(_ : _))
+    | not (T.null chan) ->
+        Just $
+          "🔴 post: --channel "
+            <> chan
+            <> " and --to "
+            <> T.intercalate " " named
+            <> " both name an address — delivery follows the channel, so the addressee would be dropped; pass one"
+  _ -> Nothing
+
+checkThreadId :: FilePath -> PostId -> IO (Either Text ())
+checkThreadId root' tid = do
+  exists <- doesFileExist (root' </> "log.jsonl")
+  if not exists
+    then pure (Right ())
+    else do
+      content <- readFileStrict (root' </> "log.jsonl")
+      let ids = map (snd . stamp) (postsOf content)
+      pure $
+        if tid `elem` ids
+          then Right ()
+          else Left ("no post with id " <> T.pack (show tid) <> " — threads attach to an existing post")
 
 postCmd :: Parser BusCommand
 postCmd = do
@@ -206,7 +249,7 @@ postCmd = do
     many
       ( option
           (T.pack <$> str)
-          (long "to" <> metavar "NAME" <> help "Recipient name (repeatable)")
+          (long "to" <> metavar "NAME" <> help "Recipient name (repeatable); refused beside --channel, which is the whole address")
       )
   bodyText <-
     optional
@@ -214,12 +257,14 @@ postCmd = do
           (T.pack <$> str)
           (long "body" <> metavar "TEXT" <> help "Post body")
       )
+  thr <- threadOpt
+  chan <- channelOpt
   viaDaemon <-
     switch
       ( long "via-daemon"
           <> help "Submit to the stamping daemon instead of self-stamping"
       )
-  pure (PostCommand root fromName toNames bodyText viaDaemon)
+  pure (PostCommand root fromName toNames bodyText thr chan viaDaemon)
 
 watchCmd :: Parser BusCommand
 watchCmd = WatchCommand <$> rootOpt <*> namesArg
@@ -334,8 +379,7 @@ daemonCmd = DaemonCommand <$> rootOpt
 busParser :: Parser BusCommand
 busParser =
   subparser
-    ( command "say" (info (sayCmd <**> helper) (progDesc "Say something on the bus; --thread carries reply ancestry (deck defaults: --from runner)"))
-        <> command "post" (info (postCmd <**> helper) (progDesc "Post flags or JSON; flag posts are roots, while JSON may carry thread ancestry"))
+    ( command "post" (info (postCmd <**> helper) (progDesc "Post flags or JSON; --thread carries reply ancestry, --channel names the channel; the body is --body or piped on stdin"))
         <> command "watch" (info (watchCmd <**> helper) (progDesc "Watch the log for posts addressed to NAMEs"))
         <> command "read" (info (readCmd <**> helper) (progDesc "Read posts addressed to NAMEs, or a thread by id"))
         <> command "inbox" (info (inboxCmd <**> helper) (progDesc "Print unread posts addressed to NAME; --mark-read advances .cursor-NAME to the last printed id"))
@@ -354,8 +398,8 @@ busParser =
 -- ---------------------------------------------------------------------------
 
 runBusCommand :: BusCommand -> IO ()
-runBusCommand (SayCommand root fromName toNames thr body) = runSay root fromName toNames thr body
-runBusCommand (PostCommand root mfrom mto mbody viaDaemon) = runPost root mfrom mto mbody viaDaemon
+runBusCommand (PostCommand root mfrom mto mbody mthr mchan viaDaemon) =
+  runPost root mfrom mto mbody mthr mchan viaDaemon
 runBusCommand (WatchCommand root names) = runWatch root names
 runBusCommand (ReadCommand root names since thr depth) = runRead root names since thr depth
 runBusCommand (InboxCommand root name markRead depth) = runInbox root name markRead depth
@@ -370,7 +414,7 @@ runBusCommand (StatusCommand root threshold live depth) = runStatus root thresho
 runBusCommand (DaemonCommand root) = runDaemon @Text root
 
 -- ---------------------------------------------------------------------------
--- act: say / post
+-- act: post
 -- ---------------------------------------------------------------------------
 
 -- | Resolve the bus root: @FREE_AGENT_BUS_ROOT@ wins when @--root@ is the
@@ -405,58 +449,69 @@ requireBus root = do
 
 -- | One command on the act path: body as words or on stdin, sender and
 -- recipients defaulted, thread optional.
-runSay :: FilePath -> Text -> [Text] -> Maybe PostId -> [Text] -> IO ()
-runSay root fromName toNames thr bodyWords = do
+runPost :: FilePath -> Maybe Text -> [Text] -> Maybe Text -> Maybe PostId -> Maybe Text -> Bool -> IO ()
+runPost root mfrom mto mbody mthr mchan viaDaemon = do
   root' <- resolveRoot root
-  when (any T.null toNames) $ do
-    TIO.hPutStrLn stderr "🔴 say: empty recipient name — omit --to to post unaddressed (visible in the log, delivered to no seat)"
+  -- An addressee beside a channel would be written and then ignored; refuse it
+  -- here, where the flags are visible, rather than let the log carry a
+  -- delivery that cannot happen.
+  forM_ (addressConflict mchan mto) $ \why -> do
+    TIO.hPutStrLn stderr why
     exitFailure
-  bodyText <- case bodyWords of
-    (w : _) -> pure (T.unwords (w : drop 1 bodyWords))
-    [] -> do
-      tty <- hIsTerminalDevice stdin
-      if tty
-        then do
-          TIO.hPutStrLn stderr "🔴 say: nothing to post — pass BODY as arguments or pipe it on stdin"
-          exitFailure
-        else T.strip <$> TIO.getContents
-  when (T.null bodyText) $ do
-    TIO.hPutStrLn stderr "🔴 say: empty body"
-    exitFailure
-  -- A thread attaches to a post that exists. Ids are append-order, so a
-  -- parent missing at write time is a typo, not a post still to come; the
-  -- log's tolerance for the dangling link stays on the raw JSON path, which
-  -- is the caller's own statement.
-  forM_ thr $ \tid -> do
-    exists <- doesFileExist (root' </> "log.jsonl")
-    when exists $ do
-      content <- readFileStrict (root' </> "log.jsonl")
-      let ids = map (snd . stamp) (postsOf content)
-      unless (tid `elem` ids) $ do
-        TIO.hPutStrLn stderr ("🔴 say: no post with id " <> T.pack (show tid) <> " — threads attach to an existing post")
-        exitFailure
-  stored <- postChecked root' (mkPost fromName toNames bodyText) {thread = maybe [] pure thr}
-  TIO.putStrLn (frameStored stored)
-
-runPost :: FilePath -> Maybe Text -> [Text] -> Maybe Text -> Bool -> IO ()
-runPost root mfrom mto mbody viaDaemon = do
-  root' <- resolveRoot root
-  p <- case (mfrom, mbody) of
-    (Just fromName, Just bodyText) -> do
+  -- Two modes, chosen by `--from`: the flag mode (the body is `--body` or piped
+  -- stdin) and the JSON mode (a whole post line on stdin, which is the caller's
+  -- own statement of ancestry and channel). The old positional-body @say@ body
+  -- path lives here, so a caller that pipes text keeps working with one word
+  -- changed.
+  built <- case mfrom of
+    Just fromName -> do
       when (any T.null mto) $ do
         TIO.hPutStrLn stderr "🔴 post: empty recipient name — omit --to to post unaddressed (visible in the log, delivered to no seat)"
         exitFailure
-      pure (mkPost fromName mto bodyText)
-    (Nothing, Nothing) -> do
-      line <- TIO.getLine
-      case parsePost line of
+      bodyText <- case mbody of
+        Just b -> do
+          -- A body named twice is ambiguous: refuse rather than silently drop
+          -- the pipe. A terminal on stdin is not a second body.
+          tty <- hIsTerminalDevice stdin
+          piped <- if tty then pure "" else T.strip <$> TIO.getContents
+          unless (T.null piped) $ do
+            TIO.hPutStrLn stderr "🔴 post: stdin and --body both name a body — pass one"
+            exitFailure
+          pure b
         Nothing -> do
-          TIO.putStrLn "🔴 invalid post JSON"
-          exitFailure
-        Just p -> pure p
-    _ -> do
-      TIO.putStrLn "🔴 post requires either --from and --body flags or JSON on stdin"
+          tty <- hIsTerminalDevice stdin
+          if tty
+            then do
+              TIO.hPutStrLn stderr "🔴 post: nothing to post — pass --body TEXT or pipe the body on stdin"
+              exitFailure
+            else T.strip <$> TIO.getContents
+      when (T.null bodyText) $ do
+        TIO.hPutStrLn stderr "🔴 post: empty body"
+        exitFailure
+      pure (mkPost fromName mto bodyText)
+    Nothing -> case mbody of
+      Just _ -> do
+        TIO.putStrLn "🔴 post requires either --from (with --body or a piped body) or JSON on stdin"
+        exitFailure
+      Nothing -> do
+        line <- TIO.getLine
+        case parsePost line of
+          Nothing -> do
+            TIO.putStrLn "🔴 invalid post JSON"
+            exitFailure
+          Just p -> pure p
+  forM_ mchan $ \c ->
+    when (T.null c) $ do
+      TIO.hPutStrLn stderr "🔴 post: empty channel name — omit --channel to address by --to"
       exitFailure
+  forM_ mthr $ \tid -> do
+    verdict <- checkThreadId root' tid
+    case verdict of
+      Left why -> do
+        TIO.hPutStrLn stderr ("🔴 post: " <> why)
+        exitFailure
+      Right () -> pure ()
+  let p = applyPostFlags mthr mchan built
   stored <-
     if viaDaemon
       then do
@@ -717,15 +772,19 @@ readyWarnings posts =
     warning stray offer =
       let strayId = T.pack (show (snd (stamp stray)))
           offerId = T.pack (show (snd (stamp offer)))
-          kind = T.takeWhile (not . (`elem` [' ', '\n', '\r', '\t'])) (T.stripStart (body (stamped stray)))
+          kind = postKind stray
        in "🟡 post "
             <> strayId
             <> " "
             <> kind
             <> " is outside every open offer component; resembles offer "
             <> offerId
-            <> " — re-post with bus say --thread "
+            <> " — re-post from the bus root you queried: bus post --from "
+            <> from (stamped stray)
+            <> " --thread "
             <> offerId
+            <> " --body "
+            <> kind
 
 -- | Absolute distance between post ids.  'Natural' subtraction is
 -- partial: @abs (a - b)@ throws underflow when @a < b@ instead of
@@ -780,10 +839,23 @@ taskComplete owner component =
 isRootTask :: Stamped Text -> Bool
 isRootTask stored = null (thread (stamped stored)) && hasKind "TASK" stored
 
+-- | The post's kind is its first meaningful word. A leading @@@name:@@@
+-- announcement address is stripped first: seats habitually write
+-- @\@fox: CLAIM · task 2@, and the kind is still the second word. Counted as
+-- a kind, the addressed claim would be invisible to 'taskOwner' and to the
+-- READY lint, which is the silence this strips away.
+postKind :: Stamped Text -> Text
+postKind stored = case T.words (dropAddress (body (stamped stored))) of
+  (w : _) -> w
+  [] -> ""
+  where
+    dropAddress t = case T.words t of
+      (w : rest) | isAddress w -> T.unwords rest
+      _ -> t
+    isAddress w = "@" `T.isPrefixOf` w && ":" `T.isSuffixOf` w && T.length w > 2
+
 hasKind :: Text -> Stamped Text -> Bool
-hasKind kind stored = case T.words (body (stamped stored)) of
-  (actual : _) -> actual == kind
-  [] -> False
+hasKind kind stored = postKind stored == kind
 
 parseBlockLink :: Text -> Maybe (PostId, PostId)
 parseBlockLink text = case T.words text of

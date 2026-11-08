@@ -56,15 +56,15 @@ new_root() {
   printf '  root   %s\n' "$ROOT"
 }
 
-# say FROM TO BODY... — TO is passed verbatim so a walk can test '', which is not
+# post FROM TO BODY... — TO is passed verbatim so a walk can test '', which is not
 # the same as omitting the flag.
-say() {
+post() {
   local from="$1" to="$2"
   shift 2
   if [ "$to" = "-" ]; then
-    printf '%s' "$*" | "$FA" bus say -r "$ROOT" --from "$from" >/dev/null
+    printf '%s' "$*" | "$FA" bus post -r "$ROOT" --from "$from" >/dev/null
   else
-    printf '%s' "$*" | "$FA" bus say -r "$ROOT" --from "$from" --to "$to" >/dev/null
+    printf '%s' "$*" | "$FA" bus post -r "$ROOT" --from "$from" --to "$to" >/dev/null
   fi
 }
 

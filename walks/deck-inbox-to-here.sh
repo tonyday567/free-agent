@@ -6,10 +6,10 @@ source "$(dirname "$0")/deck-lib"
 
 step "four posts to the deck, no cursor"
 new_root inbox
-say alice runner "one"
-say alice runner "two"
-say alice runner "three"
-say alice runner "four"
+post alice runner "one"
+post alice runner "two"
+post alice runner "three"
+post alice runner "four"
 
 step "M on the second post clears through it and keeps the rest unread"
 out=$(deck_eval '(progn

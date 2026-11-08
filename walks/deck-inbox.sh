@@ -6,9 +6,9 @@ source "$(dirname "$0")/deck-lib"
 
 step "two posts for the deck and one for somebody else, with no cursor"
 new_root inbox
-say alice runner "first"
-say alice bob "not for the deck"
-say alice runner "second"
+post alice runner "first"
+post alice bob "not for the deck"
+post alice runner "second"
 
 step "fresh read creates no state; m consumes exactly the two printed posts"
 out=$(deck_eval '(progn

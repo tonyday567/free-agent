@@ -16,6 +16,7 @@
 module Main (main) where
 
 import Circuit.Agent (Name, Post (..), mkPost)
+import Data.Char (isAlphaNum)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.Mark (Mark (StandDown), markGlyph)
 import Control.Exception (finally)
@@ -46,8 +47,9 @@ import Free.Agent.Cli.Config
     parseDshConfig,
     parseHermesConfig,
     parseLlmConfig,
+    swallowedSeatOption,
   )
-import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurn, mapTurnIO, newDeliveryGrant, noteStrand, replyActIO, strandBlock, takeStrandNotes)
+import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurnIO, newDeliveryGrant, noteStrand, replyActIO, strandBlock, takeStrandNotes)
 import Free.Agent.Gateway
   ( GatewayClient (..),
     GatewayConfig (..),
@@ -55,7 +57,7 @@ import Free.Agent.Gateway
     gatewayHost,
     openGateway,
   )
-import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesCli, hostResponse, processHost)
+import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesCli, processHost)
 import Free.Agent.Refresh (preserveForRefresh, refreshDue, refreshRequestPath, writeRefreshRequest)
 import Free.Agent.Usage (readHermesUsage, readUsageIdentity, renderUsageIdentity)
 import Options.Applicative
@@ -337,40 +339,83 @@ buildQuiesce :: Maybe Int -> Maybe Name -> Maybe QuiesceConfig
 buildQuiesce Nothing _ = Nothing
 buildQuiesce (Just n) mp = Just (QuiesceConfig n (fromMaybe "pitboss" mp) 1000000)
 
--- | Parse a leading @name: prefix from a reply body.
-routeReply :: Post Text -> Post Text
-routeReply p =
-  case T.stripPrefix "@" (body p) of
-    Nothing -> p
-    Just rest ->
-      let (name, afterName) = T.break (== ':') rest
-          name' = T.strip name
-       in if T.null name' || T.null afterName
-            then p
-            else p {to = [name'], body = T.strip (T.drop 1 afterName)}
-
--- | Decorate an incoming post body with its sender.
-decorateSender :: Stamped Text -> Stamped Text
-decorateSender stored =
+-- | Decorate incoming mail with the ids available for deliberate citation and
+-- its senders. A batch is rendered without dropping or reordering any post.
+decoratePost :: Stamped Text -> Stamped Text
+decoratePost stored =
   let p = stamped stored
-   in stored {stamped = p {body = from p <> ": " <> body p}}
+      pid = T.pack (show (snd (stamp stored)))
+   in stored {stamped = p {body = "[post " <> pid <> "] " <> from p <> ": " <> body p}}
 
-runSeat :: Int -> Text -> [Name] -> FilePath -> Maybe QuiesceConfig -> (Stamped Text -> IO (Turn [Post Text])) -> IO ()
+renderMail :: [Stamped Text] -> Text
+renderMail = T.intercalate "\n\n" . map (body . stamped . decoratePost)
+
+batchBoundary :: [Stamped Text] -> Stamped Text
+batchBoundary = last
+
+runSeat :: Int -> Text -> [Name] -> FilePath -> Maybe QuiesceConfig -> ([Stamped Text] -> IO (Turn [Post Text])) -> IO ()
 runSeat budget agentName names root mQuiesce handle = do
   grant <- newDeliveryGrant budget
   runAgentLoop agentName names root mQuiesce grant handle
 
-hostTurn :: Host -> Stamped Text -> IO (Turn [Post Text])
-hostTurn host =
+-- | A host seat's turn: the publication rule the model handlers use, and the
+-- same stranded-reply note. The note is a harness fact for the next delivery,
+-- so a surface whose next turn cannot read prose (a script) still carries it
+-- rather than needing a second rule about which seats are told.
+-- | A turn that published nothing but carries an @name:@ somewhere that is
+-- not a line start has lost its address rather than its intent: the parser
+-- reads a non-leading address as an inline mention, so the reply is dropped
+-- whole and silently. The hint is printed only when the turn published
+-- nothing, which is the one case where a seat has no other signal and where a
+-- warning cannot add noise to a productive turn.
+midLineAddress :: Text -> Maybe (Int, Text)
+midLineAddress t = go 0 t
+  where
+    go off s =
+      let (pre, rest) = T.breakOn "@" s
+       in if T.null rest
+            then Nothing
+            else
+              let after = T.drop 1 rest
+                  (nm, colon) = T.breakOn ":" after
+                  named =
+                    not (T.null nm)
+                      && T.length nm <= 32
+                      && T.all (\c -> isAlphaNum c || c == '-' || c == '_') nm
+               in if named && not (T.null colon) && not (T.null pre)
+                    then Just (off + T.length pre, nm)
+                    else go (off + T.length pre + 1) after
+
+hostTurn :: FilePath -> Host -> [Stamped Text] -> IO (Turn [Post Text])
+hostTurn root host storedBatch = do
+  notes <- takeStrandNotes root (hostName host)
   deliverTo
-    ( \cause _ ->
+    ( \_ input ->
         pure
           Invocation
-            { runInvocation = TurnResponse <$> hostResponse host (stamped cause),
+            { runInvocation = do
+                outputs <- hostRun host [input]
+                mapM_ (noteStrand root (hostName host) (batchBoundary storedBatch)) outputs
+                posts <- concat <$> mapM (replyActIO (hostName host)) outputs
+                case posts of
+                  [] -> case foldr (\o acc -> acc <|> midLineAddress o) Nothing outputs of
+                    Just (off, nm) ->
+                      TIO.hPutStrLn stderr $
+                        "⚠ "
+                          <> hostName host
+                          <> ": nothing published — @"
+                          <> nm
+                          <> ": appears at character offset "
+                          <> T.pack (show off)
+                          <> ", not at the start of a line, so it read as a mention. Put the address first, or on its own line."
+                    Nothing -> pure ()
+                  _ -> pure ()
+                pure (TurnResponse posts),
               cancelInvocation = pure False
             }
     )
-    <*> pure ""
+    storedBatch
+    (strandBlock notes <> (if null notes then "" else "\n\n") <> renderMail storedBatch)
 
 runHermes :: Int -> HermesConfig -> IO ()
 runHermes = runHermesAuto Nothing Nothing
@@ -389,7 +434,7 @@ runHermesAuto threshold rebootFile budget cfg = do
       transcriptPath = root </> ".transcripts" </> T.unpack agentName <> ".jsonl"
       cli = hermesCli (hcModel cfg) (hcProvider cfg) (hcReasoning cfg) (hcYolo cfg) sessionFile
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
-      automaticRefresh stored =
+      automaticRefresh =
         case threshold of
           Nothing -> pure []
           Just limit ->
@@ -401,33 +446,30 @@ runHermesAuto threshold rebootFile budget cfg = do
                 | not (refreshDue limit tokens) -> pure []
                 | otherwise -> do
                     writeRefreshRequest root agentName tokens
-                    let cause = stamped stored
                     pure
                       -- Control form: the glyph alone on the first line
                       -- stands the seat down for the refresh; the reason
-                      -- rides on the line below it.
-                      [ ( mkPost
-                            agentName
-                            [from cause]
-                            (markGlyph StandDown <> "\nautomatic refresh at " <> T.pack (show tokens) <> " prompt tokens")
-                        )
-                          { channel = channel cause
-                          }
+                      -- rides on the line below it. A batch has no single
+                      -- sender or channel to inherit for this harness act.
+                      [ mkPost
+                          agentName
+                          []
+                          (markGlyph StandDown <> "\nautomatic refresh at " <> T.pack (show tokens) <> " prompt tokens")
                       ]
-      handle stored = do
+      handle storedBatch = do
         isFirst <- readIORef firstDelivery
         writeIORef firstDelivery False
         strandNotes <- takeStrandNotes root agentName
-        let delivered = decorateSender stored
+        let boundary = batchBoundary storedBatch
             note = if isFirst then rebootNote else ""
-            prompt = framedPrompt <> note <> strandBlock strandNotes <> "\n\nUser messages:\n" <> body (stamped delivered)
-        turn <- cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
+            prompt = framedPrompt <> note <> strandBlock strandNotes <> "\n\nUser messages:\n" <> renderMail storedBatch
+        turn <- cliDeliverTo cli transcriptPath (snd (stamp boundary)) prompt
         pure $
           mapTurnIO
             ( \response -> do
-                posts <- replyActIO agentName stored response
-                noteStrand root agentName stored response
-                refreshPosts <- automaticRefresh stored
+                posts <- replyActIO agentName response
+                noteStrand root agentName boundary response
+                refreshPosts <- automaticRefresh
                 pure (posts <> refreshPosts)
             )
             turn
@@ -481,17 +523,17 @@ runKimi budget cfg = do
       transcriptPath = kcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
       cli = kimiCli (kcModel cfg) (kcProvider cfg) sessionFile
       mQuiesce = buildQuiesce (kcQuiesce cfg) (kcPitboss cfg)
-      handle stored = do
+      handle storedBatch = do
         strandNotes <- takeStrandNotes (kcRoot cfg) agentName
-        let delivered = decorateSender stored
-            prompt = systemPrompt <> strandBlock strandNotes <> "\n\nUser message:\n" <> body (stamped delivered)
+        let boundary = batchBoundary storedBatch
+            prompt = systemPrompt <> strandBlock strandNotes <> "\n\nUser messages:\n" <> renderMail storedBatch
         mapTurnIO
           ( \response -> do
-              posts <- replyActIO agentName stored response
-              noteStrand (kcRoot cfg) agentName stored response
+              posts <- replyActIO agentName response
+              noteStrand (kcRoot cfg) agentName boundary response
               pure posts
           )
-          <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
+          <$> cliDeliverTo cli transcriptPath (snd (stamp boundary)) prompt
   createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
   runSeat budget agentName names (kcRoot cfg) mQuiesce handle
@@ -510,19 +552,19 @@ runDsh budget cfg = do
       sessionPath = dcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".sid"
       cli = dshCli (Just systemPrompt) (dcDshPatch cfg) (dcDshModelPatch cfg) sessionPath
       mQuiesce = buildQuiesce (dcQuiesce cfg) (dcPitboss cfg)
-      handle stored = do
+      handle storedBatch = do
         strandNotes <- takeStrandNotes (dcRoot cfg) agentName
-        let delivered = decorateSender stored
+        let boundary = batchBoundary storedBatch
             block = strandBlock strandNotes
-            message = body (stamped delivered)
+            message = renderMail storedBatch
             prompt = if T.null block then message else block <> "\n\n" <> message
         mapTurnIO
           ( \response -> do
-              posts <- replyActIO agentName stored response
-              noteStrand (dcRoot cfg) agentName stored response
+              posts <- replyActIO agentName response
+              noteStrand (dcRoot cfg) agentName boundary response
               pure posts
           )
-          <$> cliDeliverTo cli transcriptPath (snd (stamp stored)) prompt
+          <$> cliDeliverTo cli transcriptPath (snd (stamp boundary)) prompt
   createDirectoryIfMissing True (takeDirectory transcriptPath)
   TIO.putStrLn $ "   patch: " <> T.pack (dcDshPatch cfg)
   forM_ (dcDshModelPatch cfg) $ \p ->
@@ -560,7 +602,7 @@ runAcp budget cfg = do
         TIO.hPutStrLn stderr "🔴 acp: session/new returned no session id"
         exitFailure
     let host = acpHost agentName acpTurnMicros framedPrompt client sid
-        handle = fmap (mapTurn (map routeReply)) . hostTurn host . decorateSender
+        handle = hostTurn (acRoot cfg) host
     TIO.putStrLn $ "   protocol: acp (" <> T.pack (acAcpCommand cfg) <> ")"
     TIO.putStrLn $ "   session: " <> sid
     runSeat budget agentName names (acRoot cfg) mQuiesce handle
@@ -592,7 +634,7 @@ runLlm budget cfg = do
           mQuiesce = buildQuiesce (lcQuiesce cfg) (lcPitboss cfg)
       TIO.putStrLn $ "   base: " <> baseUrl bareCfg
       TIO.putStrLn $ "   model: " <> model bareCfg
-      runSeat budget agentName names (lcRoot cfg) mQuiesce (hostTurn host)
+      runSeat budget agentName names (lcRoot cfg) mQuiesce (hostTurn (lcRoot cfg) host)
 
 -- ---------------------------------------------------------------------------
 -- Gateway seat (hermes api_server)
@@ -610,7 +652,7 @@ runGateway budget cfg = do
   client <- openGateway gwCfg
   let host = gatewayHost agentName framedPrompt client
       mQuiesce = buildQuiesce (gcwQuiesce cfg) (gcwPitboss cfg)
-      handle = fmap (mapTurn (map routeReply)) . hostTurn host
+      handle = hostTurn (gcwRoot cfg) host
   TIO.putStrLn $ "   gateway: " <> gwBaseUrl gwCfg
   TIO.putStrLn $ "   session: " <> gcSessionId client
   runSeat budget agentName names (gcwRoot cfg) mQuiesce handle
@@ -626,4 +668,16 @@ runCommand budget cfg = do
       host = (processHost agentName (ccCmd cfg) (ccArgs cfg)) {hostBodyMode = BodyWhole}
       mQuiesce = buildQuiesce (ccQuiesce cfg) (ccPitboss cfg)
   TIO.putStrLn $ "   command: " <> T.pack (ccCmd cfg) <> " " <> T.intercalate " " (map T.pack (ccArgs cfg))
-  runSeat budget agentName names (ccRoot cfg) mQuiesce (hostTurn host)
+  case swallowedSeatOption (ccArgs cfg) of
+    [] -> pure ()
+    shadowed ->
+      -- the warning shares the banner's stream: a reader under `> out 2> err`
+      -- otherwise gets the explanation and not the line it explains
+      TIO.putStrLn $
+        "⚠ "
+          <> T.intercalate ", " (map T.pack shadowed)
+          <> " came after `--`, so it is the command's argv and the seat never saw "
+          <> (if length shadowed == 1 then "it." else "them.")
+          <> " Put the seat's own flags before --cmd: `--quiesce 2 --cmd /bin/sh -- -c ...`"
+
+  runSeat budget agentName names (ccRoot cfg) mQuiesce (hostTurn (ccRoot cfg) host)

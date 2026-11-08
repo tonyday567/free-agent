@@ -6,9 +6,9 @@ source "$(dirname "$0")/deck-lib"
 
 step "one public post and two addressed posts"
 new_root filter
-say alice - "public"
-say alice yin "for yin"
-say alice bob "for bob"
+post alice - "public"
+post alice yin "for yin"
+post alice bob "for bob"
 
 step "filtering by either name never hides the public post"
 out=$(deck_eval '(progn

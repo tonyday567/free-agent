@@ -9,7 +9,7 @@ source "$(dirname "$0")/lib.sh"
 
 step "one old post, then a watcher for yung"
 new_root watch
-say alice yung "old"
+post alice yung "old"
 out="$ROOT/watch.out"
 : >"$out"
 "$FA" bus watch -r "$ROOT" yung >"$out" 2>&1 &
@@ -26,8 +26,8 @@ assert_eq "the pre-watch post is not replayed" "0" \
   "$(wc -l <"$out" | tr -d ' ')"
 
 step "one new post for yung and one for bob"
-say alice yung "new"
-say alice bob "other"
+post alice yung "new"
+post alice bob "other"
 i=0
 while [ "$(wc -l <"$out" | tr -d ' ')" -lt 1 ] && [ "$i" -lt 40 ]; do
   sleep 0.25

@@ -18,6 +18,7 @@ module Free.Agent.Cli
     -- * Query
     cliDeliverTo,
     cliInterrupted,
+    cliCeiling,
 
     -- * Shard adapters
 
@@ -60,20 +61,20 @@ import Control.Concurrent
     readMVar,
     threadDelay,
   )
-import Control.Exception (IOException, SomeException, catch, onException, try)
+import Control.Exception (IOException, SomeException, catch, onException, throwIO, try)
 import Control.Monad (void, when)
 import Data.Aeson (FromJSON (parseJSON), decodeStrict, withObject, (.:!))
 import Data.ByteString qualified as BS
 import Data.Char (chr, ord)
 import Data.Foldable (for_)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.Maybe (listToMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
-import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo)
+import Free.Agent.Delivery (Invocation (..), Turn, TurnCeiling (..), TurnResult (..), deliverTo)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (-<.>))
@@ -349,15 +350,44 @@ cliMaxRetries = 3
 -- Exit 130 is SIGINT (128 + 2), and the CLI says so in words:
 -- @Operation interrupted: waiting for model response (N.Ns elapsed)@.
 --
--- Such an attempt is never retried.  The interruption is the client's own
--- signal, a resumed session inherits the cut-off turn, and every retry
--- appends another user message to a session that may still be held by the
--- interrupted turn.  Measured on seat @yang@, 31 Oct 2026: four attempts
--- reading 1,196s to 5,550s, each one resuming, each one ending in the same
--- interruption, with the public error reporting the session as the fault.
+-- The classification is the CLI's, the cause usually is not: the measured
+-- @\/\/net@ deaths of 5-6 Nov 2026 were macOS idle sleep outliving the host's
+-- session turn lease, which Hermes turns into an interrupted turn.  So this
+-- predicate names the class and the delivery policy decides recovery — see
+-- 'cliQueryWithDelivery', which resumes nothing and retries the batch once in
+-- a fresh session.
 cliInterrupted :: ExitCode -> Text -> Bool
 cliInterrupted code raw =
   code == ExitFailure 130 || "Operation interrupted" `T.isInfixOf` raw
+
+-- | Was this invocation stopped at the host's own tool-iteration budget?
+--
+-- Hermes exits 2 both for a budget stop and for a turn that failed outright,
+-- so the exit code alone cannot separate them; its @--usage-file@ report can,
+-- and 'readSessionReport' carries the verdict @partial@ and @turn_exit_reason@
+-- into the raw evidence as @turn_partial:@ lines. A stop is terminal for the
+-- batch: the host spent the budget on the work and would spend it again on a
+-- replay, so 'cliQueryWithDelivery' raises 'TurnCeiling' instead of retrying
+-- and the runner commits the batch rather than re-invoking.
+cliCeiling :: ExitCode -> Text -> Bool
+cliCeiling code raw =
+  code == ExitFailure 2 && "\nturn_partial:true" `T.isInfixOf` raw
+
+-- | Fresh invocations allowed for one delivery.
+--
+-- The fresh path is the recovery environment: a cold start, the fallback after
+-- a stale session, and the retry after an interruption all land here. Two
+-- attempts means one interruption costs one extra invocation, and a second
+-- interruption in the same delivery stops rather than spinning.
+maxFreshAttempts :: Int
+maxFreshAttempts = 2
+
+-- | Pause before a fresh attempt that follows an interruption.
+--
+-- The interrupted turn may still be releasing its own state on the host; a
+-- beat keeps the recovery off its heels without turning the seat into a poller.
+cliInterruptPauseMicros :: Int
+cliInterruptPauseMicros = 250_000
 
 data CliControl = CliControl
   { cliActive :: MVar Bool,
@@ -441,24 +471,9 @@ cliQueryWithDelivery delivery mControl cli prompt = do
     -- bounded evidence either way.
     retryWithSession t0' sid (FailedAttempt n code raw elapsed) = do
       writeTranscript (TranscriptFailed, Just n) t0' code raw elapsed (Just sid)
+      ceilingExit n code raw
       if cliInterrupted code raw
-        then do
-          finishCli mControl
-          fail
-            ( "cliQuery: "
-                <> cliCommand cli
-                <> " was interrupted mid-turn (exit "
-                <> show code
-                <> ") at attempt "
-                <> show n
-                <> "; not retrying — a resumed session inherits the"
-                <> " interruption, and each retry appends a user message to a"
-                <> " session that may still be held by the interrupted turn;"
-                <> " session "
-                <> T.unpack sid
-                <> "; last output: "
-                <> T.unpack (T.take 400 raw)
-            )
+        then recoverInterrupted t0' sid (FailedAttempt n code raw elapsed)
         else
           if cliExhausted cli code raw
             then do
@@ -508,6 +523,29 @@ cliQueryWithDelivery delivery mControl cli prompt = do
                           if code' /= ExitSuccess
                             then retryWithSession t0' sid (FailedAttempt (n + 1) code' raw' elapsed')
                             else settle t0' code' raw' routedOut' elapsed'
+    -- Recovery from a host interruption: a where-block note, not a haddock section.
+    --
+    -- Resuming is not retried: a resumed session inherits the cut-off turn,
+    -- and each retry appends another user message to a session that may still
+    -- be held by it (seat @yang@, 31 Oct 2026: four resumed attempts reading
+    -- 1,196s to 5,550s, every one ending in the same interruption, with the
+    -- public error blaming the session).  The interruption is a host event with
+    -- no bearing on the batch — a lost session turn lease, a SIGINT on the seat
+    -- — so the batch is retried once, in a fresh session that cannot inherit
+    -- the turn, with the stored id dropped first so neither this seat nor the
+    -- next launch resumes the poisoned session.
+    --
+    -- Bounded by construction: the fresh attempt settles or fails and never
+    -- re-enters this ladder, so one interruption costs one extra invocation.
+    recoverInterrupted _ _sid (FailedAttempt _ _ _ _) = do
+      dropStoredSession
+      threadDelay cliInterruptPauseMicros
+      t1 <- getCurrentTime
+      freshAttempt 1 t1
+    dropStoredSession =
+      catch
+        (removeFile (cliSessionFile cli))
+        (\(_ :: IOException) -> pure ())
     run t0' mSid = do
       cancelled <- isCliCancelled mControl
       if cancelled
@@ -560,34 +598,81 @@ cliQueryWithDelivery delivery mControl cli prompt = do
       StderrMark
         | T.null (T.strip err) -> ""
         | otherwise -> "\n-- stderr --\n" <> err
-    fresh t0' = do
+    -- A fresh session is the recovery environment, so an interruption here is
+    -- retried in another fresh session — bounded, and never resuming. This is
+    -- the cold path (no stored session) as well as the fallback after a stale
+    -- one; both were fatal on the first exit 130 before the 5-6 Nov census.
+    fresh t0' = freshAttempt 1 t0'
+    freshAttempt n t0' = do
       (code, raw, routedOut, elapsed) <- run t0' Nothing
       cancelled <- isCliCancelled mControl
       if cancelled
         then cancelledTurn t0' code raw elapsed
-        else do
-          when (code /= ExitSuccess) $ do
-            finishCli mControl
-            if cliExhausted cli code raw
-              then
-                fail
-                  ( "cliQuery: "
-                      <> cliCommand cli
-                      <> " context exhausted on a fresh session (turn_end"
-                      <> " reason max-tokens); the prompt exceeds the window;"
-                      <> " last output: "
-                      <> T.unpack (T.takeEnd 400 raw)
-                  )
-              else
-                fail
-                  ( "cliQuery: "
-                      <> cliCommand cli
-                      <> " exited "
-                      <> show code
-                      <> ": "
-                      <> T.unpack (T.take 200 raw)
-                  )
-          settle t0' code raw routedOut elapsed
+        else
+          if code == ExitSuccess
+            then settle t0' code raw routedOut elapsed
+            else
+              if cliExhausted cli code raw
+                then do
+                  finishCli mControl
+                  fail
+                    ( "cliQuery: "
+                        <> cliCommand cli
+                        <> " context exhausted on a fresh session (turn_end"
+                        <> " reason max-tokens); the prompt exceeds the window;"
+                        <> " last output: "
+                        <> T.unpack (T.takeEnd 400 raw)
+                    )
+                else
+                  if cliInterrupted code raw && n < maxFreshAttempts
+                    then do
+                      writeTranscript (TranscriptFailed, Just n) t0' code raw elapsed Nothing
+                      threadDelay cliInterruptPauseMicros
+                      t1 <- getCurrentTime
+                      freshAttempt (n + 1) t1
+                    else do
+                      when (cliCeiling code raw) $
+                        writeTranscript (TranscriptFailed, Just n) t0' code raw elapsed Nothing
+                      ceilingExit n code raw
+                      finishCli mControl
+                      fail
+                        ( "cliQuery: "
+                            <> cliCommand cli
+                            <> if cliInterrupted code raw
+                              then
+                                " was interrupted on a fresh session (exit "
+                                  <> show code
+                                  <> ") at attempt "
+                                  <> show n
+                                  <> " of "
+                                  <> show maxFreshAttempts
+                                  <> "; not resuming — a resumed session inherits"
+                                  <> " the cut-off turn; last output: "
+                                  <> T.unpack (T.take 300 raw)
+                              else
+                                " exited "
+                                  <> show code
+                                  <> ": "
+                                  <> T.unpack (T.take 200 raw)
+                        )
+    -- A ceiling ends this batch's delivery: no transient retry, no fresh
+    -- session, no resume. The host spent its own call budget on the turn, so
+    -- a replay spends it again and can republish work the turn already did
+    -- outside the runner. The batch belongs to the runner's terminal policy.
+    ceilingExit n code raw =
+      when (cliCeiling code raw) $ do
+        finishCli mControl
+        throwIO (TurnCeiling (ceilingMessage n code raw))
+    ceilingMessage n code raw =
+      "cliQuery: "
+        <> T.pack (cliCommand cli)
+        <> " stopped at the tool-iteration ceiling at attempt "
+        <> T.pack (show n)
+        <> " (exit "
+        <> T.pack (show code)
+        <> "); the turn is not replayed and the batch is committed as a"
+        <> " terminal decision; last output: "
+        <> T.takeEnd 300 raw
     settle t0' code raw routedOut elapsed = do
       finishCli mControl
       let mSid' = cliSessionId cli raw
@@ -629,24 +714,51 @@ cliQueryWithDelivery delivery mControl cli prompt = do
       let (pid, path) = delivery
       writeAt (fromIntegral pid) path
 
-newtype SessionReport = SessionReport (Maybe Text)
+-- | The fields of a CLI's machine-readable run report that decide what
+-- happens to a batch. Hermes writes @completed@, @partial@, @interrupted@ and
+-- @turn_exit_reason@ into @--usage-file@ for exactly this purpose: a pipeline
+-- can tell an iteration-budget stop from an interruption without parsing
+-- stderr. Everything but the session id is optional, so a report from another
+-- CLI (or an older one) parses as an ordinary, non-ceiling turn.
+data SessionReport = SessionReport
+  { srSession :: Maybe Text,
+    srPartial :: Bool,
+    srInterrupted :: Bool,
+    srExitReason :: Maybe Text
+  }
 
 instance FromJSON SessionReport where
   parseJSON = withObject "CLI session report" $ \o ->
-    SessionReport <$> o .:! "session_id"
+    SessionReport
+      <$> o .:! "session_id"
+      <*> (fromMaybe False <$> o .:! "partial")
+      <*> (fromMaybe False <$> o .:! "interrupted")
+      <*> o .:! "turn_exit_reason"
 
 -- | Keep session bookkeeping in the raw evidence without adding it to the
 -- agent's response. A missing or malformed report yields no synthetic id.
+--
+-- The run verdict rides along for the same reason: 'cliCeiling' classifies a
+-- stopped turn from these lines, and the reply body never sees them.
 readSessionReport :: FilePath -> IO Text
 readSessionReport path =
   catch
     ( do
         contents <- BS.readFile path
-        pure $ case decodeStrict contents of
-          Just (SessionReport (Just sid)) -> "\nsession_id:" <> sid
-          _ -> ""
+        pure $ maybe "" reportNote (decodeStrict contents)
     )
     (\(_ :: IOException) -> pure "")
+  where
+    reportNote r =
+      maybe "" (("\nsession_id:" <>) . T.strip) (srSession r >>= nonBlank)
+        <> "\nturn_partial:"
+        <> boolText (srPartial r)
+        <> "\nturn_interrupted:"
+        <> boolText (srInterrupted r)
+        <> maybe "" (("\nturn_exit_reason:" <>) . T.strip) (srExitReason r >>= nonBlank)
+    nonBlank t = if T.null (T.strip t) then Nothing else Just t
+    boolText True = "true"
+    boolText False = "false"
 
 readStoredSession :: FilePath -> IO (Maybe Text)
 readStoredSession path = do

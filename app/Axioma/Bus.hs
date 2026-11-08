@@ -9,13 +9,13 @@ module Axioma.Bus
 where
 
 import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
-import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, loop, mkChannelPost, tape, watch)
+import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, deliversTo, loop, mkChannelPost, tape, watch)
 import Circuit.Agent.Framing (Stamped, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph, markOf)
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, bracket, evaluate, try)
 import Data.Foldable (traverse_)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -24,8 +24,8 @@ import Data.Time (addUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (openBus, postLocal, readFileStrict, runSeatBus)
-import Free.Agent.Bus.Cli (Depth (..), hbVerdict, readyPosts, readyWarnings, runStatus)
-import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, writeCursor)
+import Free.Agent.Bus.Cli (BusCommand (..), Depth (..), addressConflict, applyPostFlags, busParser, checkThreadId, hbVerdict, readyPosts, readyWarnings, runBusCommand, runStatus)
+import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, readTransaction, writeCursor, writeTransaction)
 import Free.Agent.Bus.Heartbeat (HbState (..), hbPath, parseHb, readHeartbeat, writeHeartbeat)
 import Free.Agent.BusStats
   ( Classification (..),
@@ -40,6 +40,7 @@ import Free.Agent.BusStats
 import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, newDeliveryGrant, replyAct)
 import Free.Agent.Host (hostShard, mkHost)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
+import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, info, renderFailure)
 import System.Directory (removePathForcibly)
 import System.FilePath ((</>))
 import System.IO (IOMode (WriteMode), hClose, hFlush, stdout, withFile)
@@ -53,7 +54,7 @@ ioTurn action =
     ()
     ""
 
-runTestAgent :: Text -> [Text] -> FilePath -> Maybe QuiesceConfig -> (Stamped Text -> IO (Turn [Post Text])) -> IO ()
+runTestAgent :: Text -> [Text] -> FilePath -> Maybe QuiesceConfig -> ([Stamped Text] -> IO (Turn [Post Text])) -> IO ()
 runTestAgent agentName names root mQuiesce handle = do
   grant <- newDeliveryGrant 100
   runAgentLoop agentName names root mQuiesce grant handle
@@ -402,6 +403,40 @@ busTopic = do
             && "offer 30" `T.isInfixOf` warning
             && "--thread 30" `T.isInfixOf` warning
         _ -> False
+    assert "an addressed outside CLAIM is a claim, not a silent no-op" $
+      case readyWarnings [offer, stored 36 "mucho" ["moka"] [] "@moka: CLAIM · parcel alpha"] of
+        [warning] ->
+          "post 36" `T.isInfixOf` warning
+            && "offer 30" `T.isInfixOf` warning
+            && "--thread 30" `T.isInfixOf` warning
+        _ -> False
+    assert "the READY remedy names a command the same build has" $
+      case readyWarnings [offer, claimOutside] of
+        [warning] ->
+          "bus post --from mucho --thread 30 --body CLAIM" `T.isInfixOf` warning
+            && not ("bus say" `T.isInfixOf` warning)
+    assert "the READY remedy says where to stand, since the default root is the cwd" $
+      case readyWarnings [offer, claimOutside] of
+        [warning] -> "from the bus root you queried" `T.isInfixOf` warning
+        _ -> False
+
+  -------------------------------------------------------------------------
+  -- address conflict: a channel beside an addressee is refused by name,
+  -- because delivery follows the channel and the addressee would vanish.
+  -------------------------------------------------------------------------
+  do
+    assert "a channel beside an addressee is refused, naming both" $
+      case addressConflict (Just "card:loom/runner-ux.md") ["scully"] of
+        Just why ->
+          "card:loom/runner-ux.md" `T.isInfixOf` why
+            && "scully" `T.isInfixOf` why
+            && "🔴" `T.isInfixOf` why
+        Nothing -> False
+    assert "a channel alone is an address" $ addressConflict (Just "card:x") [] == Nothing
+    assert "an addressee alone is an address" $ addressConflict Nothing ["scully"] == Nothing
+    assert "an empty --to list beside a channel is no address" $
+      addressConflict (Just "card:x") ["", ""] == Nothing
+    assert "an empty channel is no address" $ addressConflict (Just "") ["scully"] == Nothing
 
   -------------------------------------------------------------------------
   -- READY lint distance: a stray below its resembling offers must not
@@ -601,16 +636,11 @@ busTopic = do
     removePathForcibly root
 
   -------------------------------------------------------------------------
-  -- Reply ancestry (M1a): every post produced in response to a delivery
-  -- cites that delivery. runAgentLoop posts handler replies as-is —
-  -- these oracles pin the thread edge on the production path.
-  -- Counterexample under the old code: thread == [].
+  -- Explicit post acts (M1a): runAgentLoop adds no inferred cause or ancestry.
+  -- A handler that deliberately sets a thread keeps it; Q7 pins that path.
   -------------------------------------------------------------------------
-  putStrLn "reply ancestry (M1a)"
+  putStrLn "explicit post acts (M1a)"
 
-  -- A handler reply cites the delivered ask. The seat starts first; the
-  -- asks are planted after (a cold-boot cursor would skip pre-planted
-  -- history — production seats do not answer the past).
   do
     root <- tempRoot "free-agent-m1a-ancestry"
     let path = root </> "log.jsonl"
@@ -629,8 +659,8 @@ busTopic = do
           ["m1a"]
           root
           Nothing
-          ( \stored ->
-              ioTurn (pure [mkPost "m1a" [from (stamped stored)] ("ack: " <> body (stamped stored))])
+          ( \storedBatch ->
+              ioTurn (pure [mkPost "m1a" [from (stamped stored)] ("ack: " <> body (stamped stored)) | stored <- storedBatch])
           )
           >> putMVar done ()
     _ <- plant
@@ -638,40 +668,157 @@ busTopic = do
     content <- TIO.readFile path
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "m1a"]
-    assert "M1a a runAgentLoop reply cites the delivered ask's id" $
+    assert "M1a runAgentLoop does not infer ancestry for an explicit post act" $
       case replies of
-        [r] -> body r == "ack: ask" && thread r == [0]
+        [r] -> body r == "ack: ask" && thread r == []
         _ -> False
     removePathForcibly root
 
-  -- A handler exception produces a 🔴 citing the ask.
+  -------------------------------------------------------------------------
+  -- Whole-batch delivery and transaction recovery over real bus files.
+  -------------------------------------------------------------------------
+  putStrLn "batch delivery and transaction recovery"
+
+  -- Two backlog posts cause one quiet turn. After its cursor commits, one live
+  -- post causes a second turn whose batch is a singleton. Neither turn posts.
   do
-    root <- tempRoot "free-agent-m1a-escalation"
-    let path = root </> "log.jsonl"
-        plant = do
-          _ <- postLocal root (mkPost "human" ["m1x"] "boom-ask")
-          postLocal root (mkPost "human" ["m1x"] (markGlyph Landed))
-    -- Pin the cursor to 0 up front (the Q7 idiom; see the ancestry test).
-    writeCursor root "m1x" 0
+    root <- tempRoot "free-agent-batch-quiet"
+    writeCursor root "batch" 0
+    _ <- postLocal root (mkPost "human" ["batch"] "one")
+    _ <- postLocal root (mkPost "human" ["batch"] "two")
+    seen <- newIORef ([] :: [[PostId]])
     done <- newEmptyMVar
     _ <-
       forkIO $
-        runTestAgent "m1x" ["m1x"] root Nothing (\_ -> ioTurn (error "handler exploded"))
+        runTestAgent
+          "batch"
+          ["batch"]
+          root
+          Nothing
+          ( \storedBatch -> do
+              modifyIORef' seen (map (snd . stamp) storedBatch :)
+              ioTurn (pure [])
+          )
           >> putMVar done ()
-    _ <- plant
+    let awaitCursor target remaining = do
+          current <- readCursor root "batch"
+          if current == target
+            then pure ()
+            else
+              if remaining <= (0 :: Int)
+                then error "timed out waiting for the quiet batch cursor"
+                else threadDelay 10000 >> awaitCursor target (remaining - 1)
+    awaitCursor 2 500
+    _ <- postLocal root (mkPost "human" ["batch"] "three")
+    _ <- postLocal root (mkPost "human" ["batch"] (markGlyph Landed))
     takeMVar done
-    content <- TIO.readFile path
+    batches <- reverse <$> readIORef seen
+    cursor <- readCursor root "batch"
+    transaction <- readTransaction root "batch"
+    content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
-        escalations =
-          [ stamped s
-          | s <- parsed,
-            from (stamped s) == "m1x",
-            maybe False isEscalate (markOf (stamped s))
-          ]
-    assert "M1a a handler failure produces a 🔴 citing the ask" $
-      case escalations of
-        [e] -> thread e == [0] && "handler exploded" `T.isInfixOf` body e
-        _ -> False
+        publications = [stamped s | s <- parsed, from (stamped s) == "batch"]
+    assert "backlog drains into one turn and live singleton delivery is a batch of one" $
+      batches == [[0, 1], [2]]
+    assert "quiet turns write the transaction before advancing past the batch" $
+      transaction == Just 3 && cursor == 4 && null publications
+    removePathForcibly root
+
+  -- A failed delivery leaves no commit evidence and the retry is handed the
+  -- same whole batch. A batch that fails twice is committed as a skip instead
+  -- (Axioma.Interrupt Z2 owns that witness), so what is measured here is the
+  -- atomicity of the attempts made before that decision.
+  do
+    root <- tempRoot "free-agent-batch-retry"
+    writeCursor root "recover" 0
+    _ <- postLocal root (mkPost "human" ["recover"] "one")
+    _ <- postLocal root (mkPost "human" ["recover"] "two")
+    _ <- postLocal root (mkPost "human" ["recover"] (markGlyph Landed))
+    seen <- newIORef ([] :: [[PostId]])
+    attempts <- newIORef (0 :: Int)
+    afterFailure <- newIORef (Nothing :: Maybe (PostId, Maybe PostId))
+    done <- newEmptyMVar
+    _ <-
+      forkIO $
+        runTestAgent
+          "recover"
+          ["recover"]
+          root
+          Nothing
+          ( \storedBatch -> do
+              modifyIORef' seen (map (snd . stamp) storedBatch :)
+              n <- readIORef attempts
+              writeIORef attempts (n + 1)
+              if n == 0
+                then ioTurn (error "handler exploded")
+                else do
+                  -- What the failed attempt left behind, read before the retry
+                  -- touches anything.
+                  c <- readCursor root "recover"
+                  t <- readTransaction root "recover"
+                  writeIORef afterFailure (Just (c, t))
+                  ioTurn (pure [])
+          )
+          >> putMVar done ()
+    takeMVar done
+    batches <- reverse <$> readIORef seen
+    tries <- readIORef attempts
+    left <- readIORef afterFailure
+    cursor <- readCursor root "recover"
+    transaction <- readTransaction root "recover"
+    assert "a failed delivery leaves the batch and no commit evidence behind" $
+      left == Just (0, Nothing) && tries == 2
+    assert "the retry is presented the same whole batch" $
+      batches == [[0, 1], [0, 1]]
+    assert "the retried batch then commits once, transaction before cursor" $
+      cursor == 3 && transaction == Just 2
+    -- A completed batch is not presented again: the only new post is the
+    -- control mark that stops the loop.
+    _ <- postLocal root (mkPost "human" ["recover"] (markGlyph Landed))
+    restarted <- newEmptyMVar
+    _ <-
+      forkIO $
+        runTestAgent
+          "recover"
+          ["recover"]
+          root
+          Nothing
+          ( \storedBatch -> do
+              modifyIORef' seen (map (snd . stamp) storedBatch :)
+              ioTurn (pure [])
+          )
+          >> putMVar restarted ()
+    takeMVar restarted
+    batchesAfter <- reverse <$> readIORef seen
+    assert "a completed batch is not presented again on restart" $
+      batchesAfter == [[0, 1], [0, 1]]
+    removePathForcibly root
+
+  -- This is the exact durable state left by a crash after .transaction and
+  -- before the cursor write: recovery finishes the cursor without a new turn.
+  do
+    root <- tempRoot "free-agent-transaction-recovery"
+    writeCursor root "marked" 0
+    _ <- postLocal root (mkPost "human" ["marked"] "one")
+    _ <- postLocal root (mkPost "human" ["marked"] "two")
+    _ <- postLocal root (mkPost "human" ["marked"] (markGlyph Landed))
+    writeTransaction root "marked" 2
+    invocations <- newIORef (0 :: Int)
+    done <- newEmptyMVar
+    _ <-
+      forkIO $
+        runTestAgent
+          "marked"
+          ["marked"]
+          root
+          Nothing
+          (\_ -> ioTurn (modifyIORef' invocations (+ 1) >> pure []))
+          >> putMVar done ()
+    takeMVar done
+    invocationCount <- readIORef invocations
+    cursor <- readCursor root "marked"
+    assert "a transaction ahead of its cursor recovers without repeating the agent turn" $
+      invocationCount == 0 && cursor == 3
     removePathForcibly root
 
   -- An incoming 🔴 relayed to the pitboss cites the escalation it answers.
@@ -715,16 +862,15 @@ busTopic = do
   --
   -- The same index-citing seat runs through the pure calculus 'loop'
   -- (circuits-agent) and through the operational 'runAgentLoop'
-  -- (free-agent).  The pure seat cites its parent's log index; the
-  -- runner prepends the parent's file id; the B3 id-agreement makes
-  -- those the same number.  The final logs must be the SAME
-  -- [Post Text] once stamps are stripped — no modulo left in the
-  -- comparison.
+  -- (free-agent). Both handlers deliberately cite the parent's id; the
+  -- operational runner preserves that explicit ancestry without inferring
+  -- another cause. The final logs must be the SAME [Post Text] once stamps
+  -- are stripped — no modulo left in the comparison.
   --
-  -- Counterexamples this pins: a runner that drops the ancestry edge
-  -- (pre-M1 shape, thread == []), a cold-boot cursor that skips the
-  -- script (the seat answers nothing), a seat that answers the halt
-  -- mark, and a silent pair of empty logs (the non-triviality clause).
+  -- Counterexamples this pins: a runner that drops or rewrites deliberate
+  -- ancestry, a cold-boot cursor that skips the script (the seat answers
+  -- nothing), a seat that answers the halt mark, and a silent pair of empty
+  -- logs (the non-triviality clause).
   -------------------------------------------------------------------------
   putStrLn "the seam (Q7)"
   do
@@ -779,8 +925,15 @@ busTopic = do
           [seatName]
           root
           Nothing
-          ( \stored ->
-              ioTurn (pure [mkPost seatName [from (stamped stored)] ("ack: " <> body (stamped stored))])
+          ( \storedBatch ->
+              ioTurn
+                ( pure
+                    [ (mkPost seatName [from (stamped stored)] ("ack: " <> body (stamped stored)))
+                        { thread = [snd (stamp stored)]
+                        }
+                    | stored <- storedBatch
+                    ]
+                )
           )
         putMVar done ()
     _ <- postLocal root b
@@ -808,23 +961,23 @@ busTopic = do
           ["quiet"]
           root
           Nothing
-          (\stored -> ioTurn (pure (replyAct "quiet" stored "LOCAL\nplain local response")))
+          (\_ -> ioTurn (pure (replyAct "quiet" "LOCAL\nplain local response")))
           >> putMVar done ()
-    causing <- postLocal root (mkPost "human" ["quiet"] "*(no post)*")
+    _ <- postLocal root (mkPost "human" ["quiet"] "*(no post)*")
     _ <- postLocal root (mkPost "human" ["quiet"] (markGlyph Landed))
     takeMVar done
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "quiet"]
     assert "LOCAL response text publishes no reply act" $ replies == []
-    let acts = replyAct "quiet" causing "@human: acknowledged"
-    assert "an addressed response is a cited explicit reply" $
+    let acts = replyAct "quiet" "@human: acknowledged"
+    assert "an addressed response publishes without inferred ancestry or channel" $
       case acts of
         [reply] ->
           to reply == ["human"]
             && body reply == "acknowledged"
-            && thread reply == [snd (stamp causing)]
-            && channel reply == channel (stamped causing)
+            && thread reply == []
+            && channel reply == Nothing
         _ -> False
     removePathForcibly root
 
@@ -851,4 +1004,61 @@ busTopic = do
     cursor <- readCursor root "bounded"
     assert "an exhausted runner grant invokes no backend and leaves the cursor" $
       invocationCount == 0 && cursor == 0
+    removePathForcibly root
+
+  putStrLn "bus post flags (--thread, --channel)"
+  do
+    root <- tempRoot "free-agent-post-flags"
+    _ <- postLocal root (mkPost "human" ["seat"] "parent")
+    -- The flag interface: both flags reach the command record.
+    let parseFlags = execParserPure defaultPrefs (info busParser mempty)
+    assert "post --thread and --channel reach the command record" $
+      case parseFlags ["post", "--root", root, "--from", "seat", "--body", "reply", "--thread", "0", "--channel", "ops"] of
+        Success (PostCommand _ (Just "seat") _ (Just "reply") (Just 0) (Just "ops") False) -> True
+        _ -> False
+    assert "post without the flags stays a root with no channel" $
+      case parseFlags ["post", "--root", root, "--from", "seat", "--body", "reply"] of
+        Success (PostCommand _ _ _ _ Nothing Nothing False) -> True
+        _ -> False
+    -- `bus say` was removed: post is the surviving command, and it takes the
+    -- piped body say used to take (the parser allows --from with no --body).
+    assert "bus say is gone from the interface" $
+      case parseFlags ["say", "--root", root, "--from", "seat", "--to", "human", "hello"] of
+        Failure _ -> True
+        _ -> False
+    assert "post accepts --from with no --body, which is the piped-body form" $
+      case parseFlags ["post", "--root", root, "--from", "seat", "--to", "human"] of
+        Success (PostCommand _ (Just "seat") ["human"] Nothing Nothing Nothing False) -> True
+        _ -> False
+    -- help names both flags, so the interface is discoverable, not just parsed.
+    assert "post --help names --thread and --channel" $
+      case parseFlags ["post", "--help"] of
+        Failure f ->
+          let (msg, _) = renderFailure f "free-agent"
+           in "--thread" `T.isInfixOf` T.pack msg && "--channel" `T.isInfixOf` T.pack msg
+        _ -> False
+    -- The effect: a flag post lands ancestry and a channel in the log, and the
+    -- channel addresses it (an empty --to still delivers to a subscriber).
+    runBusCommand (PostCommand root (Just "seat") [] (Just "reply") (Just 0) (Just "ops") False)
+    content <- TIO.readFile (root </> "log.jsonl")
+    let landed = map stamped (mapMaybe (unframeStored @Text) (T.lines content))
+        replyPost = last landed
+    assert "post --thread stores one ancestry edge to the named post" $
+      thread replyPost == [0]
+    assert "post --channel stores the channel" $ channel replyPost == Just "ops"
+    assert "a channel post addresses by channel: it delivers to a subscriber and not to its --to list" $
+      deliversTo replyPost ["ops"] && not (deliversTo replyPost ["seat"])
+    -- One rule for every post: the parent must exist.
+    present <- checkThreadId root 0
+    missing <- checkThreadId root 99
+    assert "the shared --thread rule accepts an existing id and refuses a typo" $
+      present == Right () && case missing of Left _ -> True; Right _ -> False
+    -- Compatibility: no flags means the JSON post is untouched; a flag wins.
+    let jsonPost = mkChannelPost "a" "old" ["b"] "body"
+    assert "no flags leave a JSON post's ancestry and channel untouched" $
+      applyPostFlags Nothing Nothing jsonPost == jsonPost
+    assert "a channel flag overrides the JSON channel and a thread flag sets one edge" $
+      channel (applyPostFlags Nothing (Just "new") jsonPost) == Just "new"
+        && thread (applyPostFlags (Just 4) Nothing jsonPost) == [4]
+        && to (applyPostFlags (Just 4) (Just "new") jsonPost) == ["b"]
     removePathForcibly root

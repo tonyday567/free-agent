@@ -14,7 +14,7 @@ new_root nonbus
 rm "$ROOT/log.jsonl"
 
 step "say is refused"
-out=$(printf 'hi' | "$FA" bus say -r "$ROOT" --from a --to b 2>&1); rc=$?
+out=$(printf 'hi' | "$FA" bus post -r "$ROOT" --from a --to b 2>&1); rc=$?
 assert_eq "say exits non-zero" "1" "$rc"
 assert_eq "say names the reason" \
   "1" "$(printf '%s' "$out" | grep -c 'no log.jsonl; not a bus' || true)"

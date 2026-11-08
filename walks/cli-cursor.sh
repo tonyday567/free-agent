@@ -10,8 +10,8 @@ source "$(dirname "$0")/lib.sh"
 
 step "get on a missing cursor is the next id, not an error"
 new_root cursor
-say a b "one"
-say a b "two"
+post a b "one"
+post a b "two"
 out=$("$FA" bus cursor get -r "$ROOT" nadia 2>&1); rc=$?
 assert_eq "get exits 0 without a cursor file" "0" "$rc"
 assert_eq "and answers the id that would follow the last post" "2" "$out"

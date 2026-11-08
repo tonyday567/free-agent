@@ -23,9 +23,9 @@ source "$(dirname "$0")/lib.sh"
 
 step "mark-read must not jump past mail addressed to someone else"
 new_root cursor
-say alice bob "bob's first"
-say alice bob "bob's second"
-say alice carol "carol's, later in the log"
+post alice bob "bob's first"
+post alice bob "bob's second"
+post alice carol "carol's, later in the log"
 assert_eq "post 2 is carol's, so the log tip is 2" '["carol"]' "$(field 2 to)"
 "$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
 out=$("$FA" bus inbox -r "$ROOT" bob --mark-read --depth 0)
@@ -34,8 +34,8 @@ assert_eq "cursor is highest printed + 1 (2), not log tip + 1 (3)" "2" "$(cat "$
 
 step "a missing cursor means the name has seen nothing"
 new_root read-cursor
-say alice bob "one"
-say alice bob "two"
+post alice bob "one"
+post alice bob "two"
 out=$("$FA" bus inbox -r "$ROOT" bob --depth 0)
 assert_eq "inbox delivers the whole history to a fresh name" "2" \
   "$(printf '%s' "$out" | grep -c . || true)"
@@ -62,9 +62,9 @@ assert_eq "the thread view refuses it too" "1" "$?"
 
 step "status's unread figure is the mail count, as inbox"
 new_root status-count
-say alice bob "for bob"
-say alice carol "for carol"
-say alice carol "for carol again"
+post alice bob "for bob"
+post alice carol "for carol"
+post alice carol "for carol again"
 "$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
 assert_eq "inbox says bob has one" "1" "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)"
 row=$("$FA" bus status -r "$ROOT" --depth 1 2>&1 | grep 'bob @' | sed 's/^ *//' || true)

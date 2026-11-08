@@ -10,8 +10,8 @@ source "$(dirname "$0")/lib.sh"
 
 step "a fresh root, two posts to bob"
 new_root flow
-say alice bob "first"
-say alice bob "second"
+post alice bob "first"
+post alice bob "second"
 assert_eq "post 0 is addressed to bob" '["bob"]' "$(field 0 to)"
 
 step "cursor set to 0, inbox bob"
@@ -29,7 +29,7 @@ assert_eq "inbox is empty" "0" "$(count_lines "$FA" bus inbox -r "$ROOT" bob --d
 assert_eq "and exits 0" "0" "$?"
 
 step "a newer post is delivered, and only the newer one"
-say alice bob "third"
+post alice bob "third"
 out=$("$FA" bus inbox -r "$ROOT" bob --depth 0)
 assert_eq "one line printed" "1" "$(printf '%s' "$out" | grep -c . || true)"
 assert_eq "it is post 2" "2" "$(printf '%s' "$out" | awk '{print $1}')"

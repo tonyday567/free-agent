@@ -4,6 +4,7 @@
 --   fare read FILE [RANGE] [--head|--tail]
 --   fare gate [ROOT] [--docspec|--docspec-full|--no-docspec]
 --   fare state [ROOT] [--head|--tail]
+--   fare index KEYWORD [ROOT] [--cutoff N]
 --   fare usage [day|week] [--head|--tail]
 --   fare pc [--host HOST] CMD [ARG...] [--head|--tail]
 --   fare bash CMD [ARG...] [--head|--tail]

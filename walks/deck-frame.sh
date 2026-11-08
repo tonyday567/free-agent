@@ -10,7 +10,7 @@ source "$(cd "$(dirname "$0")" && pwd)/deck-lib"
 
 new_root frame
 : >"$ROOT/log.jsonl"
-printf 'root\n' | free-agent bus say -r "$ROOT" --from alice --to runner >/dev/null
+printf 'root\n' | free-agent bus post -r "$ROOT" --from alice --to runner >/dev/null
 
 server="deck-frame-$$-$RANDOM"
 daemon_pid=

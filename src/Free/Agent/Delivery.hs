@@ -5,6 +5,7 @@ module Free.Agent.Delivery
   ( Invocation (..),
     Turn (..),
     TurnResult (..),
+    TurnCeiling (..),
     TurnMetrics (..),
     deliverTo,
     mapTurn,
@@ -40,7 +41,7 @@ import Control.Concurrent
     tryPutMVar,
     tryReadMVar,
   )
-import Control.Exception (IOException, SomeException, catch, throwIO, try)
+import Control.Exception (Exception, IOException, SomeException, catch, throwIO, try)
 import Control.Monad (void)
 import Data.Char (isSpace)
 import Data.Foldable (traverse_)
@@ -67,6 +68,19 @@ data TurnResult a
   = TurnResponse a
   | TurnCancelled
   deriving (Eq, Show, Functor)
+
+-- | A turn the host stopped at its own budget rather than at its work.
+--
+-- A tool-iteration ceiling is neither a host interruption (exit 130, which is
+-- the host's event and recovers in a fresh session) nor a backend failure
+-- (which is retried): the turn ran until its call budget was spent, produced
+-- the work it produced, and would produce the same partial work if replayed.
+-- Carrying it as its own exception is what lets the runner commit the batch as
+-- a terminal decision instead of re-invoking the host.
+newtype TurnCeiling = TurnCeiling Text
+  deriving (Show)
+
+instance Exception TurnCeiling
 
 -- | Live, backend-neutral delivery cost and status.
 data TurnMetrics = TurnMetrics
@@ -159,54 +173,31 @@ directPostTo grant deliver root post = do
     Left refusal -> pure (Left refusal)
   pure (stored, result)
 
--- | Interpret a response as a reply act. An explicit address chooses the
--- recipient, and leading whitespace before it is tolerated. On a direct
--- delivery, otherwise, non-empty prose replies to the causing sender; a first
--- line of @LOCAL@ keeps the whole response local. Public and self-caused
--- deliveries retain the local default. When a tool diff or other prefix
--- precedes an address at the start of a later line, only the last non-self
--- addressed suffix outside a fenced quotation is published; the prefix is not
--- bus content. Inline mentions and Markdown blockquote addresses are not
--- explicit addresses.
-replyAct :: Name -> Stamped Text -> Text -> [Post Text]
-replyAct agent stored response =
+-- | Interpret a response as intentional publication. Only an explicit
+-- address chooses a recipient and publishes; unaddressed prose, including a
+-- first line of @LOCAL@, stays local. Publication carries no inferred cause,
+-- channel, or ancestry. An agent that wants a thread cites a visible post id
+-- through an explicit bus act. When a tool diff or other prefix precedes an
+-- address at the start of a later line, only the last non-self addressed
+-- suffix outside a fenced quotation is published; the prefix is not bus
+-- content. Inline mentions and Markdown blockquote addresses are not explicit
+-- addresses.
+replyAct :: Name -> Text -> [Post Text]
+replyAct agent response =
   case parseAddress response <|> parseLaterLineAddress agent response of
-    Nothing -> maybe [] pure (defaultReply agent stored response)
-    Just (recipient, replyBody) -> pure (reply recipient replyBody)
-  where
-    cause = stamped stored
-    reply recipient replyBody =
-      Post agent (channel cause) [recipient] [snd (stamp stored)] replyBody
+    Nothing -> []
+    Just (recipient, replyBody) -> pure (Post agent Nothing [recipient] [] replyBody)
 
--- | The direct-delivery default: answer the sender, unless publication is
--- explicitly suppressed. Empty responses and public or self-caused turns stay
--- local.
-defaultReply :: Name -> Stamped Text -> Text -> Maybe (Post Text)
-defaultReply agent stored response
-  | agent `notElem` to cause = Nothing
-  | from cause == agent = Nothing
-  | localResponse response = Nothing
-  | T.null (T.strip response) = Nothing
-  | otherwise =
-      Just $ Post agent (channel cause) [from cause] [snd (stamp stored)] (T.strip response)
-  where
-    cause = stamped stored
-
-localResponse :: Text -> Bool
-localResponse response =
-  T.strip (T.takeWhile (/= '\n') (T.stripStart response)) == "LOCAL"
-
--- | Publish a reply act after making a misplaced address visible. Publication
--- and ancestry are exactly 'replyAct'; the warning is the only added effect.
-replyActIO :: Name -> Stamped Text -> Text -> IO [Post Text]
-replyActIO agent stored response = do
+-- | Publish an intentional response after making a misplaced address visible.
+replyActIO :: Name -> Text -> IO [Post Text]
+replyActIO agent response = do
   traverse_ (TIO.hPutStrLn stderr) (replyWarning agent response)
-  pure (replyAct agent stored response)
+  pure (replyAct agent response)
 
 -- | A valid address at the start of a later line earns a warning with its
 -- zero-based character offset. The addressed suffix publishes; the prefix does
--- not. Inline mentions and genuinely unaddressed replies do not produce this
--- warning; the latter may still use the direct-delivery default.
+-- not. Inline mentions and genuinely unaddressed replies produce no warning
+-- and no publication.
 replyWarning :: Name -> Text -> Maybe Text
 replyWarning agent response =
   case parseAddress response of

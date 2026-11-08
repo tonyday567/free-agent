@@ -6,7 +6,7 @@ source "$(dirname "$0")/deck-lib"
 
 step "a thread view and a live status view"
 new_root quit
-say alice runner "root"
+post alice runner "root"
 
 step "q is exercised through each buffer's actual key binding"
 out=$(deck_eval '(progn

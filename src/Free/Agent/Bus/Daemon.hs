@@ -169,7 +169,7 @@ writeReceipt root sender msg = go (5 :: Int)
 -- fifo exists (so the early guard passed) but opening it for append throws
 -- ENXIO — "does not exist (Device not configured)" — because GHC opens
 -- with @O_NONBLOCK@ and a FIFO with no reader refuses writers (wave H).
-postViaDaemon :: FilePath -> Post Text -> IO (Stamped Text)
+postViaDaemon :: forall a. (PostBody a, Eq a) => FilePath -> Post a -> IO (Stamped a)
 postViaDaemon root p = do
   let fifo = fifoPath root
   fifoExists <- doesFileExist fifo
@@ -201,7 +201,7 @@ postViaDaemon root p = do
 -- (dev,ino) — the daemon's next receipt write to the same path would then
 -- fail with "resource busy (file is locked)" and die (wave H, the fifo
 -- ioException).
-waitReceipt :: FilePath -> Post Text -> IO (Stamped Text)
+waitReceipt :: forall a. (PostBody a, Eq a) => FilePath -> Post a -> IO (Stamped a)
 waitReceipt root p = go (200 :: Int)
   where
     go 0 = fail "🔴 daemon receipt timeout"
@@ -212,7 +212,7 @@ waitReceipt root p = go (200 :: Int)
         then delay >> go (n - 1)
         else do
           line <- readFileStrict path
-          case unframeStored @Text line of
+          case unframeStored @a line of
             Just stored
               | matches stored -> pure stored
               | otherwise -> delay >> go (n - 1)
@@ -221,6 +221,7 @@ waitReceipt root p = go (200 :: Int)
     matches stored =
       let q = stamped stored
        in from q == from p
+            && channel q == channel p
             && to q == to p
             && thread q == thread p
             && body q == body p

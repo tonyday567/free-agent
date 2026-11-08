@@ -59,16 +59,20 @@ haltTopic = do
       == Nothing
   assert "Y1e a mark inside the body is not an envelope" $
     controlMark (mkPost "yang" ["yin"] ("status: " <> markGlyph Landed <> " landed")) == Nothing
-  -- The loop: two death-case bodies then the control form. Under the prefix
-  -- rule the seat halts on the first post and answers nothing, which is the
-  -- measured death; here both reports are delivered and the seat then stops.
+  -- The loop: two death-case bodies in one drained backlog, then the control
+  -- form. Under the prefix rule the seat halts on the first post and answers
+  -- nothing, which is the measured death; here both reports reach one turn
+  -- and the seat then stops.
   root <- tempRoot "free-agent-halt-form"
   writeCursor root "yin" 0
-  seen <- newIORef ([] :: [Text])
+  _ <- postLocal root (mkPost "yang" ["yin"] yin215)
+  _ <- postLocal root (mkPost "yang" ["yin"] yin223)
+  _ <- postLocal root (mkPost "runner" ["yin"] (markGlyph Landed))
+  seen <- newIORef ([] :: [[Text]])
   done <- newEmptyMVar
   grant <- newDeliveryGrant 100
-  let handler stored = do
-        modifyIORef' seen (body (stamped stored) :)
+  let handler storedBatch = do
+        modifyIORef' seen (map (body . stamped) storedBatch :)
         pure
           Turn
             { awaitTurn = pure (TurnResponse []),
@@ -76,14 +80,11 @@ haltTopic = do
               turnMetrics = pure (TurnMetrics False False 0)
             }
   _ <- forkIO (runAgentLoop "yin" ["yin"] root Nothing grant handler >> putMVar done ())
-  _ <- postLocal root (mkPost "yang" ["yin"] yin215)
-  _ <- postLocal root (mkPost "yang" ["yin"] yin223)
-  _ <- postLocal root (mkPost "runner" ["yin"] (markGlyph Landed))
   exited <- timeout 30000000 (takeMVar done)
   answered <- readIORef seen
   cursor <- readCursor root "yin"
-  assert "Y1f both status reports were handed to the seat" $
-    length answered == 2 && all (`elem` answered) [yin215, yin223]
+  assert "Y1f both status reports reach the seat in one batch" $
+    answered == [[yin215, yin223]]
   assert "Y1g the seat stopped on the control form, cursor past all three" $
     isJust exited && cursor == 3
   exists <- doesDirectoryExist root

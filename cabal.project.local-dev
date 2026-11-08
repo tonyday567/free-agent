@@ -7,6 +7,8 @@ packages:
   ../circuits-diagrams/circuits-diagrams.cabal
   ../circuits-mat/circuits-mat.cabal
   ../circuits-parser/circuits-parser.cabal
+  ../circuits-prob/circuits-prob.cabal
+  ../circuits-rel/circuits-rel.cabal
   ../circuits-stats/circuits-stats.cabal
   ../formatn/formatn.cabal
   ../harpie/harpie.cabal

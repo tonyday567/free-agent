@@ -17,7 +17,7 @@ import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Free.Agent.Bus.File (writeCursor)
+import Free.Agent.Bus.File (readCursor, readTransaction, writeCursor)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliDeliverTo, parseSessionId)
 import Free.Agent.Delivery
   ( DeliveryRefusal (..),
@@ -53,6 +53,23 @@ noteLine pid =
   "🟡 your reply for delivery "
     <> T.pack (show pid)
     <> " published from its `@yang:` address onward only; the text above the address did not reach the bus."
+
+seatBinary :: IO FilePath
+seatBinary = do
+  axiomaPath <- getExecutablePath
+  let built =
+        takeDirectory axiomaPath
+          </> ".."
+          </> ".."
+          </> ".."
+          </> "free-agent"
+          </> "build"
+          </> "free-agent"
+          </> "free-agent"
+  builtExists <- doesFileExist built
+  if builtExists
+    then pure built
+    else fromMaybe (takeDirectory axiomaPath </> "free-agent") <$> findExecutable "free-agent"
 
 deliveryTopic :: IO ()
 deliveryTopic = do
@@ -238,108 +255,88 @@ deliveryTopic = do
   removePathForcibly grantRoot
 
   -------------------------------------------------------------------------
-  -- Kimi publication through the wired binary: direct prose replies to the
-  -- sender, while one addressed presentation bullet is removed before replyAct.
-  -- The transcript retains raw CLI output; delivery receives the scrubbed form.
-  --
-  -- Mutation guards: removing defaultReply loses the plain, bullet, and
-  -- preambled replies; removing the guarded kimiText strip loses the explicitly
-  -- addressed reply's body; dropping replyAct's channel or ancestry fails the
-  -- reply assertions; replacing raw with scrubbed output fails the raw assertion.
+  -- Intentional publication: only an explicit address publishes. Plain prose,
+  -- LOCAL, public-looking text, and self commentary all stay local. Addressed
+  -- publication carries no inferred channel or ancestry.
   -------------------------------------------------------------------------
-  putStrLn "Kimi reply-act publication"
-  channelRoot <- tempRoot "free-agent-kimi-channel"
-  channelCause <- postTo channelRoot ((mkPost "yang" ["kimi1", "ops"] "cause") {channel = Just "ops"})
-  publicCause <- postTo channelRoot (mkPost "yang" [] "public")
-  selfCause <- postTo channelRoot (mkPost "kimi1" ["kimi1"] "self")
-  assert "replyAct publishes an unaddressed direct answer to the sender" $
-    case replyAct "kimi1" channelCause "ordinary direct answer" of
-      [r] ->
-        body r == "ordinary direct answer"
-          && to r == ["yang"]
-          && channel r == Just "ops"
-          && thread r == [snd (stamp channelCause)]
-          && replyWarning "kimi1" "ordinary direct answer" == Nothing
-      _ -> False
-  assert "LOCAL suppresses the directed default, including leading whitespace" $
-    null (replyAct "kimi1" channelCause "  LOCAL\nordinary local prose")
-      && null (replyAct "kimi1" publicCause "public prose")
-      && null (replyAct "kimi1" selfCause "self prose")
-      && null (replyAct "kimi1" channelCause " \n")
+  putStrLn "intentional reply-act publication"
+  assert "unaddressed direct prose stays local" $
+    null (replyAct "kimi1" "ordinary direct answer")
+      && replyWarning "kimi1" "ordinary direct answer" == Nothing
+  assert "LOCAL, public-looking, self, and empty prose stay local" $
+    null (replyAct "kimi1" "  LOCAL\nordinary local prose")
+      && null (replyAct "kimi1" "public prose")
+      && null (replyAct "kimi1" "self prose")
+      && null (replyAct "kimi1" " \n")
   assert "a prefix-first address publishes without a warning" $
     replyWarning "kimi1" "@yang: explicit report" == Nothing
   assert "a later line-leading address publishes its suffix and warns about the dropped prefix" $
-    case replyAct "kimi1" channelCause "progress\n@yang: DONE\nsecond line" of
+    case replyAct "kimi1" "progress\n@yang: DONE\nsecond line" of
       [r] ->
         body r == "DONE\nsecond line"
           && to r == ["yang"]
-          && channel r == Just "ops"
-          && thread r == [snd (stamp channelCause)]
+          && channel r == Nothing
+          && thread r == []
           && replyWarning "kimi1" "progress\n@yang: DONE\nsecond line"
             == Just "🟡 kimi1: @yang: begins at character offset 9, not 0; publishing addressed suffix"
       _ -> False
   assert "a bar-prefixed diff above the address publishes only the reply" $
-    case replyAct "kimi1" channelCause "│ +;; first\n│ +;; second\n@yang: DONE" of
+    case replyAct "kimi1" "│ +;; first\n│ +;; second\n@yang: DONE" of
       [r] -> to r == ["yang"] && body r == "DONE"
       _ -> False
   assert "an address in a raw diff body does not displace the final reply" $
-    case replyAct "kimi1" channelCause "@@ -0,0 +1 @@\n@alice: diff body\n@bob: reply" of
+    case replyAct "kimi1" "@@ -0,0 +1 @@\n@alice: diff body\n@bob: reply" of
       [r] -> to r == ["bob"] && body r == "reply"
       _ -> False
   assert "a later self-address is not a publication target" $
-    case replyAct "kimi1" channelCause "tool\n@bob: reply\n@kimi1: self" of
+    case replyAct "kimi1" "tool\n@bob: reply\n@kimi1: self" of
       [r] -> to r == ["bob"] && body r == "reply\n@kimi1: self"
       _ -> False
-  assert "a Markdown blockquote address is not an explicit recipient" $
-    case replyAct "kimi1" channelCause "> @alice: quoted\nordinary direct prose" of
-      [r] -> to r == ["yang"] && body r == "> @alice: quoted\nordinary direct prose"
-      _ -> False
+  assert "a Markdown blockquote address stays local with its prose" $
+    null (replyAct "kimi1" "> @alice: quoted\nordinary direct prose")
   assert "a fenced address is ignored in favour of the real reply" $
-    case replyAct "kimi1" channelCause "```text\n@alice: hi\n```\n@bob: reply" of
+    case replyAct "kimi1" "```text\n@alice: hi\n```\n@bob: reply" of
       [r] -> to r == ["bob"] && body r == "reply"
       _ -> False
   assert "a real address is not displaced by a later fenced quote" $
-    case replyAct "kimi1" channelCause "@bob: reply\n```text\n@carol: quoted\n```" of
+    case replyAct "kimi1" "@bob: reply\n```text\n@carol: quoted\n```" of
       [r] ->
         to r == ["bob"]
           && body r == "reply\n```text\n@carol: quoted\n```"
       _ -> False
-  assert "replyAct preserves an addressed reply's channel and ancestry" $
-    case replyAct "kimi1" channelCause "@yang: explicit report" of
+  assert "replyAct leaves channel and ancestry to deliberate citation" $
+    case replyAct "kimi1" "@yang: explicit report" of
       [r] ->
         body r == "explicit report"
           && to r == ["yang"]
-          && channel r == Just "ops"
-          && thread r == [snd (stamp channelCause)]
+          && channel r == Nothing
+          && thread r == []
       _ -> False
-  assert "an inline address does not displace the directed default" $
-    case replyAct "kimi1" channelCause "• working\n\n• @yang: DONE not-earned" of
-      [r] -> to r == ["yang"] && body r == "• working\n\n• @yang: DONE not-earned"
-      _ -> False
+  assert "an inline address does not manufacture a recipient" $
+    null (replyAct "kimi1" "• working\n\n• @yang: DONE not-earned")
   assert "an address behind leading whitespace is an explicit recipient" $
-    case replyAct "kimi1" channelCause "  @yang: front-line report" of
+    case replyAct "kimi1" "  @yang: front-line report" of
       [r] ->
         to r == ["yang"]
           && body r == "front-line report"
-          && thread r == [snd (stamp channelCause)]
+          && thread r == []
           && replyWarning "kimi1" "  @yang: front-line report" == Nothing
       _ -> False
   assert "a blank leading line before the address is prefix-first, not a recovery" $
-    case replyAct "kimi1" channelCause "\n@yang: after a blank line" of
+    case replyAct "kimi1" "\n@yang: after a blank line" of
       [r] ->
         to r == ["yang"]
           && body r == "after a blank line"
           && replyWarning "kimi1" "\n@yang: after a blank line" == Nothing
       _ -> False
   assert "an indented address on a later line recovers its suffix with the offset" $
-    case replyAct "kimi1" channelCause "notes\n  @yang: recovered report" of
+    case replyAct "kimi1" "notes\n  @yang: recovered report" of
       [r] ->
         to r == ["yang"]
           && body r == "recovered report"
           && replyWarning "kimi1" "notes\n  @yang: recovered report"
             == Just "🟡 kimi1: @yang: begins at character offset 8, not 0; publishing addressed suffix"
       _ -> False
-  removePathForcibly channelRoot
 
   -------------------------------------------------------------------------
   -- Stranded-reply notes: a reply published only from its later-line address
@@ -382,16 +379,33 @@ deliveryTopic = do
   assert "a clean reply leaves no note" (null quietRead)
   removePathForcibly strandRoot
 
-  kimiRoot <- tempRoot "free-agent-kimi-publication"
+  -------------------------------------------------------------------------
+  -- Wired Kimi batch delivery: three posts cause one CLI invocation. The
+  -- addressed suffix publishes without inferred ancestry; local prose does
+  -- not publish. A later singleton run consumes the stranded-note warning.
+  -------------------------------------------------------------------------
+  putStrLn "wired Kimi batch publication"
+  kimiRoot <- tempRoot "free-agent-kimi-batch"
   let fakeBin = kimiRoot </> "bin"
       fakeKimi = fakeBin </> "kimi"
       promptFile = kimiRoot </> "prompt.md"
       kimiSessionFile = kimiRoot </> "session"
       kimiTranscriptLog = kimiRoot </> ".transcripts" </> "kimi1.jsonl"
+      kimiDossier = kimiRoot </> "dossier"
+      kimiArgs =
+        [ "--root",
+          kimiRoot,
+          "--name",
+          "kimi1",
+          "--backend",
+          "kimi",
+          "--prompt",
+          promptFile,
+          "--session",
+          kimiSessionFile
+        ]
   TIO.writeFile promptFile "You are a test seat."
   createDirectoryIfMissing True fakeBin
-  let kimiDossier = kimiRoot </> "dossier"
-      kimiNotes = kimiRoot </> "notes.md"
   TIO.writeFile fakeKimi $
     T.pack $
       unlines
@@ -399,125 +413,85 @@ deliveryTopic = do
           "input=\"$*\"",
           "printf '\\n===CALL===\\n%s\\n' \"$input\" >> \"" <> kimiDossier <> "\"",
           "case \"$input\" in",
-          "  *PLAIN-CASE*) printf 'ordinary local prose\\n' ;;",
-          "  *EXPLICIT-CASE*) printf '• @yang: explicit report\\n' ;;",
-          "  *DIFF-CASE*) printf '│ tool diff\\n@yang: recovered report\\n' ;;",
-          "  *PREAMBLE-CASE*) printf '• working\\n\\n• @yang: DONE not-earned\\n' ;;",
-          "  *BULLET-CASE*) printf '• ordinary bullet\\n' ;;",
-          "  *WRITE-CASE*) printf '│ notes.md\\n│ +hello\\n' >&2; printf 'hello\\n' >> \"" <> kimiNotes <> "\"; printf '@yang: DONE — notes.md written\\n' ;;",
-          "  *STRAND-CASE*) printf 'planning notes\\n@yang: stranded report\\n' ;;",
           "  *CHECK-CASE*) printf 'checked\\n' ;;",
-          "  *INDENT-CASE*) printf 'tool\\n  @yang: kimi indented report\\n' ;;",
-          "  *SPACES-CASE*) printf '  @yang: kimi front-line spaces\\n' ;;",
+          "  *BATCH-THREE*) printf 'local batch notes\\n@yang: kimi batch report\\n' ;;",
           "esac",
           "printf 'To resume this session: kimi -r fake-kimi-integration\\n'"
         ]
   setFileMode fakeKimi 0o755
   writeCursor kimiRoot "kimi1" 0
-  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "PLAIN-CASE")
-  explicitCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "EXPLICIT-CASE")
-  diffCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "DIFF-CASE")
-  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "PREAMBLE-CASE")
-  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "BULLET-CASE")
-  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "WRITE-CASE")
-  kimiStrandCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "STRAND-CASE")
-  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "CHECK-CASE")
-  kimiIndentCause <- postTo kimiRoot (mkPost "yang" ["kimi1"] "INDENT-CASE")
-  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "SPACES-CASE")
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "BATCH-ONE")
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "BATCH-TWO")
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "BATCH-THREE")
   _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] (markGlyph Landed))
-  myPath <- takeDirectory <$> getExecutablePath
-  pathBin <- findExecutable "free-agent"
-  let bin =
-        fromMaybe
-          (myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent")
-          pathBin
+  bin <- seatBinary
   oldPath <- getEnv "PATH"
   setEnv "PATH" (fakeBin <> ":" <> oldPath)
-  (code, _out, err) <-
-    readProcessWithExitCode
-      bin
-      [ "--root",
-        kimiRoot,
-        "--name",
-        "kimi1",
-        "--backend",
-        "kimi",
-        "--prompt",
-        promptFile,
-        "--session",
-        kimiSessionFile
-      ]
-      ""
+  (code, _out, err) <- readProcessWithExitCode bin kimiArgs ""
   setEnv "PATH" oldPath
-  assert ("the wired Kimi seat completes its scripted turns" <> if code == ExitSuccess then "" else ": " <> err) $
+  assert ("the wired Kimi batch completes" <> if code == ExitSuccess then "" else ": " <> err) $
     code == ExitSuccess
-  let adapterWarnings = filter ("🟡 kimi1: @yang: begins at character offset " `T.isPrefixOf`) (T.lines (T.pack err))
-  assert (("the wired adapter warns for each recovered prefix-later reply (diff, strand, indented), not for prefix-first or local prose" <> if length adapterWarnings == 3 then "" else ": " <> err)) $
-    length adapterWarnings == 3
-  assert "the indented later-line row recovers at its offset on the wire" $
-    any ("offset 7, not 0" `T.isInfixOf`) adapterWarnings
   content <- TIO.readFile (kimiRoot </> "log.jsonl")
   let parsed = mapMaybe (unframeStored @Text) (T.lines content)
       replies = [stamped s | s <- parsed, from (stamped s) == "kimi1"]
-  assert ("plain, preambled, and ordinary bullet prose use the directed default: " <> show (map body replies)) $
-    map body replies
-      == [ "ordinary local prose",
-           "explicit report",
-           "recovered report",
-           "• working\n\n• @yang: DONE not-earned",
-           "• ordinary bullet",
-           "DONE — notes.md written",
-           "stranded report",
-           "checked",
-           "kimi indented report",
-           "kimi front-line spaces"
-         ]
-  assert "the addressed bullet publishes with ancestry" $
-    case [r | r <- replies, body r == "explicit report"] of
-      [r] ->
-        to r == ["yang"]
-          && channel r == Nothing
-          && thread r == [snd (stamp explicitCause)]
+  assert "only the explicitly addressed batch response publishes, with no inferred ancestry" $
+    case replies of
+      [r] -> to r == ["yang"] && body r == "kimi batch report" && channel r == Nothing && thread r == []
       _ -> False
-  assert "the tool-prefixed reply publishes with ancestry" $
-    case [r | r <- replies, body r == "recovered report"] of
-      [r] ->
-        to r == ["yang"]
-          && channel r == Nothing
-          && thread r == [snd (stamp diffCause)]
-      _ -> False
-  kimiTranscript <- TIO.readFile kimiTranscriptLog
-  assert "Kimi raw output preserves the addressed presentation bullet" $
-    "• @yang: explicit report" `T.isInfixOf` kimiTranscript
-  assert "the writing turn's render stays in the transcript while its reply is clean" $
-    "│ notes.md" `T.isInfixOf` kimiTranscript
-      && "@yang: DONE — notes.md written" `T.isInfixOf` kimiTranscript
-  kimiNotesText <- TIO.readFile kimiNotes
-  assert "the writing turn wrote its file" $ kimiNotesText == "hello\n"
+  firstCursor <- readCursor kimiRoot "kimi1"
+  firstTransaction <- readTransaction kimiRoot "kimi1"
+  assert "the wired quiet-capable batch commits before its halt" $
+    firstCursor == 4 && firstTransaction == Just 3
   kimiDossierText <- TIO.readFile kimiDossier
   let kimiCalls = filter (not . T.null . T.strip) (T.splitOn "===CALL===" kimiDossierText)
-  assert "the seat ran one scripted turn per cause" $ length kimiCalls == 10
-  assert "each stranded note rides exactly the next delivery, once" $
-    [i | (i, c) <- zip [0 :: Int ..] kimiCalls, "Harness notes:" `T.isInfixOf` c] == [3, 7, 9]
-  assert "the diff, strand, and indented notes name their deliveries, recipient, and loss" $
-    case (kimiCalls !! 3, kimiCalls !! 7, kimiCalls !! 9) of
-      (preambleCall, checkCall, spacesCall) ->
-        noteLine (snd (stamp diffCause)) `T.isInfixOf` preambleCall
-          && noteLine (snd (stamp kimiStrandCause)) `T.isInfixOf` checkCall
-          && noteLine (snd (stamp kimiIndentCause)) `T.isInfixOf` spacesCall
+  assert "three addressed posts cause exactly one wired CLI call" $
+    length kimiCalls == 1
+  assert "the wired prompt preserves every post id, sender, body, and order" $
+    case kimiCalls of
+      [call] ->
+        "[post 0] yang: BATCH-ONE\n\n[post 1] yang: BATCH-TWO\n\n[post 2] yang: BATCH-THREE"
+          `T.isInfixOf` call
+      _ -> False
+  let adapterWarnings = filter ("🟡 kimi1: @yang: begins at character offset " `T.isPrefixOf`) (T.lines (T.pack err))
+  assert "the local prefix above the explicit address earns one stranded-note warning" $
+    length adapterWarnings == 1
+  stranded <- doesFileExist (strandNotePath kimiRoot "kimi1")
+  assert "the batch boundary retains the stranded note for the next turn" stranded
+  kimiTranscript <- TIO.readFile kimiTranscriptLog
+  assert "the transcript retains the local prefix and explicit response" $
+    "local batch notes" `T.isInfixOf` kimiTranscript
+      && "@yang: kimi batch report" `T.isInfixOf` kimiTranscript
+
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] "CHECK-CASE")
+  _ <- postTo kimiRoot (mkPost "yang" ["kimi1"] (markGlyph Landed))
+  setEnv "PATH" (fakeBin <> ":" <> oldPath)
+  (checkCode, _checkOut, checkErr) <- readProcessWithExitCode bin kimiArgs ""
+  setEnv "PATH" oldPath
+  assert ("the wired Kimi singleton completes" <> if checkCode == ExitSuccess then "" else ": " <> checkErr) $
+    checkCode == ExitSuccess
+  kimiDossierAfter <- TIO.readFile kimiDossier
+  let callsAfter = filter (not . T.null . T.strip) (T.splitOn "===CALL===" kimiDossierAfter)
+  assert "the next live batch is one singleton CLI call carrying the harness note" $
+    length callsAfter == 2
+      && case callsAfter of
+        [_, checkCall] -> "[post 5] yang: CHECK-CASE" `T.isInfixOf` checkCall && noteLine (2 :: Int) `T.isInfixOf` checkCall
+        _ -> False
+  checkContent <- TIO.readFile (kimiRoot </> "log.jsonl")
+  let checkParsed = mapMaybe (unframeStored @Text) (T.lines checkContent)
+      checkReplies = [stamped s | s <- checkParsed, from (stamped s) == "kimi1"]
+  assert "unaddressed singleton prose stays local" $
+    length checkReplies == 1
   kimiStrandGone <- doesFileExist (strandNotePath kimiRoot "kimi1")
   assert "the stranded note is cleared once delivered" $ not kimiStrandGone
   removePathForcibly kimiRoot
 
   -------------------------------------------------------------------------
-  -- Hermes capture through the wired binary: the oneshot backend (-z)
-  -- prints only the final message, so an addressed reply publishes at the
-  -- agent's own character zero with no render above it; the usage-file
-  -- carries the session id into the raw evidence and the stored session
-  -- file. A stranded turn still delivers its note on the next delivery.
+  -- Wired Hermes batch capture: the oneshot backend receives the whole mail
+  -- batch once. Its final addressed message publishes without inferred
+  -- ancestry; usage, transcript, and file evidence remain intact.
   -------------------------------------------------------------------------
-  putStrLn "Hermes capture and stranded notes through the wired binary"
-  hermesRoot <- tempRoot "free-agent-hermes-capture"
+  putStrLn "wired Hermes batch capture"
+  hermesRoot <- tempRoot "free-agent-hermes-batch"
   let hermesBin = hermesRoot </> "bin"
       fakeHermes = hermesBin </> "hermes"
       hermesPromptFile = hermesRoot </> "prompt.md"
@@ -531,8 +505,6 @@ deliveryTopic = do
     T.pack $
       unlines
         [ "#!/bin/sh",
-          "# hermes -z shape: stdout carries only the final message; the",
-          "# --usage-file report carries the session id, as the real tool does.",
           "input=\"$*\"",
           "printf '\\n===CALL===\\n%s\\n' \"$input\" >> \"" <> hermesDossier <> "\"",
           "usage=\"\"",
@@ -543,27 +515,16 @@ deliveryTopic = do
           "done",
           "if [ -n \"$usage\" ]; then printf '{\"session_id\": \"fake-hermes-integration\", \"completed\": true}\\n' > \"$usage\"; fi",
           "case \"$input\" in",
-          "  *WRITE-CASE*) printf 'hello\\n' >> \"" <> hermesNotes <> "\"; printf '@yang: DONE — wrote notes.md\\n' ;;",
-          "  *SPACES-CASE*) printf '  @yang: front-line spaces address\\n' ;;",
-          "  *LATER-CASE*) printf 'tool notes\\n  @yang: recovered suffix\\n' ;;",
-          "  *STRAND-CASE*) printf 'planning notes\\n@yang: hermes stranded report\\n' ;;",
-          "  *CHECK-CASE*) printf 'checked\\n' ;;",
+          "  *BATCH-THREE*) printf 'hello\\n' >> \"" <> hermesNotes <> "\"; printf '@yang: hermes batch report\\n' ;;",
           "esac"
         ]
   setFileMode fakeHermes 0o755
   writeCursor hermesRoot "hermes1" 0
-  _ <- postTo hermesRoot (mkPost "yang" ["hermes1"] "WRITE-CASE")
-  _ <- postTo hermesRoot (mkPost "yang" ["hermes1"] "SPACES-CASE")
-  hermesLaterCause <- postTo hermesRoot (mkPost "yang" ["hermes1"] "LATER-CASE")
-  hermesStrandCause <- postTo hermesRoot (mkPost "yang" ["hermes1"] "STRAND-CASE")
-  _ <- postTo hermesRoot (mkPost "yang" ["hermes1"] "CHECK-CASE")
+  _ <- postTo hermesRoot (mkPost "yang" ["hermes1"] "BATCH-ONE")
+  _ <- postTo hermesRoot (mkPost "yang" ["hermes1"] "BATCH-TWO")
+  _ <- postTo hermesRoot (mkPost "yang" ["hermes1"] "BATCH-THREE")
   _ <- postTo hermesRoot (mkPost "yang" ["hermes1"] (markGlyph Landed))
-  myPath2 <- takeDirectory <$> getExecutablePath
-  pathBin2 <- findExecutable "free-agent"
-  let bin2 =
-        fromMaybe
-          (myPath2 </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent")
-          pathBin2
+  bin2 <- seatBinary
   oldPath2 <- getEnv "PATH"
   setEnv "PATH" (hermesBin <> ":" <> oldPath2)
   (code2, _out2, err2) <-
@@ -582,49 +543,36 @@ deliveryTopic = do
       ]
       ""
   setEnv "PATH" oldPath2
-  assert (("the wired Hermes seat completes its scripted turns" <> if code2 == ExitSuccess then "" else ": " <> err2)) $ code2 == ExitSuccess
+  assert ("the wired Hermes batch completes" <> if code2 == ExitSuccess then "" else ": " <> err2) $
+    code2 == ExitSuccess
   hermesContent <- TIO.readFile (hermesRoot </> "log.jsonl")
   let hermesParsed = mapMaybe (unframeStored @Text) (T.lines hermesContent)
       hermesReplies = [stamped s | s <- hermesParsed, from (stamped s) == "hermes1"]
-  assert ("the final message publishes at the agent's own character zero: " <> show (map body hermesReplies)) $
-    map body hermesReplies
-      == [ "DONE — wrote notes.md",
-           "front-line spaces address",
-           "recovered suffix",
-           "hermes stranded report",
-           "checked"
-         ]
-  assert "every Hermes reply answers the sender with the cause's ancestry" $
-    map to hermesReplies == replicate 5 ["yang"]
-      && case hermesReplies of
-        (r0 : _) -> thread r0 == [0]
-        _ -> False
-  let hermesWarnings = filter ("🟡 hermes1: @yang: begins at character offset " `T.isPrefixOf`) (T.lines (T.pack err2))
-  assert (("exactly two warnings: the recovered later-line replies at their offsets, not the prefix-first or whitespace-front ones" <> if length hermesWarnings == 2 then "" else ": " <> err2)) $
-    case hermesWarnings of
-      [w1, w2] -> "offset 11, not 0" `T.isInfixOf` w1 && "offset 15, not 0" `T.isInfixOf` w2
+  assert "the addressed Hermes batch response publishes without inferred ancestry" $
+    case hermesReplies of
+      [r] -> to r == ["yang"] && body r == "hermes batch report" && channel r == Nothing && thread r == []
+      _ -> False
+  hermesCursor <- readCursor hermesRoot "hermes1"
+  hermesTransaction <- readTransaction hermesRoot "hermes1"
+  assert "the wired Hermes batch writes its transaction before the halt" $
+    hermesCursor == 4 && hermesTransaction == Just 3
+  hermesDossierText <- TIO.readFile hermesDossier
+  let hermesCalls = filter (not . T.null . T.strip) (T.splitOn "===CALL===" hermesDossierText)
+  assert "three Hermes posts cause one CLI call containing the whole ordered batch" $
+    case hermesCalls of
+      [call] ->
+        "[post 0] yang: BATCH-ONE\n\n[post 1] yang: BATCH-TWO\n\n[post 2] yang: BATCH-THREE"
+          `T.isInfixOf` call
       _ -> False
   hermesTranscript <- TIO.readFile hermesTranscriptLog
-  assert "the transcript keeps the whitespace raw while the reply act sees it stripped" $
-    "  @yang: front-line spaces address" `T.isInfixOf` hermesTranscript
-  assert "the transcript keeps the captured final message and the usage-file session id" $
-    "@yang: DONE — wrote notes.md" `T.isInfixOf` hermesTranscript
+  assert "the transcript keeps the final message and usage-file session id" $
+    "@yang: hermes batch report" `T.isInfixOf` hermesTranscript
       && "session_id:fake-hermes-integration" `T.isInfixOf` hermesTranscript
       && "\"session_id\":\"fake-hermes-integration\"" `T.isInfixOf` hermesTranscript
   hermesSid <- TIO.readFile hermesSessionFile
-  assert "the usage-file id reaches the stored session file" $ T.strip hermesSid == "fake-hermes-integration"
+  assert "the usage-file id reaches the stored session file" $
+    T.strip hermesSid == "fake-hermes-integration"
   hermesNotesText <- TIO.readFile hermesNotes
-  assert "the writing turn wrote its file" $ hermesNotesText == "hello\n"
-  hermesDossierText <- TIO.readFile hermesDossier
-  let hermesCalls = filter (not . T.null . T.strip) (T.splitOn "===CALL===" hermesDossierText)
-  assert "the seat ran one scripted turn per cause" $ length hermesCalls == 5
-  assert "each stranded Hermes note rides exactly the next delivery, once" $
-    [i | (i, c) <- zip [0 :: Int ..] hermesCalls, "Harness notes:" `T.isInfixOf` c] == [3, 4]
-  assert "the later-line and strand notes name their deliveries, recipient, and loss" $
-    case (hermesCalls !! 3, hermesCalls !! 4) of
-      (strandCall, checkCall) ->
-        noteLine (snd (stamp hermesLaterCause)) `T.isInfixOf` strandCall
-          && noteLine (snd (stamp hermesStrandCause)) `T.isInfixOf` checkCall
-  hermesStrandGone <- doesFileExist (strandNotePath hermesRoot "hermes1")
-  assert "the Hermes stranded note is cleared once delivered" $ not hermesStrandGone
+  assert "the batch turn retained its file side effect" $
+    hermesNotesText == "hello\n"
   removePathForcibly hermesRoot

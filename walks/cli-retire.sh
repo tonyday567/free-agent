@@ -11,8 +11,8 @@ source "$(dirname "$0")/lib.sh"
 
 step "a root with a seat that has been around"
 new_root retire
-say alice bob "for bob"
-say alice carol "for carol, who is alive"
+post alice bob "for bob"
+post alice carol "for carol, who is alive"
 printf 'alive 2026-10-31T00:00:00.000000Z 4242' >"$ROOT/.hb-carol"
 $FA bus cursor set -r "$ROOT" bob 0 >/dev/null
 assert_eq "bob's cursor is set before retiring" "0" "$(cat "$ROOT/.cursor-bob")"

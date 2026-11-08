@@ -24,7 +24,7 @@ printf 'idle %s 99999999' "$TWO_HOURS_AGO" >"$ROOT/.hb-crashed"
 printf 'idle %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-fresh"
 printf 'working %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-busy"
 printf 'idle %s %s' "$TWO_AHEAD" "$MYPID" >"$ROOT/.hb-skewed"
-say ghost public "a post from a seat with no heartbeat"
+post ghost public "a post from a seat with no heartbeat"
 
 step "status --live reads each silence honestly"
 live=$("$FA" bus status -r "$ROOT" --live --depth 1 2>&1)

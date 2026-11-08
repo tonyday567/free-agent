@@ -20,6 +20,7 @@ module Free.Agent.Cli.Config
     parseDshConfig,
     parseLlmConfig,
     parseCommandConfig,
+    swallowedSeatOption,
     parseGatewayConfig,
     parseAcpConfig,
     commonAgentOptions,
@@ -435,6 +436,33 @@ parseCommandConfig =
             str
             (metavar "ARG..." <> help "Arguments passed to CMD")
         )
+
+-- | Seat options that lose their meaning when they are written after @--@.
+--
+-- Everything after @--@ is the command's argv, so a seat flag placed there is
+-- handed to the command and never reaches the parser. The result is a seat
+-- that runs without the flag it appears to carry, and the only trace is the
+-- banner printing the resolved argv.
+--
+-- >>> swallowedSeatOption ["ack", "--quiesce", "2"]
+-- ["--quiesce"]
+-- >>> swallowedSeatOption ["-c", "echo hi"]
+-- []
+-- >>> swallowedSeatOption ("--root" : [])
+-- ["--root"]
+swallowedSeatOption :: [String] -> [String]
+swallowedSeatOption = filter (`elem` seatFlags)
+  where
+    seatFlags =
+      [ "-r",
+        "--root",
+        "-n",
+        "--name",
+        "--cmd",
+        "--delivery-budget",
+        "--quiesce",
+        "--pitboss"
+      ]
 
 parseAcpConfig :: Parser AcpCliConfig
 parseAcpConfig =

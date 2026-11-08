@@ -10,7 +10,7 @@ source "$(dirname "$0")/lib.sh"
 
 step "attach writes a marker with four fields"
 new_root attach
-say a runner "mail for the runner"
+post a runner "mail for the runner"
 "$FA" bus cursor set -r "$ROOT" runner 1 >/dev/null
 out=$("$FA" bus attach -r "$ROOT" runner 2>&1)
 assert_eq "the reply names the marker" \

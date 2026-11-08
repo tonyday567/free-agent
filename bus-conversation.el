@@ -294,9 +294,15 @@
             bus-conversation--status (and seat (bus-conversation--seat-status seat root))
             bus-conversation--draft-start nil
             bus-conversation--draft-thread focus
-            bus-conversation--draft-recipients (if focus-post
-                                                   (bus-conversation--recipients focus-post seat)
-                                                 (and seat (list seat)))
+            bus-conversation--draft-recipients
+            ;; The direct seat view addresses the seat, whatever the focus
+            ;; post happened to carry; every other caller keeps the focus
+            ;; post's recipients.
+            (if (and seat (not involvement))
+                (list seat)
+              (if focus-post
+                  (bus-conversation--recipients focus-post seat)
+                (and seat (list seat))))
             bus-conversation--signature (and live (bus-conversation--signature root)))
       (setq positions (bus-conversation--render))
       (bus-conversation--start-timer))

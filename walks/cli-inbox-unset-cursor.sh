@@ -19,8 +19,8 @@ source "$(dirname "$0")/lib.sh"
 
 step "mail for bob, and no cursor file"
 new_root unset
-say alice bob "the first thing bob should see"
-say alice bob "and the second"
+post alice bob "the first thing bob should see"
+post alice bob "and the second"
 assert_eq "the log holds both" "0,1" "$(ids_of_to bob)"
 [ -e "$ROOT/.cursor-bob" ] && note "a cursor exists before we start" || note "no cursor file, as intended"
 
@@ -34,7 +34,7 @@ step "and exits 0, delivery without ceremony"
 assert_eq "the read is not an error" "0" "$?"
 
 step "and later mail keeps arriving"
-say alice bob "posted after the first read"
+post alice bob "posted after the first read"
 assert_eq "a second post appears on the next read" "3" \
   "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)"
 

@@ -8,6 +8,7 @@ module Main (main) where
 
 import Axioma.Acp (acpTopic)
 import Axioma.Bus (busTopic)
+import Axioma.Conch (conchTopic)
 import Axioma.Connector (connectorTopic)
 import Axioma.Delivery (deliveryTopic)
 import Axioma.Diagram (diagramTopic)
@@ -28,6 +29,7 @@ import Options.Applicative
 
 data Topic
   = All
+  | Conch
   | Seat
   | Transcript
   | Delivery
@@ -50,6 +52,7 @@ data Topic
 
 topicName :: Topic -> String
 topicName All = "all"
+topicName Conch = "conch"
 topicName Seat = "seat"
 topicName Transcript = "transcript"
 topicName Delivery = "delivery"
@@ -71,6 +74,7 @@ topicName Fare = "fare"
 
 topicDesc :: Topic -> String
 topicDesc All = "run all topics"
+topicDesc Conch = "Conch custody over real scratch-bus JSONL: Handovers, resources, races, and restart"
 topicDesc Seat = "host shard round-trips: echo/process/CLI host sketches, BodyLines split, session resume"
 topicDesc Transcript = "transcript oracle (B1): JSONL records, scrub agreement, silent failure"
 topicDesc Delivery = "delivery settlement: quiet response, exactly-once await, explicit root and reply posts"
@@ -88,7 +92,7 @@ topicDesc Connector = "connector turn grammar (B7): zero/one/two-frame turns"
 topicDesc Acp = "ACP seat (R2a): scripted double + wired-binary integration"
 topicDesc Lifecycle = "lifecycle hygiene (H): lock stress, daemon liveness, death honesty (L1-L5)"
 topicDesc Usage = "Hermes latest-prompt usage anchor"
-topicDesc Fare = "fare gate defaults, docspec flags, and repository/full module selection"
+topicDesc Fare = "fare gate defaults, docspec flags, repository/full module selection, and the index area query"
 
 topicParser :: Parser Topic
 topicParser =
@@ -117,6 +121,7 @@ opts =
 
 runTopic :: Topic -> IO ()
 runTopic All = mapM_ runTopic (filter (/= All) [minBound .. maxBound])
+runTopic Conch = conchTopic
 runTopic Seat = seatTopic
 runTopic Transcript = transcriptTopic
 runTopic Delivery = deliveryTopic

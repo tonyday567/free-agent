@@ -60,6 +60,7 @@ library
     Free.Agent.BusStats
     Free.Agent.Cli
     Free.Agent.Cli.Config
+    Free.Agent.Conch
     Free.Agent.Connector
     Free.Agent.Delivery
     Free.Agent.Diagram
@@ -67,6 +68,7 @@ library
     Free.Agent.Fare.Config
     Free.Agent.Fare.Exec
     Free.Agent.Fare.Gate
+    Free.Agent.Fare.Index
     Free.Agent.Fare.Read
     Free.Agent.Fare.Search
     Free.Agent.Fare.State
@@ -113,6 +115,7 @@ executable free-agent-axioma
     Axioma.Acp
     Axioma.Bus
     Axioma.Common
+    Axioma.Conch
     Axioma.Connector
     Axioma.Delivery
     Axioma.Diagram
@@ -137,6 +140,7 @@ executable free-agent-axioma
     circuits-agent,
     circuits-diagrams,
     circuits-parser >=0.1 && <0.2,
+    containers >=0.6 && <0.9,
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
     free-agent,

@@ -86,7 +86,7 @@ acpTopic = do
               "  case \"$line\" in",
               "    *'\"method\":\"initialize\"'*)\n      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":1,\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}}\\n' \"$id\" ;;",
               "    *'\"method\":\"session/new\"'*)\n      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"sessionId\":\"fake-bus\"}}\\n' \"$id\" ;;",
-              "    *'\"method\":\"session/prompt\"'*)\n      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"fake-bus\",\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"acp ack: ok\"}}}}'\n      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"stopReason\":\"end_turn\"}}\\n' \"$id\" ;;",
+              "    *'\"method\":\"session/prompt\"'*)\n      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"fake-bus\",\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"@acp1: acp ack: ok\"}}}}'\n      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"stopReason\":\"end_turn\"}}\\n' \"$id\" ;;",
               "  esac",
               "done"
             ]
@@ -119,6 +119,6 @@ acpTopic = do
     assert "R2a the wired acp seat answers the bus through a real pipe" $
       code == ExitSuccess
         && case replies of
-          [r] -> "acp ack: ok" `T.isInfixOf` body r && thread r == [0]
+          [r] -> to r == ["acp1"] && body r == "acp ack: ok" && thread r == []
           _ -> False
     removePathForcibly root

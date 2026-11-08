@@ -22,7 +22,7 @@ out=$(deck_eval '(progn
                (buffer-substring-no-properties (point-min) (point-max)))))
     (princ (format "draft=%s\nexit=%S\noutput=%S"
                    draft
-                   (and (string-match-p "bus say exited 3" err) t)
+                   (and (string-match-p "bus post exited 3" err) t)
                    (and (string-match-p "injected send failure" err) t)))))')
 assert_eq "the draft, exit status and CLI output all survive" \
   $'draft=draft survives\nexit=t\noutput=t' "$out"

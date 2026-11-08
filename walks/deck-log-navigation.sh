@@ -21,8 +21,8 @@ printf 'note\n' > "$ROOT/loom/runner-note.md"
 printf 'dup\n' > "$ROOT/buff/dup.md"
 printf 'dup\n' > "$ROOT/loom/dup.md"
 ABS="$ROOT/loom/mac-survey.md"
-say alice runner "root about [mac-survey §heron](mac-survey.md#heron) and $ABS + \`loom/mark-reply.md\` + bare runner-note.md + [gone](nope/missing.md#x) + [dead](loom/mark-reply.md#nope) + dup.md"
-printf 'reply' | "$FA" bus say -r "$ROOT" --from alice --to runner --thread 0 >/dev/null
+post alice runner "root about [mac-survey §heron](mac-survey.md#heron) and $ABS + \`loom/mark-reply.md\` + bare runner-note.md + [gone](nope/missing.md#x) + [dead](loom/mark-reply.md#nope) + dup.md"
+printf 'reply' | "$FA" bus post -r "$ROOT" --from alice --to runner --thread 0 >/dev/null
 
 step "RET and TAB resolve, the tail is read-only, and search runs in it"
 out=$(deck_eval '(progn

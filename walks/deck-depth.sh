@@ -6,8 +6,8 @@ source "$(dirname "$0")/deck-lib"
 
 step "a two-post thread with mail for the deck"
 new_root depth
-say alice runner "root"
-printf 'reply' | "$FA" bus say -r "$ROOT" --from alice --to runner --thread 0 >/dev/null
+post alice runner "root"
+printf 'reply' | "$FA" bus post -r "$ROOT" --from alice --to runner --thread 0 >/dev/null
 
 step "each surface cycles 1 → 2 → 0 → 1 and binds both Tab event names"
 out=$(deck_eval '(progn

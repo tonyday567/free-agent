@@ -36,7 +36,7 @@
   (unwind-protect
       (let ((original (free-agent-card-test--text free-agent-card-test-day))
             (view (free-agent-card-test--render-day))
-            opened-post opened-seat)
+            opened-post opened-seat opened-involvement)
         (with-current-buffer view
           (should (equal (buffer-string) original))
           (let ((post (free-agent-card-test--find-button "[473]"))
@@ -45,12 +45,17 @@
             (should seat)
             (cl-letf (((symbol-function 'bus-conversation-open-post)
                        (lambda (id) (setq opened-post id)))
+                      ((symbol-function 'bus-conversation-open-seat)
+                       (lambda (name) (setq opened-seat name)))
                       ((symbol-function 'bus-conversation-open-seat-involvement)
-                       (lambda (name) (setq opened-seat name))))
+                       (lambda (name) (setq opened-involvement name))))
               (button-activate post)
               (button-activate seat))
             (should (equal opened-post 473))
-            (should (equal opened-seat "bui")))
+            ;; The 📬 mark asks for the direct runner ↔ seat conversation,
+            ;; not the wider involvement view.
+            (should (equal opened-seat "bui"))
+            (should-not opened-involvement))
           (goto-char (point-min))
           (search-forward "[next]")
           (should-not (button-at (match-beginning 0)))
@@ -80,11 +85,13 @@
         (with-current-buffer "*bus conversation*"
           (bus-conversation--stop-timer)
           (should (equal bus-conversation--seat "bui"))
+          ;; Post 473 is `from bui to runner`, so it belongs to the direct view.
           (should (cl-find 473 bus-conversation--posts :key #'bus-conversation--id))
-          (should (string-prefix-p "bui · " (buffer-string)))
-          (should (string-match-p " · thread involvement\n\n" (buffer-string)))
-          (should bus-conversation--involvement)
-          (should (member "bui" bus-conversation--draft-recipients))))
+          ;; `[📬 bui]' asks for the direct runner ↔ bui view, so the header,
+          ;; the involvement flag and the draft recipients all say so.
+          (should (string-prefix-p "runner ↔ bui · " (buffer-string)))
+          (should-not bus-conversation--involvement)
+          (should (equal bus-conversation--draft-recipients '("bui")))))
     (free-agent-card-test--cleanup)))
 
 (ert-deftest free-agent-card-seat-involvement-includes-non-runner-threads ()
@@ -119,6 +126,91 @@
               (button-activate button)))
           (should (equal opened
                          "/Users/tonyday567/coffee/loom/loop-synthesis.md"))))
+    (free-agent-card-test--cleanup)))
+
+(defconst free-agent-card-test--shared-recipient-posts
+  '(((id . 5) (from . "runner") (to . ("bui" "scully")) (body . "wake bui and scully"))
+    ((id . 6) (from . "bui") (to . ("runner")) (body . "bui replies")))
+  "Posts whose focus post addresses more than one seat, so the two views differ.")
+
+(ert-deftest free-agent-card-seat-brackets-separate-direct-from-involvement ()
+  "`[📬 seat]' opens the direct view; a bare seat keeps the involvement view."
+  (with-temp-buffer
+    (insert "[📬 bui] opens the direct view; [bui] keeps involvement.")
+    (setq free-agent-card--directory temporary-file-directory)
+    (free-agent-card--linkify free-agent-card-test--shared-recipient-posts)
+    (let (direct involvement)
+      (cl-letf (((symbol-function 'bus-conversation-open-seat)
+                 (lambda (name) (setq direct name)))
+                ((symbol-function 'bus-conversation-open-seat-involvement)
+                 (lambda (name) (setq involvement name))))
+        (button-activate (free-agent-card-test--find-button "[📬 bui]"))
+        (should (equal direct "bui"))
+        (should-not involvement)
+        (button-activate (free-agent-card-test--find-button "[bui]"))
+        (should (equal involvement "bui")))
+      (should (equal (buffer-string)
+                     "[📬 bui] opens the direct view; [bui] keeps involvement.")))))
+
+(ert-deftest free-agent-card-direct-draft-addresses-only-the-seat ()
+  "The direct view drafts to the seat; involvement and post views keep the focus post's recipients."
+  (let ((posts free-agent-card-test--shared-recipient-posts)
+        (root bus-conversation-root))
+    (unwind-protect
+        (progn
+          (bus-conversation--open posts posts root 5 t "bui" nil)
+          (with-current-buffer "*bus conversation*"
+            (bus-conversation--stop-timer)
+            (should (equal bus-conversation--draft-recipients '("bui")))
+            (should (string-match-p "· to bui ---" (buffer-string))))
+          (bus-conversation--open posts posts root 5 t "bui" t)
+          (with-current-buffer "*bus conversation*"
+            (bus-conversation--stop-timer)
+            (should (equal bus-conversation--draft-recipients '("bui" "scully"))))
+          (bus-conversation--open posts posts root 5 t nil nil)
+          (with-current-buffer "*bus conversation*"
+            (bus-conversation--stop-timer)
+            (should (equal bus-conversation--draft-recipients '("bui" "scully")))))
+      (bus-conversation--stop-timer)
+      (free-agent-card-test--cleanup))))
+
+(ert-deftest free-agent-card-direct-draft-survives-refresh ()
+  "A refresh keeps the direct view's draft text and its seat-only recipients."
+  (let ((posts free-agent-card-test--shared-recipient-posts)
+        (root bus-conversation-root))
+    (unwind-protect
+        (progn
+          (bus-conversation--open posts posts root 5 nil "bui" nil)
+          (with-current-buffer "*bus conversation*"
+            (bus-conversation--stop-timer)
+            (should (equal bus-conversation--draft-recipients '("bui")))
+            (goto-char bus-conversation--draft-start)
+            (insert "local draft probe")
+            (bus-conversation-refresh)
+            (bus-conversation--stop-timer)
+            (should (equal bus-conversation--draft-recipients '("bui")))
+            (should (equal (buffer-substring-no-properties
+                            bus-conversation--draft-start (point-max))
+                           "local draft probe"))))
+      (bus-conversation--stop-timer)
+      (free-agent-card-test--cleanup))))
+
+;; This witness runs the live bus root end to end.  It does not discriminate on
+;; its own: the newest shape post already addressed shape, so the old draft rule
+;; produced the same recipients.  The discriminating witnesses are
+;; `free-agent-card-seat-brackets-separate-direct-from-involvement' and
+;; `free-agent-card-direct-draft-addresses-only-the-seat'.
+(ert-deftest free-agent-card-direct-seat-link-drafts-to-the-seat ()
+  "Opening a seat directly drafts to that seat and says so in the header."
+  (unwind-protect
+      (progn
+        (bus-conversation-open-seat "shape")
+        (with-current-buffer "*bus conversation*"
+          (bus-conversation--stop-timer)
+          (should (equal bus-conversation--draft-recipients '("shape")))
+          (should (string-match-p "runner ↔ shape" (buffer-string)))
+          (should (string-match-p "· to shape ---" (buffer-string)))))
+    (bus-conversation--stop-timer)
     (free-agent-card-test--cleanup)))
 
 (ert-run-tests-batch-and-exit)
