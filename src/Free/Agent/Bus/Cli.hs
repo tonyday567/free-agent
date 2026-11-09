@@ -9,6 +9,7 @@
 --   post [ROOT] [--from NAME] [--to NAME]... [--body TEXT]
 --   watch [ROOT] NAME [NAME...]
 --   read [ROOT] [NAME...] [--since ID | --cursor NAME] [--thread ID] [--depth 0|1|2]
+--   org [ROOT] --thread ID
 --   inbox [ROOT] NAME [--mark-read] [--depth 0|1|2]
 --   attach [ROOT] NAME
 --   detach [ROOT] NAME
@@ -16,7 +17,7 @@
 --   cursor [ROOT] get NAME
 --   cursor [ROOT] set NAME ID
 --   ping-watch [ROOT] NAME
---   status [ROOT] [--threshold SECS] [--live] [--depth 0|1|2]
+--   status [ROOT] [--threshold SECS] [--depth 0|1|2] [--org]
 --
 -- @post@ is the only posting command: the body is @--body TEXT@ or piped on
 -- stdin with @--from@, and a whole post line on stdin is the JSON mode where
@@ -38,39 +39,41 @@
 -- the help says so rather than leaving the "|" to be read as a combined
 -- form.
 --
--- @--depth@ selects the cascade: 0 is a dot, 1 is one line, 2 is the
--- verbatim evidence. The depth is always an explicit flag; the api never
--- guesses the consumer. @status --live@ derives its dots from the seat
--- heartbeats (@.hb-NAME@, see "Free.Agent.Bus.Heartbeat"): pid evidence
--- separates a crash from a live but stale seat.
+-- @--depth@ selects the cascade: 0 is a census, 1 adds seat rows, 2 adds
+-- heartbeat, cursor, and last-post evidence. The depth is always an explicit
+-- flag; the api never guesses the consumer.
+--
+-- @status@ reads one snapshot of heartbeats, pids, cursors, and the log:
+-- circle membership, directed unread counts, and last-post anchors. @--org@
+-- selects the Org renderer for @fab-open-status@, not another projection.
 module Free.Agent.Bus.Cli
   ( BusCommand (..),
     Depth (..),
+    SeatCircle (..),
     addressConflict,
     applyPostFlags,
     busParser,
     checkThreadId,
     depthOpt,
-    hbVerdict,
-    liveOpt,
+    orgOpt,
     readyPosts,
     readyWarnings,
     runBusCommand,
     runStatus,
+    seatCircle,
   )
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
 import Circuit.Agent.Framing (Stamped, frameStored, parsePost, stamp, stamped, unframeStored)
-import Circuit.Agent.Mark (isHalt, markOf)
 import Control.Applicative ((<|>))
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (IOException, SomeException, displayException, try)
 import Control.Monad (forM_, forever, guard, unless, when)
-import Data.Char (isAlphaNum)
+import Data.Char (isAlphaNum, isAsciiUpper, isDigit)
 import Data.Foldable (traverse_)
 import Data.List (isPrefixOf, sort, sortOn)
-import Data.Maybe (isJust, listToMaybe, mapMaybe, maybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe, maybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -80,7 +83,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Free.Agent.Bus (postLocal, readFileStrict)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (Human (..), attachHuman, humanNames, readCursor, readCursorAll, readHuman, removeHuman, writeCursor)
-import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbGlyph, hbPath, hbText, readHeartbeat)
+import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbPath, hbText, readHeartbeat)
 import Free.Agent.BusStats (SliceMode (..), slicePosts)
 import Free.Agent.Cli.Config (rootOpt)
 import Options.Applicative
@@ -110,7 +113,7 @@ import System.Posix.Signals (nullSignal, signalProcess)
 import System.Posix.Types (CPid)
 import Text.Read (readMaybe)
 
--- | Cascade depth: 0 is a dot, 1 is a line, 2 is the verbatim evidence.
+-- | Cascade depth: 0 is a census, 1 adds rows, 2 adds verbatim evidence.
 newtype Depth = Depth Int
   deriving (Eq, Show)
 
@@ -121,6 +124,7 @@ data BusCommand
   = PostCommand FilePath (Maybe Text) [Text] (Maybe Text) (Maybe PostId) (Maybe Text) Bool
   | WatchCommand FilePath [Text]
   | ReadCommand FilePath [Text] (Maybe Since) (Maybe PostId) Depth
+  | OrgCommand FilePath (Maybe PostId)
   | InboxCommand FilePath Text Bool Depth
   | AttachCommand FilePath Text
   | DetachCommand FilePath Text
@@ -129,7 +133,7 @@ data BusCommand
   | CursorGetCommand FilePath Text
   | CursorSetCommand FilePath Text PostId
   | PingWatchCommand FilePath Text
-  | StatusCommand FilePath NominalDiffTime Bool Depth
+  | StatusCommand FilePath NominalDiffTime Depth Bool
   | DaemonCommand FilePath
   deriving (Show)
 
@@ -156,7 +160,7 @@ depthOpt dflt =
         <> metavar "0|1|2"
         <> value dflt
         <> showDefault
-        <> help "Cascade depth: 0 dot, 1 line, 2 full"
+        <> help "Cascade depth: 0 summary, 1 rows, 2 evidence"
     )
   where
     readDepth s = case reads s of
@@ -278,6 +282,9 @@ readCmd = do
   depth <- depthOpt (Depth 2)
   pure (ReadCommand root names since thr depth)
 
+orgCmd :: Parser BusCommand
+orgCmd = OrgCommand <$> rootOpt <*> threadOpt
+
 inboxCmd :: Parser BusCommand
 inboxCmd = do
   root <- rootOpt
@@ -353,7 +360,7 @@ thresholdOpt =
         <> metavar "SECS"
         <> value 900
         <> showDefault
-        <> help "Seconds of silence before the bus (and a doubtful heartbeat) reads as stale"
+        <> help "Seconds before an unverifiable heartbeat reads as non-fab"
     )
   where
     readSeconds s =
@@ -362,16 +369,11 @@ thresholdOpt =
         _ -> Left ("expected a whole number of seconds, got: " ++ s)
 
 statusCmd :: Parser BusCommand
-statusCmd = do
-  root <- rootOpt
-  threshold <- thresholdOpt
-  live <- liveOpt
-  depth <- depthOpt (Depth 1)
-  pure (StatusCommand root threshold live depth)
+statusCmd = StatusCommand <$> rootOpt <*> thresholdOpt <*> depthOpt (Depth 1) <*> orgOpt
 
--- | The @--live@ view selector: active-seat dots-and-lines from the heartbeats.
-liveOpt :: Parser Bool
-liveOpt = switch (long "live" <> help "Active seat dots-and-lines: heartbeat state, cursor, last post id")
+-- | Org renders the same status snapshot for @fab-open-status@.
+orgOpt :: Parser Bool
+orgOpt = switch (long "org" <> help "Org status output for fab-open-status")
 
 daemonCmd :: Parser BusCommand
 daemonCmd = DaemonCommand <$> rootOpt
@@ -382,14 +384,15 @@ busParser =
     ( command "post" (info (postCmd <**> helper) (progDesc "Post flags or JSON; --thread carries reply ancestry, --channel names the channel; the body is --body or piped on stdin"))
         <> command "watch" (info (watchCmd <**> helper) (progDesc "Watch the log for posts addressed to NAMEs"))
         <> command "read" (info (readCmd <**> helper) (progDesc "Read posts addressed to NAMEs, or a thread by id"))
+        <> command "org" (info (orgCmd <**> helper) (progDesc "Render a thread as an Org-mode conversation: * [#ID] with channel when present, ** sender LABEL per post"))
         <> command "inbox" (info (inboxCmd <**> helper) (progDesc "Print unread posts addressed to NAME; --mark-read advances .cursor-NAME to the last printed id"))
         <> command "attach" (info (attachCmd <**> helper) (progDesc "Record NAME as the human attached to this root (evidence only; changes no delivery or READY path)"))
         <> command "detach" (info (detachCmd <**> helper) (progDesc "Remove NAME's attached-human marker (the cursor and unread mail are untouched)"))
-        <> command "retire" (info (retireCmd <**> helper) (progDesc "Write the dead marker to NAME's heartbeat: the seat leaves the live roster, its cursor, log and transcripts stay as evidence; no process is signalled"))
+        <> command "retire" (info (retireCmd <**> helper) (progDesc "Write the dead marker to NAME's heartbeat: the seat joins the retired circle, its cursor, log and transcripts stay as evidence; no process is signalled"))
         <> command "ready" (info (readyCmd <**> helper) (progDesc "List unclaimed open TASKs with no unresolved blocker"))
         <> command "cursor" (info (cursorCmd <**> helper) (progDesc "Read or write agent cursor"))
         <> command "ping-watch" (info (pingWatchCmd <**> helper) (progDesc "Watch the ping file for NAME and exit on change"))
-        <> command "status" (info (statusCmd <**> helper) (progDesc "Bus health: post count, last post, seats, seat liveness"))
+        <> command "status" (info (statusCmd <**> helper) (progDesc "Unified seat census: circle counts, directed unread, and last-post anchors"))
         <> command "daemon" (info (daemonCmd <**> helper) (progDesc "Run the single-writer stamping daemon"))
     )
 
@@ -402,6 +405,7 @@ runBusCommand (PostCommand root mfrom mto mbody mthr mchan viaDaemon) =
   runPost root mfrom mto mbody mthr mchan viaDaemon
 runBusCommand (WatchCommand root names) = runWatch root names
 runBusCommand (ReadCommand root names since thr depth) = runRead root names since thr depth
+runBusCommand (OrgCommand root thr) = runOrg root thr
 runBusCommand (InboxCommand root name markRead depth) = runInbox root name markRead depth
 runBusCommand (AttachCommand root name) = runAttach root name
 runBusCommand (DetachCommand root name) = runDetach root name
@@ -410,7 +414,7 @@ runBusCommand (ReadyCommand root depth) = runReady root depth
 runBusCommand (CursorGetCommand root name) = runCursorGet root name
 runBusCommand (CursorSetCommand root name pid) = runCursorSet root name pid
 runBusCommand (PingWatchCommand root name) = runPingWatch root name
-runBusCommand (StatusCommand root threshold live depth) = runStatus root threshold live depth
+runBusCommand (StatusCommand root threshold depth org) = runStatus root threshold depth org
 runBusCommand (DaemonCommand root) = runDaemon @Text root
 
 -- ---------------------------------------------------------------------------
@@ -659,13 +663,12 @@ runDetach root name = do
         <> T.pack root'
     )
 
--- | Retire a seat: write the @dead@ marker to its heartbeat. The seat
--- leaves the live roster from the next @status --live@; its cursor, log
--- posts, transcripts and the heartbeat file itself stay as evidence. No
--- process is signalled — a genuinely live seat's next heartbeat write
--- overwrites the marker, which is the honest outcome of a mistaken
--- retirement. The pid recorded is the seat's last known one, not the
--- caller's.
+-- | Retire a seat: write the @dead@ marker to its heartbeat. The seat joins
+-- the black retired circle in the next status; its cursor, log posts,
+-- transcripts and the heartbeat file itself stay as evidence. No process is
+-- signalled — a genuinely live seat's next heartbeat write overwrites the
+-- marker, which is the honest outcome of a mistaken retirement. The pid
+-- recorded is the seat's last known one, not the caller's.
 runRetire :: FilePath -> Text -> IO ()
 runRetire root name = do
   root' <- resolveRoot root
@@ -682,7 +685,7 @@ runRetire root name = do
         <> maybe "" (\p -> " " <> T.pack (show p)) mpid
         <> "\n"
     )
-  TIO.putStrLn ("🔴 " <> name <> " retired on " <> T.pack root')
+  TIO.putStrLn ("⚫ " <> name <> " retired on " <> T.pack root')
 
 postsOf :: Text -> [Stamped Text]
 postsOf content = mapMaybe (unframeStored @Text) (filter (not . T.null) (T.lines content))
@@ -875,6 +878,86 @@ runThreadView posts tid depth =
       TIO.putStrLn ("🔴 no post with id " <> T.pack (show tid))
       exitFailure
 
+-- | Print a thread as an Org-mode conversation: @* [#ID]@ — the id asked
+-- for, with the thread root's channel appended when one is present — then
+-- one @** sender [#id] LABEL@ subheading per post, body beneath. The
+-- label is the first ALL-CAPS word of the body when it is a post-type
+-- token (NOTE, DONE, …); it is consumed from the body render, and a post
+-- without one carries a blank label and renders its body whole.
+runOrg :: FilePath -> Maybe PostId -> IO ()
+runOrg root mThread = do
+  root' <- resolveRoot root
+  requireBus root'
+  case mThread of
+    Nothing -> do
+      TIO.putStrLn "🔴 org requires --thread ID"
+      exitFailure
+    Just tid -> do
+      content <- readFileStrict (root' </> "log.jsonl")
+      case [vs | (_, vs) <- slicePosts ByThread (postsOf content), any ((== tid) . snd . stamp) vs] of
+        (vs : _) -> TIO.putStr (renderOrgThread tid vs)
+        [] -> do
+          TIO.putStrLn ("🔴 no post with id " <> T.pack (show tid))
+          exitFailure
+
+renderOrgThread :: PostId -> [Stamped Text] -> Text
+renderOrgThread tid posts =
+  heading
+    <> "\n"
+    <> T.intercalate "\n" (map renderOrgPost (sortOn (snd . stamp) posts))
+    <> "\n"
+  where
+    heading =
+      "* [#"
+        <> T.pack (show tid)
+        <> "]"
+        <> case rootChannel of
+          Just c -> " " <> c
+          Nothing -> ""
+    rootChannel =
+      case [channel p | stored <- posts, let p = stamped stored, null (thread p)] of
+        (Just c : _) -> Just c
+        _ -> Nothing
+
+renderOrgPost :: Stamped Text -> Text
+renderOrgPost stored =
+  "** " <> from p <> " [#" <> T.pack (show (snd (stamp stored))) <> "]" <> label <> "\n" <> rest
+  where
+    p = stamped stored
+    (word, bodyText) = splitLabel (body p)
+    label = if T.null word then "" else " " <> word
+    -- A body line that would read as an Org headline or start with a
+    -- comma is escaped with a leading comma, the Org protection
+    -- convention; `,* not a headline', `,, literal comma'.  fab-send
+    -- unescapes, so a rendered post can be copied into a draft and the
+    -- stored body round-trips exactly.
+    rest = T.intercalate "\n" (map escape (T.lines bodyText))
+    escape l
+      | "*" `T.isPrefixOf` l = "," <> l
+      | "," `T.isPrefixOf` l = "," <> l
+      | otherwise = l
+
+-- | Split a body into its post-type label and the remaining text. The
+-- label is the first word of the first line when it is two or more ASCII
+-- uppercase letters or digits; it is consumed, and everything else —
+-- including any later lines — passes through verbatim. Any other body
+-- carries a blank label and renders whole.
+splitLabel :: Text -> (Text, Text)
+splitLabel b =
+  case T.break (== '\n') b of
+    (line1, rest) ->
+      case T.break (== ' ') (T.stripStart line1) of
+        (w, afterW)
+          | isPostType w -> (w, T.dropWhile (== ' ') afterW <> rest)
+        _ -> ("", b)
+
+-- | A post-type token: two or more ASCII uppercase letters or digits, the
+-- shape of NOTE, TASK, DONE. Anything else is body text, not a label.
+isPostType :: Text -> Bool
+isPostType w =
+  let n = T.length w
+   in n >= 2 && T.all (\c -> isAsciiUpper c || isDigit c) w
+
 filterSince :: [Name] -> PostId -> Text -> Maybe (Stamped Text)
 filterSince names sinceId line = do
   stored <- unframeStored @Text line
@@ -943,35 +1026,6 @@ runPingWatch root name = do
 -- status
 -- ---------------------------------------------------------------------------
 
--- | Seat status classification for the cursor report.
-data SeatStatus = CaughtUp | Done | Behind Integer
-
--- | Liveness from state, age, and (for current files) a process probe.
--- A live working seat reads 🟣 busy at any age — a long turn is not
--- idleness — with its staleness named once the heartbeat passes the
--- threshold. A live wake or idle seat reads 🟢 until 'idleParkedAfter',
--- then 🟡 parked: quiet that has stopped promising the next transition.
--- An explicit dead marker is retired and a dead pid is crashed. A stale
--- heartbeat with unverifiable liveness reads ⚪ unknown — pids are
--- recycled, so age alone never promotes it to a liveness claim.
-hbVerdict :: NominalDiffTime -> UTCTime -> Maybe Heartbeat -> IO (Text, Text)
-hbVerdict threshold now mhb = case mhb of
-  Nothing -> pure ("⚪", "no heartbeat")
-  Just (Dead, ts, _) -> pure ("🔴", "retired " <> fmtAge (diffUTCTime now ts) <> " ago")
-  Just (st, ts, mpid) -> do
-    alive <- maybe (pure Nothing) pidAlive mpid
-    let age = diffUTCTime now ts
-        stale = age > threshold
-        stateText = hbText st <> " " <> fmtAge age <> " ago"
-        verdict
-          | alive == Just False = ("🔴", "pid " <> maybe "?" (T.pack . show) mpid <> " is not running — crashed?")
-          | st == Working && alive == Just True =
-              ("🟣", stateText <> (if stale then "; pid " <> maybe "?" (T.pack . show) mpid <> " alive — stale?" else ""))
-          | (st == Wake || st == Idle) && alive == Just True = (if age > idleParkedAfter then "🟡" else "🟢", stateText)
-          | stale = ("⚪", stateText <> "; liveness unknown — stale?")
-          | otherwise = (hbGlyph st, stateText)
-    pure verdict
-
 -- | An idle seat parks: 🟡 past this many seconds of silence. Below it
 -- silence still reads as readiness; past it, as storage.
 idleParkedAfter :: NominalDiffTime
@@ -987,150 +1041,95 @@ pidAlive pid = do
       | isPermissionError e -> Just True
       | otherwise -> Nothing
 
-fmtAge :: NominalDiffTime -> Text
-fmtAge s
-  | s < 120 = T.pack (show (round s :: Int)) <> "s"
-  | s < 7200 = T.pack (show (round (s / 60) :: Int)) <> "m"
-  | s < 172800 = T.pack (show (round (s / 3600) :: Int)) <> "h"
-  | otherwise = T.pack (show (round (s / 86400) :: Int)) <> "d"
+data SeatCircle = CircleWorking | CircleReady | CircleParked | CircleCrashed | CircleRetired | CircleNonFab
+  deriving (Eq, Ord, Show, Enum, Bounded)
 
--- | Print a bus status report.
---
--- A seat whose latest own post is a halt mark (🟢/🔵) is reported as @done@
--- rather than @behind@: decided quiet is a read, not an inference. The
--- unread figure behind a seat is the mail count — what 'runInbox' would
--- print for that name — so another seat's posts and public posts never
--- read as its mail.
---
--- With @--live@ the active seat block is derived from the heartbeats instead:
--- one dot per seat, a line of state, cursor and last post, and — at depth 2 —
--- the heartbeat file and the seat's last post verbatim. Explicitly retired
--- seats leave this view; their heartbeats and log evidence stay on disk.
--- Dots read the loop: 🟣 working, 🟢 wake or idle ready, 🟡 idle parked
--- (past 'idleParkedAfter'), 🔴 crashed or retired, ⚪ unknown. A working
--- seat past the threshold names its staleness; an unverifiable stale
--- heartbeat reads unknown; a dead pid reads crashed and stays visible.
-runStatus :: FilePath -> NominalDiffTime -> Bool -> Depth -> IO ()
-runStatus root threshold live depth@(Depth d) = do
+circleGlyph :: SeatCircle -> Text
+circleGlyph = \case
+  CircleWorking -> "🟣"
+  CircleReady -> "🟢"
+  CircleParked -> "🟡"
+  CircleCrashed -> "🔴"
+  CircleRetired -> "⚫"
+  CircleNonFab -> "⚪"
+
+-- | Classify the current fab presence. White means non-fab: there is no
+-- heartbeat, or a stale heartbeat has no process evidence. Explicit death is
+-- retired, while a dead pid without that marker is crashed.
+seatCircle :: NominalDiffTime -> UTCTime -> Maybe Heartbeat -> IO SeatCircle
+seatCircle _ _ Nothing = pure CircleNonFab
+seatCircle _ _ (Just (Dead, _, _)) = pure CircleRetired
+seatCircle threshold now (Just (st, ts, mpid)) = do
+  alive <- maybe (pure Nothing) pidAlive mpid
+  let age = diffUTCTime now ts
+      stale = age > threshold
+      circle
+        | alive == Just False = CircleCrashed
+        | st == Working && alive == Just True = CircleWorking
+        | (st == Wake || st == Idle) && alive == Just True =
+            if age > idleParkedAfter then CircleParked else CircleReady
+        | stale = CircleNonFab
+        | otherwise = case st of
+            Wake -> CircleReady
+            Idle -> CircleReady
+            Working -> CircleWorking
+  pure circle
+
+data StatusRow = StatusRow
+  { statusName :: Name,
+    statusCircle :: SeatCircle,
+    statusUnread :: Int,
+    statusCursor :: Maybe PostId,
+    statusHeartbeat :: Maybe Heartbeat,
+    statusLast :: Maybe (Stamped Text)
+  }
+
+data StatusSnapshot = StatusSnapshot
+  { snapshotLast :: Maybe (Stamped Text),
+    snapshotRows :: [StatusRow]
+  }
+
+-- | Read the one status model: circle membership, directed unread mail, and
+-- last posts. A missing cursor has the same meaning as in 'runInbox': every
+-- addressed post is unread. Reading status never advances a cursor.
+readStatus :: FilePath -> NominalDiffTime -> IO StatusSnapshot
+readStatus root threshold = do
   requireBus root
-  let path = root </> "log.jsonl"
-  content <- readFileStrict path
-  let ls = filter (not . T.null) (T.lines content)
-      posts = mapMaybe (unframeStored @Text) ls
-      idless = length ls - length posts
-      maxId = maximum (0 : map (snd . stamp) posts)
+  content <- readFileStrict (root </> "log.jsonl")
+  let posts = mapMaybe (unframeStored @Text) (filter (not . T.null) (T.lines content))
   now <- getCurrentTime
-  case posts of
-    [] -> TIO.putStrLn ("🟡 " <> T.pack root <> " — empty bus (0 posts)")
-    _ -> TIO.putStrLn (busLine now posts idless)
   entries <- listDirectory root
-  let cursorNames = sort [T.pack (drop (length cursorPrefix) e) | e <- entries, cursorPrefix `isPrefixOf` e]
-      hbNames = sort [T.pack (drop (length hbPrefix) e) | e <- entries, hbPrefix `isPrefixOf` e]
-  if live
-    then do
-      humans <- humanNames root
-      let seats = sortNub (hbNames ++ cursorNames ++ humans ++ participants posts)
-      rows <-
-        traverse
-          ( \n -> do
-              mcursor <- cursorIfExists n
-              mhb <- readHeartbeat root n
-              pure (n, mcursor, mhb)
-          )
-          seats
-      traverse_ (renderSeat now posts) (filter (\(_, _, mhb) -> activeSeat mhb) rows)
-    else when (d >= 1) $ do
-      cursors <- traverse (\n -> (n,) <$> readCursor root n) cursorNames
-      let statuses = map (seatStatus posts maxId) cursors
-          behinds = [(n, c, u) | (n, c, Behind u) <- statuses]
-          dones = [(n, c) | (n, c, Done) <- statuses]
-          caughtUps = [(n, c) | (n, c, CaughtUp) <- statuses]
-      if null cursorNames
-        then TIO.putStrLn "seats: no cursors — nothing has ever read this bus"
-        else do
-          TIO.putStrLn
-            ( "seats: "
-                <> T.pack (show (length cursorNames))
-                <> " cursors, "
-                <> T.pack (show (length behinds))
-                <> " behind, "
-                <> T.pack (show (length dones))
-                <> " done, "
-                <> T.pack (show (length caughtUps))
-                <> " caught up"
-            )
-          traverse_
-            (\(n, c, u) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " (" <> T.pack (show u) <> " unread)"))
-            behinds
-          traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " done")) dones
-          traverse_ (\(n, c) -> TIO.putStrLn ("  " <> n <> " @" <> T.pack (show c) <> " caught up")) caughtUps
+  let cursorNames = sort [T.pack (drop (length (".cursor-" :: String)) e) | e <- entries, ".cursor-" `isPrefixOf` e]
+      hbNames = sort [T.pack (drop (length (".hb-" :: String)) e) | e <- entries, ".hb-" `isPrefixOf` e]
+  humans <- humanNames root
+  rows <- traverse (statusRow now posts) (sortNub (hbNames ++ cursorNames ++ humans ++ participants posts))
+  pure
+    StatusSnapshot
+      { snapshotLast = listToMaybe (sortOn (Down . snd . stamp) posts),
+        snapshotRows = rows
+      }
   where
-    activeSeat (Just (Dead, _, _)) = False
-    activeSeat _ = True
-
-    cursorPrefix = ".cursor-"
-    hbPrefix = ".hb-"
+    statusRow now posts n = do
+      mcursor <- cursorIfExists n
+      mhb <- readHeartbeat root n
+      circle <- seatCircle threshold now mhb
+      let mailCursor = fromMaybe 0 mcursor
+          unread = length [() | s <- posts, snd (stamp s) >= mailCursor, deliversTo (stamped s) [n]]
+      pure
+        StatusRow
+          { statusName = n,
+            statusCircle = circle,
+            statusUnread = unread,
+            statusCursor = mcursor,
+            statusHeartbeat = mhb,
+            statusLast = lastFor n posts
+          }
 
     cursorIfExists n = do
       let p = root </> (".cursor-" <> T.unpack n)
       found <- doesFileExist p
-      if found then Just <$> readCursor root n else pure Nothing
+      if found then Just <$> readCursorAll root n else pure Nothing
 
-    -- The bus verdict: quiet is a read off the log, and a bus with no
-    -- durable post in the threshold is quiet, not dead.
-    busLine now posts idless =
-      let lastPost = last posts
-          age = diffUTCTime now (fst (stamp lastPost))
-          liveNow = age < threshold
-       in (if liveNow then "🟢 " else "🟡 ")
-            <> T.pack root
-            <> (if liveNow then " — live; " else " — quiet; ")
-            <> T.pack (show (length posts))
-            <> " posts"
-            <> (if idless > 0 then " (" <> T.pack (show idless) <> " id-less)" else "")
-            <> "; last id="
-            <> T.pack (show (snd (stamp lastPost)))
-            <> " from="
-            <> from (stamped lastPost)
-            <> " at "
-            <> T.pack (show (fst (stamp lastPost)))
-            <> " ("
-            <> fmtAge age
-            <> " ago)"
-
-    -- One seat at the requested depth. A name is its own label: attached
-    -- humans render exactly like seats, by name, with no role tag.
-    renderSeat now posts (n, mcursor, mhb) = do
-      (dot, stateText) <- hbVerdict threshold now mhb
-      let cursorText = maybe "—" (T.pack . show) mcursor
-          lastText = case lastFor n posts of
-            Nothing -> "no posts"
-            Just s ->
-              "last post "
-                <> T.pack (show (snd (stamp s)))
-                <> " by "
-                <> from (stamped s)
-                <> " "
-                <> fmtAge (diffUTCTime now (fst (stamp s)))
-                <> " ago"
-      if d <= 0
-        then TIO.putStrLn (dot <> " " <> n)
-        else do
-          TIO.putStrLn (dot <> " " <> n <> " — " <> stateText <> "; cursor " <> cursorText <> "; " <> lastText)
-          when (d >= 2) $ do
-            forM_ mhb $ \(st, ts, mpid) ->
-              TIO.putStrLn
-                ( "    hb: "
-                    <> hbText st
-                    <> " "
-                    <> T.pack (iso8601Show ts)
-                    <> " pid="
-                    <> maybe "legacy" (T.pack . show) mpid
-                )
-            forM_ (lastFor n posts) $ \s ->
-              TIO.putStrLn ("    log: " <> frameStored s)
-
-    -- The last post a seat was party to, in either direction.
     lastFor n posts =
       listToMaybe $
         sortOn (Down . snd . stamp) $
@@ -1142,20 +1141,73 @@ runStatus root threshold live depth@(Depth d) = do
             ++ concat [[n | n <- to (stamped s), not (T.null n)] | s <- posts]
         )
 
-    seatStatus :: [Stamped Text] -> PostId -> (Name, PostId) -> (Name, PostId, SeatStatus)
-    seatStatus posts maxId (n, c)
-      | isDone = (n, c, Done)
-      | c > maxId = (n, c, CaughtUp)
-      | otherwise = (n, c, Behind (fromIntegral unread))
-      where
-        -- The unread figure is the mail count — what 'runInbox' would print
-        -- for the name — not the log span after the cursor, so other
-        -- people's posts and public posts do not read as this name's mail.
-        unread = length [() | s <- posts, snd (stamp s) >= c, deliversTo (stamped s) [n]]
-        isDone =
-          case latestBy n posts of
-            Nothing -> False
-            Just stored -> maybe False isHalt (markOf (stamped stored))
+renderStatus :: Depth -> Bool -> StatusSnapshot -> Text
+renderStatus (Depth d) org snapshot =
+  T.intercalate "\n" (censusLine : body) <> "\n"
+  where
+    rows = snapshotRows snapshot
+    censusLine = (if org then "* " else "") <> statusHeader (snapshotLast snapshot) rows
+    body
+      | d <= 0 = []
+      | org = concatMap (renderOrgGroup d rows) (presentCircles rows)
+      | otherwise = concatMap (renderPlainRow d) rows
 
-    latestBy :: Name -> [Stamped Text] -> Maybe (Stamped Text)
-    latestBy n = listToMaybe . sortOn (Down . snd . stamp) . filter ((== n) . from . stamped)
+presentCircles :: [StatusRow] -> [SeatCircle]
+presentCircles rows = [c | c <- [minBound .. maxBound], any ((== c) . statusCircle) rows]
+
+statusHeader :: Maybe (Stamped Text) -> [StatusRow] -> Text
+statusHeader mlast rows =
+  T.intercalate " " (counts <> ["| " <> lastText])
+  where
+    counts =
+      [ circleGlyph c <> " " <> T.pack (show (length members))
+      | c <- [minBound .. maxBound],
+        let members = filter ((== c) . statusCircle) rows,
+        not (null members)
+      ]
+    lastText = case mlast of
+      Nothing -> "last —"
+      Just s -> "last [#" <> T.pack (show (snd (stamp s))) <> "]"
+
+renderOrgGroup :: Int -> [StatusRow] -> SeatCircle -> [Text]
+renderOrgGroup d rows circle =
+  ("** " <> circleGlyph circle) : concatMap (renderOrgRow d) (filter ((== circle) . statusCircle) rows)
+
+renderOrgRow :: Int -> StatusRow -> [Text]
+renderOrgRow d row =
+  ("*** " <> statusLine row) : (if d >= 2 then statusEvidence row else [])
+
+renderPlainRow :: Int -> StatusRow -> [Text]
+renderPlainRow d row =
+  (circleGlyph (statusCircle row) <> " " <> statusLine row) : (if d >= 2 then statusEvidence row else [])
+
+statusLine :: StatusRow -> Text
+statusLine row =
+  statusName row
+    <> " ("
+    <> T.pack (show (statusUnread row))
+    <> ") "
+    <> maybe "no posts" (\s -> "post [#" <> T.pack (show (snd (stamp s))) <> "]") (statusLast row)
+
+statusEvidence :: StatusRow -> [Text]
+statusEvidence row =
+  maybe [] heartbeatEvidence (statusHeartbeat row)
+    <> ["    cursor: " <> maybe "—" (T.pack . show) (statusCursor row)]
+    <> maybe [] (\s -> ["    log: " <> frameStored s]) (statusLast row)
+  where
+    heartbeatEvidence (st, ts, mpid) =
+      [ "    hb: "
+          <> hbText st
+          <> " "
+          <> T.pack (iso8601Show ts)
+          <> " pid="
+          <> maybe "legacy" (T.pack . show) mpid
+      ]
+
+-- | Print the unified status snapshot. Depth 0 is the census, depth 1 adds
+-- seat rows, and depth 2 adds the heartbeat, cursor, and last-post evidence.
+-- Org is a renderer of this same model, not a second status projection.
+runStatus :: FilePath -> NominalDiffTime -> Depth -> Bool -> IO ()
+runStatus root threshold depth org = do
+  snapshot <- readStatus root threshold
+  TIO.putStr (renderStatus depth org snapshot)

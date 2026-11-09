@@ -44,6 +44,8 @@ assert_eq "read --cursor NAME agrees" "2" \
   "$(printf '%s' "$out" | grep -c . || true)"
 assert_eq "and read NAME with no --since still prints both" "2" \
   "$(count_lines "$FA" bus read -r "$ROOT" bob --depth 0)"
+row=$("$FA" bus status -r "$ROOT" --depth 1 2>&1 | grep '⚪ bob' || true)
+assert_eq "status agrees that a missing cursor means two unread" "⚪ bob (2) post [#1]" "$row"
 
 step "a root with no log: every view refuses it, read included"
 # Not new_root: that writes an empty log.jsonl, and this step needs a root with
@@ -67,7 +69,7 @@ post alice carol "for carol"
 post alice carol "for carol again"
 "$FA" bus cursor set -r "$ROOT" bob 0 >/dev/null
 assert_eq "inbox says bob has one" "1" "$(count_lines "$FA" bus inbox -r "$ROOT" bob --depth 0)"
-row=$("$FA" bus status -r "$ROOT" --depth 1 2>&1 | grep 'bob @' | sed 's/^ *//' || true)
-assert_eq "status agrees: one unread, not the log span" "bob @0 (1 unread)" "$row"
+row=$("$FA" bus status -r "$ROOT" --depth 1 2>&1 | grep '⚪ bob' || true)
+assert_eq "status agrees: one unread, not the log span" "⚪ bob (1) post [#0]" "$row"
 
 finish

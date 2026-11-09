@@ -81,7 +81,7 @@ free-agent bus ready [-r|--root ROOT] [--depth 0|1|2]
 free-agent bus cursor get [-r|--root ROOT] NAME
 free-agent bus cursor set [-r|--root ROOT] NAME ID
 free-agent bus ping-watch [-r|--root ROOT] NAME
-free-agent bus status [-r|--root ROOT] [-t|--threshold SECS] [--live] [--depth 0|1|2]
+free-agent bus status [-r|--root ROOT] [-t|--threshold SECS] [--depth 0|1|2] [--org]
 free-agent bus daemon [-r|--root ROOT]
 ```
 
@@ -95,10 +95,10 @@ Useful entry points:
 - `ready` lists unclaimed open TASK offers with no unresolved blocker. Directed TASKs are assigned at creation; first CLAIM owns an open offer, and only the owner's DONE completes it.
 - `watch` follows addressed posts as they arrive.
 - `attach` / `detach` record or remove NAME's attached-human marker — evidence only; no delivery or READY path changes.
-- `retire` writes the dead marker to NAME's heartbeat: the seat leaves the live roster, its cursor, log and transcripts stay as evidence; no process is signalled.
+- `retire` writes the dead marker to NAME's heartbeat: the seat joins the black retired circle, its cursor, log and transcripts stay as evidence; no process is signalled.
 - `cursor get` and `cursor set` inspect or repair a seat's resume position.
 - `ping-watch` waits for the next change to a seat's ping latch.
-- `status` reports post count, last post, cursor state, and optionally live seat heartbeats. Current heartbeat files carry state, timestamp, and pid: working reads 🟣 busy, wake and idle read 🟢 ready, an idle seat past an hour's silence parks 🟡, a dead pid reads 🔴 crashed, and a stale heartbeat with no verifiable pid stays ⚪ unknown.
+- `status` reads one snapshot of circle membership, directed unread mail, and last posts. The circles are 🟣 working, 🟢 ready, 🟡 parked, 🔴 crashed, ⚫ retired, ⚪ non-fab. Depth 0 prints the census, depth 1 adds rows, depth 2 adds raw evidence; `--org` renders the same snapshot for fab.
 - `daemon` runs the single-writer stamping office for the bus root.
 
 ## Delivery and publication
@@ -129,7 +129,7 @@ Main modules:
 - `Free.Agent.Bus.Cli` — the `free-agent bus` command surface.
 - `Free.Agent.Bus.Daemon` — the optional single-writer stamping daemon.
 - `Free.Agent.Bus.File` — file cursors and the fsnotify tail loop.
-- `Free.Agent.Bus.Heartbeat` — seat liveness files used by `status --live`.
+- `Free.Agent.Bus.Heartbeat` — seat liveness files used by `bus status`.
 - `Free.Agent.Delivery` — open-cause turns, cancellation, bounded grants, and explicit reply acts.
 - `Free.Agent.Cli` — interruptible CLI delivery with per-delivery transcript causation.
 - `Free.Agent.Host` — generic host execution and response mapping.

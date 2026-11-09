@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
-# cli-status-truthfulness — the live roster reads loop state: busy, ready, parked,
-# crashed, unknown; age decides only where readiness stops.
+# cli-status-truthfulness — one census reads fab state, unread mail, and membership.
 #
-# The 30 Oct wound: carafe, dripper and tamper showed 🟢 idle 22 hours after
-# their processes vanished, because idle heartbeats were exempt from the stale
-# check and pids get recycled. e63c207 aged idle out. 3 Nov moved the boundary
-# back where readiness can still be read: under the hour an idle seat stays 🟢,
-# past it the dot parks 🟡, and the crashed and unknown readings keep naming
-# the failures. This walk pins: idle 2h + live pid reads 🟡 parked; idle 2h +
-# dead pid reads 🔴 crashed; fresh idle stays 🟢; fresh working reads 🟣 busy;
-# a poster with no heartbeat at all still gets its own ⚪ row.
+# Live pids separate ready, working, and parked from crashed. Explicit death is
+# retired black, never crashed red. No heartbeat is non-fab white. Rows carry no
+# repeated state prose or raw cursor; depth 2 remains the diagnostic drill-down.
 
 source "$(dirname "$0")/lib.sh"
 
-step "a root with six seats in six different states"
+step "a root with seven names in six status circles"
 new_root status
 MYPID=$$
 TWO_HOURS_AGO=$(date -u -v-2H +%Y-%m-%dT%H:%M:%S.000000Z)
@@ -24,28 +18,34 @@ printf 'idle %s 99999999' "$TWO_HOURS_AGO" >"$ROOT/.hb-crashed"
 printf 'idle %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-fresh"
 printf 'working %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-busy"
 printf 'idle %s %s' "$TWO_AHEAD" "$MYPID" >"$ROOT/.hb-skewed"
-post ghost public "a post from a seat with no heartbeat"
+printf 'dead %s %s' "$NOW" "$MYPID" >"$ROOT/.hb-retired"
+post ghost - "a post from a participant with no heartbeat"
 
-step "status --live reads each silence honestly"
-live=$("$FA" bus status -r "$ROOT" --live --depth 1 2>&1)
-assert_eq "idle past the hour with a live pid reads parked yellow" \
-  "1" "$(printf '%s' "$live" | grep -c '^🟡 parked — idle 2h ago' || true)"
-assert_eq "the parked seat is never green" \
-  "0" "$(printf '%s' "$live" | grep -c '^🟢 parked ' || true)"
-assert_eq "the parked reading carries no staleness note" \
-  "0" "$(printf '%s' "$live" | grep -c '^🟡 parked .*stale?' || true)"
-assert_eq "a working seat reads busy purple" \
-  "1" "$(printf '%s' "$live" | grep -c '^🟣 busy — working .*ago' || true)"
-assert_eq "the busy seat is never yellow" \
-  "0" "$(printf '%s' "$live" | grep -c '^🟡 busy ' || true)"
-assert_eq "old idle with a dead pid reads crashed" \
-  "1" "$(printf '%s' "$live" | grep -c '🔴 crashed — pid 99999999 is not running' || true)"
-assert_eq "fresh idle is still green" \
-  "1" "$(printf '%s' "$live" | grep -c "🟢 fresh — idle .*ago" || true)"
-assert_eq "a poster with no heartbeat gets its own row" \
-  "1" "$(printf '%s' "$live" | grep -c '⚪ ghost — no heartbeat' || true)"
-assert_known "a future heartbeat with a live pid reads green, with a negative age" \
-  "1" "$(printf '%s' "$live" | grep -c '🟢 skewed — idle -[0-9]*s ago' || true)" \
-  "runStatusLive subtracts the timestamp from now without clamping, so a clock-skewed seat sits in the roster looking healthy for as long as the skew lasts — measured 31 Oct: idle -7200s ago for a heartbeat stamped two hours ahead; clamp the negative and say why"
+step "bus status reads one unified snapshot"
+status=$("$FA" bus status -r "$ROOT" --depth 1 2>&1)
+assert_eq "the census has exact counts and the last-post anchor" \
+  "1" "$(printf '%s' "$status" | grep -c '^🟣 1 🟢 2 🟡 1 🔴 1 ⚫ 1 ⚪ 1 | last \[#0\]$' || true)"
+assert_eq "idle past the hour with a live pid is parked" \
+  "1" "$(printf '%s' "$status" | grep -c '^🟡 parked (0) no posts$' || true)"
+assert_eq "a working seat is purple" \
+  "1" "$(printf '%s' "$status" | grep -c '^🟣 busy (0) no posts$' || true)"
+assert_eq "old idle with a dead pid is crashed red" \
+  "1" "$(printf '%s' "$status" | grep -c '^🔴 crashed (0) no posts$' || true)"
+assert_eq "fresh idle is ready green" \
+  "1" "$(printf '%s' "$status" | grep -c '^🟢 fresh (0) no posts$' || true)"
+assert_eq "explicit death is retired black, not crashed red" \
+  "1" "$(printf '%s' "$status" | grep -c '^⚫ retired (0) no posts$' || true)"
+assert_eq "a participant with no heartbeat is non-fab white" \
+  "1" "$(printf '%s' "$status" | grep -c '^⚪ ghost (0) post \[#0\]$' || true)"
+assert_eq "a future heartbeat still reads ready without printing negative age" \
+  "1" "$(printf '%s' "$status" | grep -c '^🟢 skewed (0) no posts$' || true)"
+assert_eq "state prose and the old cursor summary are gone" \
+  "0" "$(printf '%s' "$status" | grep -Ec ' — idle| — working| — retired|no heartbeat|cursor summary|cursor \[#' || true)"
+
+step "the split live APIs are retired"
+"$FA" bus live -r "$ROOT" >/dev/null 2>&1
+assert_eq "bus live is no longer a command" "1" "$?"
+"$FA" bus status -r "$ROOT" --live >/dev/null 2>&1
+assert_eq "status --live is no longer a flag" "1" "$?"
 
 finish

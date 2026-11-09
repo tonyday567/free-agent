@@ -24,7 +24,7 @@ import Data.Time (addUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (openBus, postLocal, readFileStrict, runSeatBus)
-import Free.Agent.Bus.Cli (BusCommand (..), Depth (..), addressConflict, applyPostFlags, busParser, checkThreadId, hbVerdict, readyPosts, readyWarnings, runBusCommand, runStatus)
+import Free.Agent.Bus.Cli (BusCommand (..), Depth (..), SeatCircle (..), addressConflict, applyPostFlags, busParser, checkThreadId, readyPosts, readyWarnings, runBusCommand, runStatus, seatCircle)
 import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, readTransaction, writeCursor, writeTransaction)
 import Free.Agent.Bus.Heartbeat (HbState (..), hbPath, parseHb, readHeartbeat, writeHeartbeat)
 import Free.Agent.BusStats
@@ -59,13 +59,13 @@ runTestAgent agentName names root mQuiesce handle = do
   grant <- newDeliveryGrant 100
   runAgentLoop agentName names root mQuiesce grant handle
 
-captureLiveStatus :: FilePath -> IO Text
-captureLiveStatus root = do
+captureStatus :: FilePath -> Bool -> Depth -> IO Text
+captureStatus root org depth = do
   hFlush stdout
   bracket (hDuplicate stdout) restore $ \_ -> do
     withFile (root </> "status.out") WriteMode $ \h -> do
       hDuplicateTo h stdout
-      runStatus root 0 True (Depth 1)
+      runStatus root 0 depth org
       hFlush stdout
     readFileStrict (root </> "status.out")
   where
@@ -180,9 +180,9 @@ busTopic = do
     assert "thread slicing accounts for every cyclic and ordinary post" $ length slices == 3
 
   -------------------------------------------------------------------------
-  -- Idle age is not a crash signal; pid evidence separates parked from dead.
+  -- Heartbeat evidence maps to the six status circles.
   -------------------------------------------------------------------------
-  putStrLn "bus heartbeat liveness"
+  putStrLn "bus heartbeat circles"
   do
     root <- tempRoot "free-agent-heartbeat"
     now <- getCurrentTime
@@ -200,110 +200,104 @@ busTopic = do
       case parseHb "idle 2026-10-28T00:00:00Z" of
         Just (Idle, _, Nothing) -> True
         _ -> False
-    (idleDot, idleText) <- hbVerdict 900 now (Just (Idle, brief, Just pid))
-    assert "a live idle seat stays green past the staleness threshold, under the hour" $
-      idleDot == "🟢" && not ("crashed?" `T.isInfixOf` idleText)
-    (parkedDot, parkedText) <- hbVerdict 900 now (Just (Idle, older, Just pid))
-    -- Mutation: greening a long-idle seat, or crashing it, fails this oracle.
-    assert "a live idle seat past the hour parks yellow" $
-      parkedDot == "🟡" && "idle" `T.isInfixOf` parkedText && not ("crashed?" `T.isInfixOf` parkedText)
-    (legacyDot, _) <- hbVerdict 900 now (Just (Idle, old, Nothing))
-    assert "an unverifiable stale legacy idle reads unknown, not live" $ legacyDot == "⚪"
-    (wakeDot, _) <- hbVerdict 900 now (Just (Wake, now, Just pid))
-    assert "a starting seat reads green ready" $ wakeDot == "🟢"
-    (workingDot, workingText) <- hbVerdict 900 now (Just (Working, old, Just pid))
-    -- Mutation: folding long work into the parked yellow fails this oracle.
-    assert "a working seat past the threshold with a live pid reads busy, not crashed" $
-      workingDot == "🟣" && "stale?" `T.isInfixOf` workingText && not ("crashed?" `T.isInfixOf` workingText)
-    (legacyWorkingDot, legacyWorkingText) <- hbVerdict 900 now (Just (Working, old, Nothing))
-    -- Mutation: treating missing pid evidence as a crash fails this oracle.
-    assert "a stale legacy working seat keeps liveness unknown" $
-      legacyWorkingDot == "⚪" && "stale?" `T.isInfixOf` legacyWorkingText && not ("crashed?" `T.isInfixOf` legacyWorkingText)
-    (freshDot, freshText) <- hbVerdict 900 now (Just (Working, now, Just pid))
-    -- Mutation: ignoring heartbeat age and warning on every live pid fails this.
-    assert "a fresh working seat reads busy without a staleness warning" $
-      freshDot == "🟣" && not ("stale?" `T.isInfixOf` freshText) && not ("crashed?" `T.isInfixOf` freshText)
+    idleCircle <- seatCircle 900 now (Just (Idle, brief, Just pid))
+    assert "a live idle seat under the hour is ready" $ idleCircle == CircleReady
+    parkedCircle <- seatCircle 900 now (Just (Idle, older, Just pid))
+    assert "a live idle seat past the hour is parked" $ parkedCircle == CircleParked
+    legacyCircle <- seatCircle 900 now (Just (Idle, old, Nothing))
+    assert "an unverifiable stale legacy heartbeat is non-fab" $ legacyCircle == CircleNonFab
+    wakeCircle <- seatCircle 900 now (Just (Wake, now, Just pid))
+    assert "a starting seat is ready" $ wakeCircle == CircleReady
+    workingCircle <- seatCircle 900 now (Just (Working, old, Just pid))
+    assert "long work with a live pid is still working" $ workingCircle == CircleWorking
+    legacyWorkingCircle <- seatCircle 900 now (Just (Working, old, Nothing))
+    assert "stale legacy work has no fab liveness claim" $ legacyWorkingCircle == CircleNonFab
+    freshCircle <- seatCircle 900 now (Just (Working, now, Just pid))
+    assert "fresh work is working" $ freshCircle == CircleWorking
+    absentCircle <- seatCircle 900 now Nothing
+    assert "no heartbeat is non-fab" $ absentCircle == CircleNonFab
     (_, _, _, ph) <- createProcess (proc "sleep" ["0.01"])
     mpid <- getPid ph
     _ <- waitForProcess ph
     case mpid of
       Nothing -> assert "dead-pid oracle acquired a child pid" False
       Just deadPid -> do
-        (deadDot, deadText) <- hbVerdict 900 now (Just (Working, old, Just deadPid))
-        -- Mutation: dropping dead-pid precedence turns this into a stale warning.
-        assert "a stale working heartbeat with a dead pid reads crashed" $
-          deadDot == "🔴" && "crashed?" `T.isInfixOf` deadText
-    (retiredDot, retiredText) <- hbVerdict 900 now (Just (Dead, old, Just pid))
-    -- Mutation: treating explicit dead as an ordinary stale live state fails this.
-    assert "an explicit dead marker reads retired" $
-      retiredDot == "🔴" && "retired" `T.isInfixOf` retiredText
+        deadCircle <- seatCircle 900 now (Just (Working, old, Just deadPid))
+        assert "a dead pid without explicit retirement is crashed" $ deadCircle == CircleCrashed
+    retiredCircle <- seatCircle 900 now (Just (Dead, old, Just pid))
+    assert "an explicit dead marker is retired" $ retiredCircle == CircleRetired
     removePathForcibly root
 
   -------------------------------------------------------------------------
-  -- Active live status: only explicit retirement leaves the projection.
+  -- One status snapshot drives census, plain rows, and Org groups.
   -------------------------------------------------------------------------
-  putStrLn "bus active live status"
+  putStrLn "bus unified status"
   do
-    root <- tempRoot "free-agent-active-status"
+    root <- tempRoot "free-agent-unified-status"
     _ <- postLocal root (mkPost "retired" [] "retired historical evidence")
     _ <- postLocal root (mkPost "participant" [] "participant historical evidence")
+    _ <- postLocal root (mkPost "alice" ["busy"] "old mail")
+    _ <- postLocal root (mkPost "alice" ["busy"] "new mail")
     writeHeartbeat root "idle" Idle
     writeHeartbeat root "busy" Working
     writeHeartbeat root "retired" Dead
     writeCursor root "unknown" 0
+    writeCursor root "busy" 3
     now <- getCurrentTime
     pid <- getProcessID
     (_, _, _, ph) <- createProcess (proc "sleep" ["0.01"])
     mpid <- getPid ph
     _ <- waitForProcess ph
     case mpid of
-      Nothing -> assert "active-status oracle acquired a child pid" False
-      Just deadPid -> do
+      Nothing -> assert "status oracle acquired a child pid" False
+      Just deadPid ->
         TIO.writeFile
           (hbPath root "crashed")
           ("working " <> T.pack (iso8601Show now) <> " " <> T.pack (show deadPid) <> "\n")
-        TIO.writeFile
-          (hbPath root "parked")
-          ("idle " <> T.pack (iso8601Show (addUTCTime (-7200) now)) <> " " <> T.pack (show pid) <> "\n")
+    TIO.writeFile
+      (hbPath root "parked")
+      ("idle " <> T.pack (iso8601Show (addUTCTime (-7200) now)) <> " " <> T.pack (show pid) <> "\n")
     before <- readFileStrict (root </> "log.jsonl")
-    report <- captureLiveStatus root
+    cursorBefore <- readCursor root "busy"
+    plain <- captureStatus root False (Depth 1)
+    org <- captureStatus root True (Depth 1)
+    census <- captureStatus root True (Depth 0)
+    detailed <- captureStatus root False (Depth 2)
     after <- readFileStrict (root </> "log.jsonl")
-    let seatLines name = [line | line <- T.lines report, (" " <> name <> " —") `T.isInfixOf` line]
-    -- Mutation: dropping the explicit-dead filter fails this oracle.
-    assert "an explicitly retired seat leaves the default live view" $ null (seatLines "retired")
-    -- Mutation: filtering idle seats, or parking them under the hour, fails this oracle.
-    assert "a live idle seat stays visible and green" $
-      case seatLines "idle" of
-        [line] -> "🟢" `T.isPrefixOf` line && not ("stale?" `T.isInfixOf` line)
-        _ -> False
-    -- Mutation: hiding a parked seat, or greening it, fails this oracle.
-    assert "a parked idle seat stays visible with the parked dot" $
-      case seatLines "parked" of
-        [line] -> "🟡" `T.isPrefixOf` line && "idle 2h ago" `T.isInfixOf` line && not ("crashed?" `T.isInfixOf` line)
-        _ -> False
-    -- Mutation: treating long work as retirement or a crash fails this oracle.
-    assert "a working seat with a live pid stays visible and busy" $
-      case seatLines "busy" of
-        [line] -> "🟣" `T.isPrefixOf` line && "stale?" `T.isInfixOf` line && not ("crashed?" `T.isInfixOf` line)
-        _ -> False
-    -- Mutation: filtering every dead pid rather than only explicit retirement fails this oracle.
-    assert "a dead pid without explicit retirement stays visible as crashed" $
-      case seatLines "crashed" of
-        [line] -> "🔴" `T.isPrefixOf` line && "crashed?" `T.isInfixOf` line && not ("retired" `T.isInfixOf` line)
-        _ -> False
-    -- Mutation: requiring a heartbeat for inclusion fails this oracle.
-    assert "a cursor-only unknown seat stays visible" $
-      case seatLines "unknown" of
-        [line] -> "⚪" `T.isPrefixOf` line && "no heartbeat" `T.isInfixOf` line
-        _ -> False
-    -- Mutation: dropping historical participants indiscriminately fails this oracle.
-    assert "a participant without heartbeat or cursor stays visible" $
-      case seatLines "participant" of
-        [line] -> "⚪" `T.isPrefixOf` line && "no heartbeat" `T.isInfixOf` line
-        _ -> False
-    assert "the presentational filter leaves historical log evidence untouched" $ before == after
+    cursorAfter <- readCursor root "busy"
+    let header = "🟣 1 🟢 1 🟡 1 🔴 1 ⚫ 1 ⚪ 3 | last [#3]"
+        orgRows = [line | line <- T.lines org, "*** " `T.isPrefixOf` line]
+    assert "plain census has exact circles, counts, and last anchor" $
+      take 1 (T.lines plain) == [header]
+    assert "Org census has exact circles, counts, and last anchor" $
+      ("* " <> header) `T.isPrefixOf` org
+    assert "plain rows carry circle, directed unread, and last post" $
+      "🟣 busy (1) post [#3]" `elem` T.lines plain
+    assert "Org rows carry directed unread, not raw cursor positions" $
+      "*** busy (1) post [#3]" `elem` orgRows
+    assert "explicitly retired membership remains visible" $
+      "** ⚫" `elem` T.lines org && "*** retired (0) post [#0]" `elem` orgRows
+    assert "a participant without a heartbeat is non-fab" $
+      "*** participant (0) post [#1]" `elem` orgRows
+    assert "a cursor-only name is non-fab" $
+      "*** unknown (0) no posts" `elem` orgRows
+    assert "a sender without a heartbeat is non-fab" $
+      "*** alice (0) post [#3]" `elem` orgRows
+    assert "all eight members occur exactly once" $ length orgRows == 8
+    assert "the cursor summary and repeated state prose are gone" $
+      not ("cursor summary" `T.isInfixOf` org)
+        && not ("cursor [#" `T.isInfixOf` org)
+        && not ("no heartbeat" `T.isInfixOf` org)
+        && not (" — idle" `T.isInfixOf` org)
+    assert "depth zero is exactly the census" $ T.lines census == ["* " <> header]
+    assert "depth two retains raw diagnostic evidence" $
+      "    cursor: 3" `elem` T.lines detailed
+        && any ("    hb: working " `T.isPrefixOf`) (T.lines detailed)
+        && any ("    log: " `T.isPrefixOf`) (T.lines detailed)
+    assert "status reads leave the log untouched" $ before == after
+    assert "status reads leave cursors untouched" $ cursorBefore == cursorAfter
     retiredHeartbeat <- readHeartbeat root "retired"
-    assert "the presentational filter leaves the explicit-dead heartbeat untouched" $
+    assert "status reads leave retirement evidence untouched" $
       case retiredHeartbeat of
         Just (Dead, _, _) -> True
         _ -> False

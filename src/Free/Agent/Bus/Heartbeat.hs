@@ -7,11 +7,10 @@
 --
 -- > <state> <utc-timestamp> <pid>
 --
--- Legacy files without a pid still parse, but an old idle legacy file reads
--- as unknown rather than live. A current file lets the reader probe the pid
--- without polling or invoking the seat. Staleness reads stale for every
--- live state — an old heartbeat is a stale seat even when the pid still
--- resolves, because pids are recycled. A torn read parses to 'Nothing'.
+-- Legacy files without a pid still parse, but a stale heartbeat without
+-- verifiable process evidence reads non-fab. A current file lets the status
+-- reader probe the pid without polling or invoking the seat, separating a
+-- crash from a live but stale seat. A torn read parses to 'Nothing'.
 --
 -- The seat manager writes the same file with @dead@ when it retires a seat
 -- it launched; the seat writes @dead@ itself on a clean exit.
@@ -59,14 +58,14 @@ type Heartbeat = (HbState, UTCTime, Maybe CPid)
 
 -- | The glyph a state renders as in a dot column: ready and starting are
 -- both 🟢 (there is a process and it is not busy), working is 🟣 busy,
--- retired is 🔴. Age enters the glyph only in 'hbVerdict': a parked idle
--- renders 🟡 there once it passes the hour.
+-- retired is ⚫. Age enters the glyph only in the status circle classifier:
+-- a parked idle renders 🟡 there once it passes the hour.
 hbGlyph :: HbState -> Text
 hbGlyph = \case
   Wake -> "\x1F7E2" -- 🟢
   Idle -> "\x1F7E2" -- 🟢
   Working -> "\x1F7E3" -- 🟣
-  Dead -> "\x1F534" -- 🔴
+  Dead -> "\x26AB" -- ⚫
 
 -- | The wire token for a state, as written in the heartbeat file.
 hbText :: HbState -> Text

@@ -1,7 +1,7 @@
 # walks
 
-Behaviour walks for the bus CLI and the deck UI. The runner has been this UI's only
-test suite and the wounds found the gaps; these are for development to run instead.
+Behaviour walks for the bus CLI. The runner had been the bus's only test suite
+and the wounds found the gaps; these are for development to run instead.
 
     walks/run.sh              the committed suite
     walks/run.sh --all        everything, dirty files included
@@ -14,11 +14,11 @@ mean the handed-in state failed rather than that an author is mid-edit. `--all` 
 dirty files too, which is what an author wants while writing one.
 
 Each walk sets up its own scratch root under `~/.hermes/cache/scratch/deck-walks/`,
-seeds it, invokes one surface, and prints expected versus actual per step. PASS/FAIL,
+seeds it, invokes the CLI, and prints expected versus actual per step. PASS/FAIL,
 non-zero exit on failure.
 
-Scratch only: never the runner's live root, live daemon or frames. CLI walks need no
-daemon at all. Deck walks load the deck in a scratch Emacs against a scratch root.
+Scratch only: never the runner's live root or live daemon. CLI walks need no
+daemon at all.
 
 ## a walk that hangs
 
@@ -83,43 +83,6 @@ and log; no process is signalled.
 as raw JSON frames, creates no cursor, keeps waiting after delivery, and leaves no
 process when killed. `watch` has no `--depth` option.
 
-## the deck walks
-
-Each batch deck walk loads the deck in a fresh `emacs -Q -batch` against its own scratch
-root. `deck-lib` is their shared helper and has no `.sh` suffix, so the runner does not
-count it as a walk.
-
-⟜ `deck-send-failure.sh` ⟜ a CLI exit 3 keeps the composition intact, shows the exit
-and CLI output in the error buffer, and appends no log bytes.
-⟜ `deck-recipients.sh` ⟜ the `ya` leader entry resolves to
-`free-agent-bus-set-recipients` and updates the shared audience from fundamental-mode,
-not just the composition buffer.
-⟜ `deck-filter.sh` ⟜ audience filtering shows matching and public posts, and clearing
-the filter restores every post.
-⟜ `deck-status-yellow.sh` ⟜ the status model's dots read 🟣 busy, 🟢 ready, 🟡 parked,
-and `f` hides the parked rows and restores them on a second press.
-⟜ `deck-depth.sh` ⟜ log, inbox and thread views cycle 1 → 2 → 0 → 1; both `TAB` and
-`<tab>` resolve to the cycling command in each mode map.
-⟜ `deck-inbox.sh` ⟜ a fresh inbox reads from the first post without creating a cursor;
-`m` marks all printed mail read, and later mail remains unread.
-⟜ `deck-inbox-to-here.sh` ⟜ `M` on a middle post advances the cursor past it: mail at or
-before the point clears, later mail stays unread.
-⟜ `deck-quit.sh` ⟜ view `q` buries without killing the buffer; status `q` kills the
-buffer and releases its file watch and repaint timer.
-⟜ `deck-log-navigation.sh` ⟜ search runs in the read-only tail; the thread at
-point opens, its header names its keys, and `q` buries it; a resolved file reference —
-Markdown or plain — opens at its section, while an unresolved or ambiguous one stays
-plain text.
-⟜ `deck-frame.sh` ⟜ a uniquely named scratch daemon loads installed Evil, not Doom's
-init, and opens one GUI (`ns`) and one pseudo-terminal frame. Both show the three-window
-deck with focus in status; `<tab>` and `q` reach the deck in Evil normal state. The
-daemon and both clients are killed and asserted gone.
-
-Batch proves commands, buffer state and mode-map bindings. The frame walk measures
-window/focus state and keymap resolution in real frames. It does not inject OS keyboard
-events or load the runner's Doom configuration, so physical key delivery and
-Doom-specific extra maps remain unproven.
-
 ## a run that measured nothing is not a green run
 
 The same rule as nothing-ran-is-2, one level down, found on a live seat harness rather than
@@ -150,13 +113,8 @@ is only what the adapter sees on the pipe.
 ## the knowns, as of 31 Oct
 
 Wrong behaviour that the walks assert, so a fix turns them red instead of passing
-quietly. Two survive, and both were measured by the walk that keeps them.
+quietly. One survives, measured by the walk that keeps it.
 
-⟜ **terminal `TAB` is intercepted by Evil** ⟜ in a real terminal frame with Evil normal
-state, `TAB`/`C-i` resolves to `evil-jump-forward`, not `free-agent-bus-cycle-depth`;
-`<tab>` and `q` still reach the deck. GUI `TAB`/`C-i` also follows Evil, while GUI
-`<tab>` reaches the deck. `deck-frame.sh` records it; physical OS key injection and
-Doom-specific extra maps are unproven and the walk says so.
 ⟜ **an omitted `--to` posts to nobody** ⟜ it writes `to: []`, and `deliversTo` answers
 False for it: `read NAME` and `inbox NAME` show only genuinely addressed posts. The walk
 asserts this as a known rather than an expectation, because the log view is what calls

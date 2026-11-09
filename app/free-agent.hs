@@ -16,11 +16,11 @@
 module Main (main) where
 
 import Circuit.Agent (Name, Post (..), mkPost)
-import Data.Char (isAlphaNum)
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
 import Circuit.Agent.Mark (Mark (StandDown), markGlyph)
 import Control.Exception (finally)
 import Control.Monad (forM_, unless)
+import Data.Char (isAlphaNum)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -30,7 +30,7 @@ import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
 import Data.Version (showVersion)
 import Free.Agent.Acp (AcpConfig (..), acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, openAcp)
 import Free.Agent.Agent.Runner (runAgentLoop)
-import Free.Agent.Bus.Cli (BusCommand, Depth (..), busParser, depthOpt, liveOpt, runBusCommand, runStatus)
+import Free.Agent.Bus.Cli (BusCommand, Depth (..), busParser, depthOpt, orgOpt, runBusCommand, runStatus)
 import Free.Agent.Bus.File (QuiesceConfig (..))
 import Free.Agent.Cli (cliDeliverTo, dshCli, kimiCli)
 import Free.Agent.Cli.Config
@@ -76,7 +76,7 @@ import System.Process (spawnProcess, waitForProcess)
 data Command
   = AgentCmd Int Backend
   | BusCmd BusCommand
-  | StatusCmd FilePath (Maybe NominalDiffTime) Bool Depth
+  | StatusCmd FilePath (Maybe NominalDiffTime) Depth Bool
   | UsageCmd HermesUsageSource
   | RefreshCmd Int Int HermesConfig
   | RefreshChildCmd Int Int (Maybe FilePath) HermesConfig
@@ -196,7 +196,7 @@ commandParser =
         <> command "cmd" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendCommand <$> parseCommandConfig) <**> helper) (progDesc "External-command seat"))
         <> command "dsh" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendDsh <$> parseDshConfig) <**> helper) (progDesc "DSH / local ollama seat"))
         <> command "acp" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendAcp <$> parseAcpConfig) <**> helper) (progDesc "ACP seat (kimi acp — persistent repl)"))
-        <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <*> liveOpt <*> depthOpt (Depth 1) <**> helper) (progDesc "Bus log statistics"))
+        <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <*> depthOpt (Depth 1) <*> orgOpt <**> helper) (progDesc "Unified bus seat census"))
         <> command
           "usage"
           ( info
@@ -240,7 +240,7 @@ commandParser =
         ( long "threshold"
             <> short 't'
             <> metavar "SECS"
-            <> help "Seconds since last post for the bus to be considered live"
+            <> help "Seconds before an unverifiable heartbeat reads as non-fab"
         )
       where
         readSeconds s =
@@ -291,7 +291,7 @@ main = do
   case cmd of
     AgentCmd budget backend -> runBackend budget backend
     BusCmd busCmd -> runBusCommand busCmd
-    StatusCmd root mthreshold live depth -> runStatus root (fromMaybe 900 mthreshold) live depth
+    StatusCmd root mthreshold depth org -> runStatus root (fromMaybe 900 mthreshold) depth org
     UsageCmd source -> case source of
       HermesSessionFile sessionFile ->
         readHermesUsage sessionFile >>= \case

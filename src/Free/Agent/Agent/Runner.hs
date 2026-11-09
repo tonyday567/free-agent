@@ -290,7 +290,7 @@ runAgentLoop agentName names root mQuiesce grant handleBatch = do
   TIO.putStrLn $ "   cursor: " <> T.pack (cursorPath root agentName) <> " @ " <> T.pack (show cursor)
   -- Heartbeats: wake on start, working around each delivered batch, idle
   -- after it, dead on clean exit. The file carries state, timestamp, and
-  -- pid. `bus status --live` probes the pid for idle liveness and uses
+  -- pid. `bus status` probes the pid for idle liveness and uses
   -- staleness only for states that promise another transition.
   skips <- newIORef 0
   writeHeartbeat root agentName Wake

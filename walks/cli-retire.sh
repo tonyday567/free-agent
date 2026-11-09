@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# cli-retire — a seat leaves the live roster, and nothing else is lost.
+# cli-retire — retirement changes circle membership, not the evidence.
 #
-# retire is the honest way to end a seat: it writes the dead marker, so the roster
-# stops answering for a process that is gone, while the cursor, the log and the
-# transcripts stay as evidence. The runner's complaint on 30 Oct was the opposite
-# case — carafe, dripper and tamper showing idle for 22 hours and chemex a
-# permanent no-heartbeat row — so this walk pins the good path down.
+# retire writes the dead marker without signalling a process. The next status
+# shows the name in black, with its directed unread and last post intact; the
+# cursor, log, and transcripts remain available for inspection and recovery.
 
 source "$(dirname "$0")/lib.sh"
 
@@ -13,7 +11,7 @@ step "a root with a seat that has been around"
 new_root retire
 post alice bob "for bob"
 post alice carol "for carol, who is alive"
-printf 'alive 2026-10-31T00:00:00.000000Z 4242' >"$ROOT/.hb-carol"
+printf 'idle %s %s' "$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)" "$$" >"$ROOT/.hb-carol"
 $FA bus cursor set -r "$ROOT" bob 0 >/dev/null
 assert_eq "bob's cursor is set before retiring" "0" "$(cat "$ROOT/.cursor-bob")"
 
@@ -24,15 +22,19 @@ assert_eq "no heartbeat before, two fields after" "2" "$(awk '{print NF}' "$ROOT
 step "a seat that was running retires to dead, and keeps its last known pid"
 printf 'working 2026-10-31T00:00:00.000000Z 4242' >"$ROOT/.hb-bob"
 out=$("$FA" bus retire -r "$ROOT" bob 2>&1)
-assert_eq "retire names the seat and the root" "🔴 bob retired on $ROOT" "$out"
+assert_eq "retire names the seat and the root" "⚫ bob retired on $ROOT" "$out"
 assert_eq "and exits 0" "0" "$?"
 assert_eq "the heartbeat now reads dead" "dead" "$(awk '{print $1}' "$ROOT/.hb-bob")"
 assert_eq "with the pid it last reported, since no process is signalled" "4242" "$(awk '{print $3}' "$ROOT/.hb-bob")"
 
-step "the seat leaves the live roster, the evidence does not"
-live=$("$FA" bus status -r "$ROOT" --live 2>&1)
-assert_eq "bob is gone from the live view" "0" "$(printf '%s' "$live" | grep -c 'bob' || true)"
-assert_eq "carol, who is alive, is named" "1" "$(printf '%s' "$live" | grep -c 'carol' || true)"
+step "the seat joins the black circle, and the evidence does not move"
+status=$("$FA" bus status -r "$ROOT" 2>&1)
+assert_eq "bob remains visible as retired with unread and last post" \
+  "1" "$(printf '%s' "$status" | grep -c '^⚫ bob (1) post \[#0\]$' || true)"
+assert_eq "nobody also has a retired row" \
+  "1" "$(printf '%s' "$status" | grep -c '^⚫ nobody (0) no posts$' || true)"
+assert_eq "carol remains ready with her own unread mail" \
+  "1" "$(printf '%s' "$status" | grep -c '^🟢 carol (1) post \[#1\]$' || true)"
 assert_eq "the log is untouched" "2" "$(count_lines cat "$ROOT/log.jsonl")"
 assert_eq "bob's cursor survives" "0" "$(cat "$ROOT/.cursor-bob")"
 assert_eq "bob's mail is still addressed to bob" "0" "$(ids_of_to bob)"

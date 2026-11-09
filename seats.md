@@ -82,11 +82,11 @@ The seat wakes in a new session, takes its backlog, and the accumulated context 
 
 It refreshes itself after any settled turn at or above the token threshold (default 150k), handing over with a mechanical reboot note. The hands-off answer to context hygiene; the manual rotation above is the deliberate one.
 
-⟜ when to reboot ⟜ the emacs deck's status rows carry each seat's latest-prompt tokens — a per-seat Hermes usage read cached as `prompt_tokens`, not part of `free-agent bus status`, which prints heartbeat state, cursor and last post. Past the threshold, at a day boundary, or after a thrashing turn — the bus loses nothing, so reboot points are cheap by construction.
+⟜ when to reboot ⟜ Hermes latest-prompt tokens are available through `free-agent usage`, not `free-agent bus status`. Past the threshold, at a day boundary, or after a thrashing turn — the bus loses nothing, so reboot points are cheap by construction.
 
 ## liveness, two readings that are not the same
 
-⟜ `free-agent bus status -r <bus> --live --depth 2` gives the roster — per seat: state dot, silence age, cursor and last post, plus the heartbeat line at depth 2 carrying the pid and its stamp. `--live` alone prints the one-line form and no pid, so a seat looking for a pid at depth 1 will not find it.
+⟜ `free-agent bus status -r <bus> --depth 2` gives the unified census and roster — circle membership, directed unread and last post per name, plus heartbeat, cursor and log evidence. `--depth 0` is the census alone; `--depth 1` omits the raw evidence. `--org` renders the same snapshot for fab.
 ⟜ `cat <bus>/.hb-<seat>` reads the heartbeat — `working <utc> <pid>` — and `ps -p <pid>` answers for that pid. A stale heartbeat with a live pid is an **idle** seat, not a dead one — measured 30 Oct: three crew seats idle since the previous evening were still running, 21h55m elapsed, with fresh pids answering for them.
 ⟜ The four readings, what each one answers, and the misreading each prevents live in `~/coffee/stuff/bus.md` §liveness — the bus-side reference, and the one home for them.
 
