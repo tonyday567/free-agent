@@ -62,8 +62,8 @@ import Free.Agent.Refresh (preserveForRefresh, refreshDue, refreshRequestPath, w
 import Free.Agent.Usage (readHermesUsage, readUsageIdentity, renderUsageIdentity)
 import Options.Applicative
 import Paths_free_agent (version)
-import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory)
-import System.Environment (getExecutablePath, lookupEnv)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory, makeAbsolute)
+import System.Environment (getExecutablePath, lookupEnv, setEnv)
 import System.Exit (ExitCode (..), exitFailure, exitWith)
 import System.FilePath (takeDirectory, (</>))
 import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
@@ -230,7 +230,7 @@ commandParser =
         ( long "root"
             <> short 'r'
             <> metavar "ROOT"
-            <> value "."
+            <> value "bus/"
             <> showDefault
             <> help "Bus root directory"
         )
@@ -355,6 +355,15 @@ batchBoundary = last
 
 runSeat :: Int -> Text -> [Name] -> FilePath -> Maybe QuiesceConfig -> ([Stamped Text] -> IO (Turn [Post Text])) -> IO ()
 runSeat budget agentName names root mQuiesce handle = do
+  -- The launch root is the single source for delivery, cursor, publish, and
+  -- heartbeat. Export it absolutely so every child process — the CLI backend
+  -- and any `free-agent bus` subprocess the model spawns — resolves its
+  -- default root to the launch root instead of its own cwd. Without this, a
+  -- turn's default-root post escapes to whatever bus sits in the child's cwd
+  -- (B11): the stale alternate root receives the DONE. `--root` stays a human
+  -- CLI tool; the seat's default root is authoritative.
+  absRoot <- makeAbsolute root
+  setEnv "FREE_AGENT_BUS_ROOT" absRoot
   grant <- newDeliveryGrant budget
   runAgentLoop agentName names root mQuiesce grant handle
 

@@ -48,6 +48,9 @@ module Free.Agent.Bus
     withLogRead,
     touchLog,
 
+    -- * Decode
+    malformedRows,
+
     -- * Durability
     Persist (..),
     awaitDurable,
@@ -339,6 +342,26 @@ readLogRaw path = parseLog . TE.decodeUtf8 <$> BS.readFile path
 
 parseLog :: (PostBody a) => Text -> Log a
 parseLog content = Log (mapMaybe unframeStored (filter (not . T.null) (T.lines content)))
+
+-- | Non-blank, non-whitespace lines that do not unframe as a stored post,
+-- each with its 1-based row number and 0-based character offset in the file.
+--
+-- A reader that silently dropped these would report an empty inbox for a log
+-- it could not decode (B12): one malformed row masquerades as no mail. The
+-- CLI read path refuses loudly on any such row instead, and this pure list is
+-- the oracle for that refusal.
+malformedRows :: Text -> [(Int, Int)]
+malformedRows content =
+  [ (row, offset)
+  | (row, offset, line) <- zip3 [1 :: Int ..] offsets (T.lines content),
+    not (T.null (T.strip line)),
+    undecodable line
+  ]
+  where
+    offsets = scanl (\o l -> o + T.length l + 1) 0 (T.lines content)
+    undecodable line = case (unframeStored line :: Maybe (Stamped Text)) of
+      Nothing -> True
+      Just _ -> False
 
 -- | Append stamped posts under the exclusive file lock.
 --

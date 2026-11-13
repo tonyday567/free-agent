@@ -14,6 +14,7 @@ import Circuit.Agent.Framing (Stamped, parseTimeText, stamp, stamped, unframeSto
 import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph, markOf)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, bracket, evaluate, try)
+import Data.Either (isLeft)
 import Data.Foldable (traverse_)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (mapMaybe)
@@ -23,7 +24,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time (addUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Free.Agent.Agent.Runner (runAgentLoop)
-import Free.Agent.Bus (openBus, postLocal, readFileStrict, runSeatBus)
+import Free.Agent.Bus (malformedRows, openBus, postLocal, readFileStrict, runSeatBus)
 import Free.Agent.Bus.Cli (BusCommand (..), Depth (..), SeatCircle (..), addressConflict, applyPostFlags, busParser, checkThreadId, readyPosts, readyWarnings, runBusCommand, runStatus, seatCircle)
 import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, readTransaction, writeCursor, writeTransaction)
 import Free.Agent.Bus.Heartbeat (HbState (..), hbPath, parseHb, readHeartbeat, writeHeartbeat)
@@ -42,10 +43,13 @@ import Free.Agent.Host (hostShard, mkHost)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, info, renderFailure)
 import System.Directory (removePathForcibly)
-import System.FilePath ((</>))
+import System.Environment (getExecutablePath)
+import System.Exit (ExitCode (ExitSuccess))
+import System.FilePath (takeDirectory, (</>))
 import System.IO (IOMode (WriteMode), hClose, hFlush, stdout, withFile)
 import System.Posix.Process (getProcessID)
-import System.Process (createProcess, getPid, proc, waitForProcess)
+import System.Process (CreateProcess (..), createProcess, getPid, proc, terminateProcess, waitForProcess)
+import System.Timeout (timeout)
 
 ioTurn :: IO [Post Text] -> IO (Turn [Post Text])
 ioTurn action =
@@ -73,6 +77,13 @@ captureStatus root org depth = do
       hFlush stdout
       hDuplicateTo saved stdout
       hClose saved
+
+-- | The free-agent binary built beside this oracle — the code under test,
+-- never the installed copy, which predates the changes this oracle pins.
+seatBinary :: IO FilePath
+seatBinary = do
+  myPath <- takeDirectory <$> getExecutablePath
+  pure (myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent")
 
 busTopic :: IO ()
 busTopic = do
@@ -178,6 +189,68 @@ busTopic = do
     assert "ordinary ancestry still resolves to its root" $ componentIds "7" == [8, 7]
     assert "a self-ancestor is its own root" $ componentIds "9" == [9]
     assert "thread slicing accounts for every cyclic and ordinary post" $ length slices == 3
+
+  -------------------------------------------------------------------------
+  -- Decode failures: a malformed row is named, not silently dropped (B12).
+  -------------------------------------------------------------------------
+  putStrLn "bus malformed-row decode"
+  do
+    let line0 = "{\"id\":0,\"ts\":\"2026-11-12T05:00:00\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"hi\"}\n"
+        bad = "{\"id\":1,\"ts\":\"BROKEN\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"x\"}\n"
+    assert "a clean log has no malformed rows" $ malformedRows line0 == []
+    assert "a malformed row is named by 1-based row and 0-based offset" $
+      malformedRows (line0 <> bad) == [(2, T.length line0)]
+    assert "blank and whitespace-only lines are tolerated, not flagged" $
+      malformedRows (line0 <> "\n\n   \n" <> line0) == []
+    -- The CLI refuses loudly: a malformed row exits non-zero rather than
+    -- masquerading as an empty inbox (the B12 failure the probe showed).
+    cliRoot <- tempRoot "free-agent-b12-cli"
+    TIO.writeFile (cliRoot </> "log.jsonl") ("{\"id\":0,\"ts\":\"BROKEN\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"x\"}\n")
+    refused <- try @SomeException (runBusCommand (ReadCommand cliRoot ["b"] Nothing Nothing (Depth 2)))
+    assert "a malformed row makes bus read exit non-zero" (isLeft refused)
+    removePathForcibly cliRoot
+
+  -------------------------------------------------------------------------
+  -- Launch-root authority (B11/B13): a seat's delivery and publication must
+  -- share one root — the launch root. A turn that posts through a rootless
+  -- `bus post` subprocess (the model's tool-call path) must land on the
+  -- launch root, never a stale alternate root the child's cwd happens to sit
+  -- on. runSeat pins FREE_AGENT_BUS_ROOT to the absolute launch root; this
+  -- oracle launches a real cmd-backend seat whose turn posts a DONE rootlessly
+  -- from a stale cwd and asserts it lands on the delivery root. Reverting the
+  -- pin makes the DONE escape to the stale root and this oracle goes red.
+  -------------------------------------------------------------------------
+  putStrLn "bus launch-root authority"
+  do
+    launch <- tempRoot "free-agent-b11-launch"
+    stale <- tempRoot "free-agent-b11-stale"
+    _ <- postLocal launch (mkPost "free" ["seat"] "TASK publish a DONE")
+    _ <- postLocal stale (mkPost "bootstrap" [] "stale bus")
+    writeCursor launch "seat" 0
+    _ <- postLocal launch (mkPost "free" ["seat"] (markGlyph Landed))
+    seatBin <- seatBinary
+    -- /bin/sh swallows the appended body as $0; the turn posts a DONE with no
+    -- --root, so the seat's pinned root (not the cwd) decides the bus.
+    let script = seatBin <> " bus post --from seat --to runner --body DONE-b11-witness >/dev/null"
+        cmd =
+          ( proc
+              seatBin
+              ["cmd", "--root", launch, "--name", "seat", "--cmd", "/bin/sh", "--quiesce", "2", "--pitboss", "free", "--", "-c", script]
+          )
+            { cwd = Just stale
+            }
+    (_, _, _, ph) <- createProcess cmd
+    exited <- timeout 30_000_000 (waitForProcess ph)
+    case exited of
+      Nothing -> terminateProcess ph
+      Just _ -> pure ()
+    launchLog <- readFileStrict (launch </> "log.jsonl")
+    staleLog <- readFileStrict (stale </> "log.jsonl")
+    assert "the seat exited cleanly" (exited == Just ExitSuccess)
+    assert "the DONE landed on the launch root" ("DONE-b11-witness" `T.isInfixOf` launchLog)
+    assert "the stale root did not receive the DONE" (not ("DONE-b11-witness" `T.isInfixOf` staleLog))
+    removePathForcibly launch
+    removePathForcibly stale
 
   -------------------------------------------------------------------------
   -- Heartbeat evidence maps to the six status circles.
@@ -409,7 +482,7 @@ busTopic = do
         [warning] ->
           "bus post --from mucho --thread 30 --body CLAIM" `T.isInfixOf` warning
             && not ("bus say" `T.isInfixOf` warning)
-    assert "the READY remedy says where to stand, since the default root is the cwd" $
+    assert "the READY remedy says where to stand, since the default root is bus/ beneath the free-agent home" $
       case readyWarnings [offer, claimOutside] of
         [warning] -> "from the bus root you queried" `T.isInfixOf` warning
         _ -> False

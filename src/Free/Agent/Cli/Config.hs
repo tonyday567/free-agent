@@ -149,7 +149,7 @@ data AcpCliConfig = AcpCliConfig
 defaultHermesConfig :: HermesConfig
 defaultHermesConfig =
   HermesConfig
-    { hcRoot = ".",
+    { hcRoot = "bus/",
       hcNames = [],
       hcPromptFile = "",
       hcSessionFile = Nothing,
@@ -164,7 +164,7 @@ defaultHermesConfig =
 defaultKimiConfig :: KimiConfig
 defaultKimiConfig =
   KimiConfig
-    { kcRoot = ".",
+    { kcRoot = "bus/",
       kcNames = [],
       kcPromptFile = "",
       kcSessionFile = Nothing,
@@ -177,7 +177,7 @@ defaultKimiConfig =
 defaultDshConfig :: DshConfig
 defaultDshConfig =
   DshConfig
-    { dcRoot = ".",
+    { dcRoot = "bus/",
       dcNames = [],
       dcPromptFile = "",
       dcDshPatch = "",
@@ -189,7 +189,7 @@ defaultDshConfig =
 defaultLlmConfig :: LlmConfig
 defaultLlmConfig =
   LlmConfig
-    { lcRoot = ".",
+    { lcRoot = "bus/",
       lcNames = [],
       lcPromptFile = "",
       lcModel = Nothing,
@@ -202,7 +202,7 @@ defaultLlmConfig =
 defaultCommandConfig :: CommandConfig
 defaultCommandConfig =
   CommandConfig
-    { ccRoot = ".",
+    { ccRoot = "bus/",
       ccNames = [],
       ccCmd = "",
       ccArgs = [],
@@ -220,7 +220,7 @@ rootOpt =
     ( long "root"
         <> short 'r'
         <> metavar "ROOT"
-        <> value "."
+        <> value "bus/"
         <> showDefault
         <> help "Bus root directory containing log.jsonl"
     )

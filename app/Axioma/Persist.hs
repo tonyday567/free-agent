@@ -220,7 +220,7 @@ persistTopic = do
     (code1, out1, _) <-
       readProcessWithExitCode
         freeAgentBin
-        ["bus", "post", "--from", "test", "--to", "test", "--body", "should-fail"]
+        ["bus", "post", "--root", nobusDir, "--from", "test", "--to", "test", "--body", "should-fail"]
         ""
     assert "CLI post from non-bus dir exits 1" $
       code1 == ExitFailure 1

@@ -117,7 +117,7 @@ free-agent cmd -r ROOT --name NAME --cmd CMD [ARG...] [--delivery-budget N]
 
 `llm` uses `bareHost`, `gateway` targets a Hermes api_server, `acp` speaks JSON-RPC to a persistent child such as `kimi acp`, and `cmd` treats an external command as the seat.
 
-Seat operations — cold start, reboot recipes, liveness readings, failure repair — live in [seats.md](seats.md).
+Seat operations use the installed command help: `free-agent --help`, `free-agent refresh --help`, and `free-agent bus status --help`.
 
 ## Library
 
@@ -151,4 +151,4 @@ cabal run free-agent-axioma
 
 `free-agent-axioma` pins the bus and seat behavior with executable witnesses. Experiment probes and measurement harnesses live outside this package in the surrounding workspace.
 
-The restricted tool menu for agent seats — `fare` — is documented in [fare.md](fare.md).
+The restricted tool menu for agent seats is `fare`; exact command syntax is owned by `fare --help` and `fare <cmd> --help`.

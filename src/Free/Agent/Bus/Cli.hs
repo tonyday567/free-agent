@@ -73,14 +73,16 @@ import Control.Monad (forM_, forever, guard, unless, when)
 import Data.Char (isAlphaNum, isAsciiUpper, isDigit)
 import Data.Foldable (traverse_)
 import Data.List (isPrefixOf, sort, sortOn)
+import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe, maybe)
 import Data.Ord (Down (..))
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (LocalTime, NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, localTimeToUTC, utc)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
-import Free.Agent.Bus (postLocal, readFileStrict)
+import Free.Agent.Bus (malformedRows, postLocal, readFileStrict)
 import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
 import Free.Agent.Bus.File (Human (..), attachHuman, humanNames, readCursor, readCursorAll, readHuman, removeHuman, writeCursor)
 import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbPath, hbText, readHeartbeat)
@@ -422,12 +424,12 @@ runBusCommand (DaemonCommand root) = runDaemon @Text root
 -- ---------------------------------------------------------------------------
 
 -- | Resolve the bus root: @FREE_AGENT_BUS_ROOT@ wins when @--root@ is the
--- default @.@, so a shell in ~/coffee never grows a stray log.
+-- default @bus/@, so a shell in ~/coffee never grows a stray log.
 resolveRoot :: FilePath -> IO FilePath
 resolveRoot root = do
   envRoot <- lookupEnv "FREE_AGENT_BUS_ROOT"
   pure $ case envRoot of
-    Just r | root == "." -> r
+    Just r | root == "bus/" -> r
     _ -> root
 
 -- | Post to a root, refusing loudly when there is no bus there.
@@ -572,6 +574,22 @@ filterStored names line = do
 -- read
 -- ---------------------------------------------------------------------------
 
+-- | Refuse a log whose non-blank rows do not all decode, naming each bad
+-- row's 1-based line and 0-based character offset on stderr and exiting
+-- non-zero. Without this, one malformed row reads as an empty inbox (B12):
+-- the read is indistinguishable from no mail. Blank and whitespace-only
+-- lines are not rows and are tolerated.
+requireDecodable :: FilePath -> Text -> IO ()
+requireDecodable path content = case malformedRows content of
+  [] -> pure ()
+  rows -> do
+    traverse_ (TIO.hPutStrLn stderr . badRow) rows
+    TIO.hPutStrLn stderr ("🔴 " <> T.pack path <> ": malformed JSONL row(s); decode failed, so no mail was read")
+    exitFailure
+  where
+    badRow (row, offset) =
+      "🔴 row " <> T.pack (show row) <> " (offset " <> T.pack (show offset) <> "): not a valid stored post line"
+
 -- | Read a thread (all posts sharing a root id with the given post), or
 -- posts addressed to NAMEs. A thread view ignores NAMEs. A path that is not
 -- a bus is refused like every other command refuses it.
@@ -581,6 +599,7 @@ runRead root names since mThread depth = do
   requireBus root'
   let path = root' </> "log.jsonl"
   content <- readFileStrict path
+  requireDecodable path content
   case mThread of
     Just tid -> runThreadView (postsOf content) tid depth
     Nothing -> do
@@ -604,7 +623,9 @@ runInbox :: FilePath -> Text -> Bool -> Depth -> IO ()
 runInbox root name markRead depth = do
   root' <- resolveRoot root
   requireBus root'
-  content <- readFileStrict (root' </> "log.jsonl")
+  let path = root' </> "log.jsonl"
+  content <- readFileStrict path
+  requireDecodable path content
   sinceId <- readCursorAll root' name
   let shown = mapMaybe (filterSince [name] sinceId) (T.lines content)
   traverse_ (TIO.putStrLn . renderStored depth) shown
@@ -719,30 +740,36 @@ runReady root depth = do
 readyPosts :: [Stamped Text] -> [Stamped Text]
 readyPosts posts = filter isReady [task | task <- posts, isRootTask task, null (to (stamped task))]
   where
+    index = componentIndex posts
+    -- Target id to the blockers that cite it, built once: scanning the
+    -- whole log for a @LINK@ per task is the quadratic this hoist removes.
+    blockersByTarget = Map.fromListWith (++) [(target, [blocker]) | stored <- posts, Just (blocker, target) <- [parseBlockLink (body (stamped stored))]]
+
+    -- Root-TASK ids whose owner has posted a DONE in the task's own
+    -- component: a blocker id is resolved exactly when it names such a
+    -- task. Built once so resolving each blocker is one Set membership,
+    -- not a whole-log scan per blocker — the quadratic free's
+    -- blocker-heavy witness caught in @any@ over every post per blocker.
+    resolvedTaskIds =
+      Set.fromList
+        [ snd (stamp task)
+        | task <- posts,
+          isRootTask task,
+          let component = componentOf index task,
+          taskComplete (taskOwner task component) component
+        ]
+
     isReady task =
-      let component = componentOf posts task
+      let component = componentOf index task
           owner = taskOwner task component
           blockers = blockersFor (snd (stamp task))
        in owner == Nothing
             && not (taskComplete owner component)
             && all blockerResolved blockers
 
-    blockersFor taskId =
-      [ blocker
-      | stored <- posts,
-        Just (blocker, target) <- pure (parseBlockLink (body (stamped stored))),
-        target == taskId
-      ]
+    blockersFor taskId = Map.findWithDefault [] taskId blockersByTarget
 
-    blockerResolved blocker =
-      any
-        ( \task ->
-            let component = componentOf posts task
-             in snd (stamp task) == blocker
-                  && isRootTask task
-                  && taskComplete (taskOwner task component) component
-        )
-        posts
+    blockerResolved blocker = Set.member blocker resolvedTaskIds
 
 -- | Diagnose CLAIM and DONE posts that cannot settle any incomplete public
 -- offer because they lie outside every such offer's thread component.
@@ -751,13 +778,18 @@ readyWarnings posts =
   [ warning stray offer
   | stray <- posts,
     hasKind "CLAIM" stray || hasKind "DONE" stray,
-    all (outside stray) offerComponents,
+    outside stray,
     Just offer <- [resemblingOffer stray offers]
   ]
   where
     -- Shared across strays: recomputing the components and the offer set
-    -- per stray turned a page of lint into minutes on a long log.
-    offerComponents = map (componentOf posts) (taskOffers posts)
+    -- per stray turned a page of lint into minutes on a long log. The
+    -- component index is built once here and reused for every offer lookup.
+    index = componentIndex posts
+    offerComponents = map (componentOf index) (taskOffers posts)
+    -- Every post id held by a task-offer component, so a stray CLAIM/DONE
+    -- outside all of them is one Set test instead of a per-offer scan.
+    offerComponentIds = Set.fromList [snd (stamp p) | comp <- offerComponents, p <- comp]
     offers = openOffers posts
 
     taskOffers = filter (\task -> isRootTask task && null (to (stamped task)))
@@ -765,12 +797,12 @@ readyWarnings posts =
     openOffers =
       filter
         ( \task ->
-            let component = componentOf posts task
+            let component = componentOf index task
              in not (taskComplete (taskOwner task component) component)
         )
         . taskOffers
 
-    outside stray component = snd (stamp stray) `notElem` map (snd . stamp) component
+    outside stray = snd (stamp stray) `Set.notMember` offerComponentIds
 
     warning stray offer =
       let strayId = T.pack (show (snd (stamp stray)))
@@ -822,11 +854,22 @@ resemblingOffer stray offers =
 
     bodyTokens = T.words . T.toLower . T.map (\c -> if isAlphaNum c then c else ' ')
 
-componentOf :: [Stamped Text] -> Stamped Text -> [Stamped Text]
-componentOf posts task =
-  case [vs | (_, vs) <- slicePosts ByThread posts, any ((== snd (stamp task)) . snd . stamp) vs] of
-    (vs : _) -> sortOn (snd . stamp) vs
-    [] -> [task]
+-- | The thread component holding a post, looked up by post id from a
+-- partition built once by 'componentIndex'. The fallback to @[task]@ keeps
+-- the prior behaviour when a post belongs to no slice.
+componentOf :: Map.Map PostId [Stamped Text] -> Stamped Text -> [Stamped Text]
+componentOf index task =
+  case Map.lookup (snd (stamp task)) index of
+    Just vs -> sortOn (snd . stamp) vs
+    Nothing -> [task]
+
+-- | Post-id to thread-component index. 'slicePosts' 'ByThread' already
+-- groups every post by its thread root; flattening it into a @Map@ turns
+-- each READY component lookup from a whole-log re-slice into a single
+-- logarithmic lookup, which is what keeps @bus ready@ linear on long logs.
+componentIndex :: [Stamped Text] -> Map.Map PostId [Stamped Text]
+componentIndex posts =
+  Map.fromList [(snd (stamp p), vs) | (_, vs) <- slicePosts ByThread posts, p <- vs]
 
 taskOwner :: Stamped Text -> [Stamped Text] -> Maybe Name
 taskOwner task component =
