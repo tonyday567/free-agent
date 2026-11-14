@@ -12,7 +12,6 @@ import Axioma.Conch (conchTopic)
 import Axioma.Connector (connectorTopic)
 import Axioma.Delivery (deliveryTopic)
 import Axioma.Diagram (diagramTopic)
-import Axioma.Fare (fareTopic)
 import Axioma.Halt (haltTopic)
 import Axioma.Interrupt (interruptTopic)
 import Axioma.Lifecycle (lifecycleTopic)
@@ -47,7 +46,6 @@ data Topic
   | Acp
   | Lifecycle
   | Usage
-  | Fare
   deriving (Show, Eq, Bounded, Enum)
 
 topicName :: Topic -> String
@@ -70,7 +68,6 @@ topicName Connector = "connector"
 topicName Acp = "acp"
 topicName Lifecycle = "lifecycle"
 topicName Usage = "usage"
-topicName Fare = "fare"
 
 topicDesc :: Topic -> String
 topicDesc All = "run all topics"
@@ -92,7 +89,6 @@ topicDesc Connector = "connector turn grammar (B7): zero/one/two-frame turns"
 topicDesc Acp = "ACP seat (R2a): scripted double + wired-binary integration"
 topicDesc Lifecycle = "lifecycle hygiene (H): lock stress, daemon liveness, death honesty (L1-L5)"
 topicDesc Usage = "Hermes latest-prompt usage anchor"
-topicDesc Fare = "fare gate defaults, docspec flags, repository/full module selection, and the index area query"
 
 topicParser :: Parser Topic
 topicParser =
@@ -139,7 +135,6 @@ runTopic Connector = connectorTopic
 runTopic Acp = acpTopic
 runTopic Lifecycle = lifecycleTopic
 runTopic Usage = usageTopic
-runTopic Fare = fareTopic
 
 main :: IO ()
 main = do
