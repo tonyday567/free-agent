@@ -12,12 +12,12 @@ module Free.Agent.Agent.Runner
   )
 where
 
-import Circuit.Agent (Name, Post (..), mkPost)
-import Circuit.Agent.Framing (Stamped, stamp, stamped)
+import Circuit.Agent (Name, Post (..), PostId, mkPost)
+import Circuit.Agent.Framing (Stamped, stamp, stamped, unframeStored)
 import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph)
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, displayException, fromException, try)
-import Control.Monad (unless, void)
+import Control.Monad (void)
 import Data.Foldable (forM_, traverse_)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (nub)
@@ -38,10 +38,21 @@ import Free.Agent.Bus.File
     writeTransaction,
   )
 import Free.Agent.Bus.Heartbeat (HbState (..), writeHeartbeat)
-import Free.Agent.Delivery (DeliveryGrant, Turn, TurnCeiling (..), TurnResult (..), awaitTurn, useDeliveryGrant)
+import Free.Agent.Delivery
+  ( DeliveryFailure (..),
+    DeliveryGrant,
+    Turn,
+    TurnCeiling (..),
+    TurnResult (..),
+    awaitTurn,
+    deliveryFailureLabel,
+    useDeliveryGrant,
+  )
+import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
 import System.Posix.Process (getProcessID)
+import Text.Read (readMaybe)
 
 -- | Deliveries attempted for one drained batch before it is skipped.
 --
@@ -58,6 +69,22 @@ maxBatchAttempts = 2
 maxConsecutiveSkips :: Int
 maxConsecutiveSkips = 3
 
+-- | Delivery-environment failures one seat tolerates before it stands down.
+--
+-- A resume or spawn failure leaves the batch behind an unmoved cursor, so the
+-- next launch re-delivers it. Re-presenting it inside one process is a second
+-- chance for an environment that blinked, not a repair for one that is down,
+-- so the counter is small; at the ceiling the seat stops with its mail still
+-- behind the cursor rather than advancing past work no turn ever read.
+maxDeliveryFailures :: Int
+maxDeliveryFailures = 3
+
+-- | Pause before re-presenting a batch whose delivery environment failed, in
+-- microseconds. Longer than 'batchBackoffMicros' because the cause is usually
+-- a provider that is down rather than a turn that went wrong.
+deliveryBackoffMicros :: Int -> Int
+deliveryBackoffMicros n = 5_000_000 * n
+
 -- | Pause before re-presenting a batch whose delivery failed, in microseconds.
 batchBackoffMicros :: Int -> Int
 batchBackoffMicros n = 1_000_000 * n
@@ -72,15 +99,21 @@ batchBackoffMicros n = 1_000_000 * n
 --
 -- A batch is committed only after 'TurnResponse': its transaction marker is
 -- written first, then its cursor. Cancellation writes neither and stops the
--- loop. A failed delivery is retried once, then relayed to its senders and
--- skipped as a committed decision, so a backend failure cannot end a seat; an
--- explicit cancellation or a decided quiet still does. A turn the host stopped
--- at its own tool-iteration budget is not retried at all: it is committed once
--- as a terminal decision, because replaying it spends the budget again and can
--- republish work the stopped turn already did outside the runner. On restart, a marker
--- ahead of the cursor completes the interrupted cursor write; otherwise the
--- uncemented mail is presented again so the agent can inspect any effects
--- already in the log and continue.
+-- loop. A failed delivery is retried once, then relayed as an unaddressed
+-- notice and skipped as a committed decision, so a backend failure cannot end
+-- a seat; an explicit cancellation or a decided quiet still does. A failure of
+-- the delivery environment itself — a backend that will not start, or a stored
+-- session that will not resume after the CLI's own bounded retries — is
+-- neither of those: no turn ran, so the batch is not committed, not skipped,
+-- and not read past. It is re-presented after a pause and, once
+-- 'maxDeliveryFailures' is reached, left behind an unmoved cursor for the next
+-- launch. A turn the host stopped at its own tool-iteration budget is not
+-- retried at all: it is committed once as a terminal decision, because
+-- replaying it spends the budget again and can republish work the stopped turn
+-- already did outside the runner. On restart, a marker ahead of the cursor
+-- completes the interrupted cursor write; otherwise the uncemented mail is
+-- presented again so the agent can inspect any effects already in the log and
+-- continue.
 --
 -- Decided quiet: a delivered post in the control form carrying a halt mark
 -- (🟢 or 🔵 — the glyph alone on its first line) stops the loop; an
@@ -144,29 +177,41 @@ runAgentLoop agentName names root mQuiesce grant handleBatch = do
           _ -> pure ()
         writeCursor root agentName (snd (stamp stored) + 1)
         pure Halt
-      runBatch _ [] = pure Continue
-      runBatch skips (stored : rest)
+      runBatch _ _ [] = pure Continue
+      runBatch failures skips (stored : rest)
         | stopping stored = controlFlow stored
         | otherwise = do
             let (ordinary, remaining) = break stopping (stored : rest)
                 addressed = filter ((/= agentName) . from . stamped) ordinary
                 nextCursor = snd (stamp (last ordinary)) + 1
             if null addressed
-              then writeCursor root agentName nextCursor >> runBatch skips remaining
+              then writeCursor root agentName nextCursor >> runBatch failures skips remaining
               else
-                deliverBatch skips addressed nextCursor >>= \case
-                  Continue -> runBatch skips remaining
+                deliverBatch failures skips addressed nextCursor >>= \case
+                  Continue -> runBatch failures skips remaining
                   Halt -> pure Halt
       -- A batch is delivered at most 'maxBatchAttempts' times. A failed
       -- delivery is the backend's, not the exchange's: the cursor and the
       -- transaction stay untouched and the same batch is presented again after
       -- a pause. A batch that fails twice is one that cannot be done — it is
-      -- relayed to its senders and skipped, so the seat keeps serving new mail
+      -- skipped as a committed decision, so the seat keeps serving new mail
       -- instead of dying on one bad delivery. 'maxConsecutiveSkips' consecutive
-      -- skips mean the seat is broken, not the mail: it stands down after the third
-      -- skip is committed, and anything later stays behind the cursor.
-      deliverBatch skips storedBatch nextCursor = attempt 1
+      -- skips mean the seat is broken, not the mail: it stands down after the
+      -- third skip is committed, and anything later stays behind the cursor.
+      --
+      -- A delivery-environment failure is not a turn failure and does not take
+      -- that path: no turn ran, so nothing is known about the batch, and
+      -- committing it would eat mail the seat still owes an answer to (#689).
+      -- It gets its own small ceiling and an unmoved cursor instead.
+      deliverBatch failures skips storedBatch nextCursor = attempt 1
         where
+          batchIds = map (snd . stamp) storedBatch
+          senders = nub [from p | p <- map stamped storedBatch, from p /= agentName]
+          reached = T.pack (show (nextCursor - 1))
+          ids = T.intercalate "," (map (T.pack . show) batchIds)
+          senderNote
+            | null senders = ""
+            | otherwise = "; sender " <> T.intercalate "," senders
           attempt n = do
             granted <- useDeliveryGrant grant
             case granted of
@@ -185,6 +230,7 @@ runAgentLoop agentName names root mQuiesce grant handleBatch = do
                   Right TurnCancelled -> pure Halt
                   Right (TurnResponse replies) -> do
                     writeIORef skips 0
+                    writeIORef failures 0
                     let keep p =
                           let b = T.strip (body p)
                            in not (T.null b) && b /= "(empty)"
@@ -197,6 +243,7 @@ runAgentLoop agentName names root mQuiesce grant handleBatch = do
                         else Continue
                   Left e
                     | Just ceiling <- fromException e -> ceilingBatch ceiling
+                    | Just df <- fromException e -> environmentFailed n df
                     | otherwise -> do
                         let exc = T.pack (displayException e)
                             failed = T.unpack agentName ++ " handler failed on batch through post " ++ show (nextCursor - 1)
@@ -217,72 +264,116 @@ runAgentLoop agentName names root mQuiesce grant handleBatch = do
           -- ran the batch to the end of its own call budget, so re-invoking it
           -- would spend that budget again and could duplicate a reply the turn
           -- already published outside the runner. The batch is committed once
-          -- — transaction, then cursor — and its senders are told why. It is a
-          -- non-delivery, so three in a row still stand a broken seat down.
+          -- — transaction, then cursor — and its senders are named in a notice
+          -- rather than woken by one. It is a non-delivery, so three in a row
+          -- still stand a broken seat down.
           ceilingBatch (TurnCeiling why) = do
-            let senders = nub [from p | p <- map stamped storedBatch, from p /= agentName]
-                reached = show (nextCursor - 1)
             hPutStrLn stderr $
               "🔴 "
                 ++ T.unpack agentName
                 ++ " turn hit the tool-iteration ceiling on batch through post "
-                ++ reached
+                ++ T.unpack reached
                 ++ "; committed without a reply: "
                 ++ T.unpack (T.take 400 why)
-            unless (null senders) $
-              void
-                ( postLocal
-                    root
-                    ( ( mkPost
-                          agentName
-                          senders
-                          ( markGlyph Escalate
-                              <> " turn hit the tool-iteration ceiling on posts through "
-                              <> T.pack reached
-                              <> ": "
-                              <> T.take 200 why
-                              <> "; batch closed without a reply — re-send if the work still matters"
-                          )
-                      )
-                        { thread = [nextCursor - 1]
-                        }
-                    )
-                )
+            notice $
+              markGlyph Escalate
+                <> " turn hit the tool-iteration ceiling on posts "
+                <> ids
+                <> ": "
+                <> T.take 200 why
+                <> "; batch closed without a reply — re-send if the work still matters"
             writeTransaction root agentName nextCursor
             writeCursor root agentName nextCursor
             seen <- readIORef skips
             writeIORef skips (seen + 1)
             pure $ if seen + 1 >= maxConsecutiveSkips then Halt else Continue
           -- The skip is a committed decision, so it writes the transaction
-          -- marker before the cursor exactly as a settled batch does. The
-          -- relay is a label, not a stop order: it leads with the escalation
-          -- glyph in words, never the control form.
+          -- marker before the cursor exactly as a settled batch does.
           skipBatch exc = do
-            relayFailure exc
+            hPutStrLn stderr $
+              "🔴 "
+                ++ T.unpack agentName
+                ++ " skipping the batch through post "
+                ++ show (nextCursor - 1)
+                ++ ": "
+                ++ T.unpack (T.take 400 exc)
+            notice $
+              markGlyph Escalate
+                <> " failed on posts "
+                <> ids
+                <> " twice: "
+                <> T.take 200 exc
+                <> "; batch skipped — re-send if the work still matters"
             writeTransaction root agentName nextCursor
             writeCursor root agentName nextCursor
             seen <- readIORef skips
             writeIORef skips (seen + 1)
             pure $ if seen + 1 >= maxConsecutiveSkips then Halt else Continue
-          relayFailure exc = do
-            let senders = nub [from p | p <- map stamped storedBatch, from p /= agentName]
-            unless (null senders) $
-              void
-                ( postLocal
-                    root
-                    ( ( mkPost
-                          agentName
-                          senders
-                          ( markGlyph Escalate
-                              <> " handler failed on posts through "
-                              <> T.pack (show (nextCursor - 1))
-                              <> " twice: "
-                              <> T.take 200 exc
-                              <> "; batch skipped — re-send if the work still matters"
-                          )
-                      )
-                        { thread = [nextCursor - 1]
-                        }
+          -- The delivery environment failed, not the turn: nothing about the
+          -- batch was learned, so it is not judged. Neither marker moves, which
+          -- is what leaves the batch for the next launch. One process gets
+          -- 'maxDeliveryFailures' second chances — a pause for an environment
+          -- that blinked — and then stops, still behind its cursor.
+          environmentFailed n df = do
+            seen <- readIORef failures
+            let attemptNo = seen + 1
+                label = deliveryFailureLabel (dfKind df)
+                why = T.strip (T.take 240 (dfDetail df))
+                lastWords
+                  | attemptNo >= maxDeliveryFailures = "standing down with the batch behind an unmoved cursor"
+                  | otherwise = "cursor unmoved, re-presenting the same batch"
+            writeIORef failures attemptNo
+            hPutStrLn stderr $
+              "🔴 "
+                ++ T.unpack agentName
+                ++ " "
+                ++ T.unpack label
+                ++ " on batch through post "
+                ++ show (nextCursor - 1)
+                ++ " (attempt "
+                ++ show attemptNo
+                ++ " of "
+                ++ show maxDeliveryFailures
+                ++ "): "
+                ++ T.unpack why
+                ++ "; "
+                ++ lastWords
+            notice $
+              markGlyph Escalate
+                <> " "
+                <> label
+                <> " on posts "
+                <> ids
+                <> ": "
+                <> why
+                <> "; attempt "
+                <> T.pack (show attemptNo)
+                <> " of "
+                <> T.pack (show maxDeliveryFailures)
+                <> "; no turn ran and the cursor is unmoved — the batch stays for the next launch"
+            if attemptNo >= maxDeliveryFailures
+              then pure Halt
+              else threadDelay (deliveryBackoffMicros attemptNo) >> attempt n
+          -- A notice is evidence for whoever supervises the seat, not mail: it
+          -- is unaddressed, so no seat can spend a turn answering it. The
+          -- addressed form bought a turn per notice, which failed while the
+          -- provider was down and bought another — #707-#712 is that loop, six
+          -- posts of pure overhead. It names every post id in the batch rather
+          -- than only the thread head, and carries what disk says about the
+          -- turn so "published then died" and "never ran" stop looking alike.
+          notice bodyLine = do
+            evidence <- batchEvidence root agentName batchIds
+            void $
+              postLocal
+                root
+                ( mkPost
+                    agentName
+                    []
+                    ( bodyLine
+                        <> senderNote
+                        <> "; evidence "
+                        <> evidence
+                        <> "; unaddressed on purpose — answering this would spend a turn on it"
                     )
                 )
   recoverTransaction root agentName
@@ -293,10 +384,79 @@ runAgentLoop agentName names root mQuiesce grant handleBatch = do
   -- pid. `bus status` probes the pid for idle liveness and uses
   -- staleness only for states that promise another transition.
   skips <- newIORef 0
+  failures <- newIORef 0
   writeHeartbeat root agentName Wake
   tailLog path names cursor (fmap (\qc -> (qc, onQuiesce)) mQuiesce) $ \storedBatch -> do
     writeHeartbeat root agentName Working
-    result <- runBatch skips storedBatch
+    result <- runBatch failures skips storedBatch
     writeHeartbeat root agentName Idle
     pure result
   writeHeartbeat root agentName Dead
+
+-- | What disk says about a batch at failure time: which of its posts this seat
+-- already published against, and which transcript rows exist for them.
+--
+-- The two states that looked identical in the field — a turn that published and
+-- then died, and a turn that never ran — differ exactly here. A published post
+-- citing a batch id means the turn got far enough to answer it; transcript rows
+-- mean the backend was invoked and say how it ended. Both are read from files
+-- the seat already writes, so the notice costs no delivery.
+batchEvidence ::
+  -- | Bus root.
+  FilePath ->
+  -- | Seat name whose publications and transcript rows count.
+  Name ->
+  -- | Post ids in the batch.
+  [PostId] ->
+  IO Text
+batchEvidence root agentName ids = do
+  published <- publishedAgainst
+  rows <- transcriptRows
+  pure ("published " <> published <> "; transcript " <> rows)
+  where
+    batchEnd = maximum (0 : ids)
+    publishedAgainst = do
+      let path = root </> "log.jsonl"
+      exists <- doesFileExist path
+      if not exists
+        then pure "none"
+        else do
+          ls <- T.lines <$> TIO.readFile path
+          -- This seat publishes replies without ancestry, so a citation alone
+          -- is too narrow a test. Appended order is the honest one: an
+          -- addressed post by this seat above the batch's last id was written
+          -- after the batch was delivered, i.e. by the turn that is now
+          -- failing. A citation of a batch id counts too, for a turn that did
+          -- set ancestry. Unaddressed posts by this seat are excluded: a
+          -- failure notice is one of them, and counting it would make every
+          -- notice the evidence that a turn had published.
+          let hits =
+                [ snd (stamp s)
+                  | l <- ls,
+                    Just s <- [unframeStored @Text l],
+                    let p = stamped s,
+                    from p == agentName,
+                    not (null (to p)),
+                    snd (stamp s) > batchEnd || any (`elem` ids) (thread p)
+                ]
+          pure $ case hits of
+            [] -> "none"
+            xs -> T.intercalate "," (map (T.pack . show) xs)
+    transcriptRows = do
+      let path = root </> ".transcripts" </> T.unpack agentName <> ".jsonl"
+      exists <- doesFileExist path
+      if not exists
+        then pure "none"
+        else do
+          ls <- T.lines <$> TIO.readFile path
+          let outcomes = [rowOutcome l | l <- ls, maybe False (`elem` ids) (rowPost l)]
+          pure $ case outcomes of
+            [] -> "none"
+            xs -> T.pack (show (length xs)) <> " rows (" <> T.intercalate "," xs <> ")"
+    rowPost l =
+      readMaybe . T.unpack . T.takeWhile (/= ',')
+        =<< T.stripPrefix "{\"post_id\":" l
+    rowOutcome l = case T.breakOn "\"outcome\":\"" l of
+      (_, rest)
+        | T.null rest -> "?"
+        | otherwise -> T.takeWhile (/= '"') (T.drop (T.length "\"outcome\":\"") rest)

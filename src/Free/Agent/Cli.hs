@@ -61,7 +61,7 @@ import Control.Concurrent
     readMVar,
     threadDelay,
   )
-import Control.Exception (IOException, SomeException, catch, onException, throwIO, try)
+import Control.Exception (IOException, SomeException, catch, displayException, onException, throwIO, try)
 import Control.Monad (void, when)
 import Data.Aeson (FromJSON (parseJSON), decodeStrict, withObject, (.:!))
 import Data.ByteString qualified as BS
@@ -74,7 +74,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
-import Free.Agent.Delivery (Invocation (..), Turn, TurnCeiling (..), TurnResult (..), deliverTo)
+import Free.Agent.Delivery (DeliveryFailure (..), DeliveryFailureKind (..), Invocation (..), Turn, TurnCeiling (..), TurnResult (..), deliverTo)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (-<.>))
@@ -494,21 +494,28 @@ cliQueryWithDelivery delivery mControl cli prompt = do
               if n > cliMaxRetries
                 then do
                   finishCli mControl
-                  fail
-                    ( "cliQuery: "
-                        <> cliCommand cli
-                        <> " resumed session failed after "
-                        <> show (1 + cliMaxRetries)
-                        <> " attempts (1 initial + "
-                        <> show cliMaxRetries
-                        <> " retries); last attempt "
-                        <> show n
-                        <> " exited "
-                        <> show code
-                        <> "; session "
-                        <> T.unpack sid
-                        <> "; last output: "
-                        <> T.unpack (T.take 400 raw)
+                  -- The session, not the turn, failed: the batch never
+                  -- reached a working turn. Raising 'ResumeFailed' keeps it
+                  -- off the runner's skip path, which would commit and
+                  -- advance past mail no turn ever read.
+                  throwIO
+                    ( DeliveryFailure
+                        ResumeFailed
+                        ( "cliQuery: "
+                            <> T.pack (cliCommand cli)
+                            <> " resumed session failed after "
+                            <> T.pack (show (1 + cliMaxRetries))
+                            <> " attempts (1 initial + "
+                            <> T.pack (show cliMaxRetries)
+                            <> " retries); last attempt "
+                            <> T.pack (show n)
+                            <> " exited "
+                            <> T.pack (show code)
+                            <> "; session "
+                            <> sid
+                            <> "; last output: "
+                            <> T.take 400 raw
+                        )
                     )
                 else do
                   threadDelay (100000 * n)
@@ -556,14 +563,29 @@ cliQueryWithDelivery delivery mControl cli prompt = do
           for_ (cliSessionReport cli) $ \path ->
             catch (removeFile path) (\(_ :: IOException) -> pure ())
           created <-
-            createProcess
-              (proc (cliCommand cli) (cliArgv cli prompt mSid))
-                { Process.std_in = CreatePipe,
-                  Process.std_out = CreatePipe,
-                  Process.std_err = CreatePipe
-                }
+            try @IOException
+              ( createProcess
+                  (proc (cliCommand cli) (cliArgv cli prompt mSid))
+                    { Process.std_in = CreatePipe,
+                      Process.std_out = CreatePipe,
+                      Process.std_err = CreatePipe
+                    }
+              )
           case created of
-            (Just stdinH, Just stdoutH, Just stderrH, process) ->
+            Left e ->
+              -- A backend that cannot be started is the environment's
+              -- failure, not the turn's: no process ran, so the batch is
+              -- untouched and must not be committed as a skipped turn.
+              throwIO
+                ( DeliveryFailure
+                    SpawnFailed
+                    ( "cliQuery: "
+                        <> T.pack (cliCommand cli)
+                        <> " could not be started: "
+                        <> T.pack (displayException e)
+                    )
+                )
+            Right (Just stdinH, Just stdoutH, Just stderrH, process) ->
               flip onException (terminateProcess process >> void (waitForProcess process)) $ do
                 for_ mControl $ \(CliControl _ cancelledRef processRef) -> do
                   writeIORef processRef (Just process)
@@ -586,7 +608,9 @@ cliQueryWithDelivery delivery mControl cli prompt = do
                 tee err
                 sessionNote <- maybe (pure "") readSessionReport (cliSessionReport cli)
                 pure (code, out <> err <> sessionNote, out <> routed err, elapsedMs t0' t1)
-            _ -> fail "cliQuery: createProcess did not return all requested pipes"
+            Right _ ->
+              throwIO
+                (DeliveryFailure SpawnFailed "cliQuery: createProcess did not return all requested pipes")
     elapsedMs t0' t1 = floor (realToFrac (diffUTCTime t1 t0') * (1000 :: Double))
     tee err =
       for_ (cliStderrTee cli) $ \path -> do

@@ -6,6 +6,9 @@ module Free.Agent.Delivery
     Turn (..),
     TurnResult (..),
     TurnCeiling (..),
+    DeliveryFailure (..),
+    DeliveryFailureKind (..),
+    deliveryFailureLabel,
     TurnMetrics (..),
     deliverTo,
     mapTurn,
@@ -41,7 +44,7 @@ import Control.Concurrent
     tryPutMVar,
     tryReadMVar,
   )
-import Control.Exception (Exception, IOException, SomeException, catch, throwIO, try)
+import Control.Exception (Exception, IOException, SomeException, catch, displayException, throwIO, try)
 import Control.Monad (void)
 import Data.Char (isSpace)
 import Data.Foldable (traverse_)
@@ -81,6 +84,38 @@ newtype TurnCeiling = TurnCeiling Text
   deriving (Show)
 
 instance Exception TurnCeiling
+
+-- | A failure of the delivery environment rather than of the turn.
+--
+-- Nothing about the batch caused it: the backend could not be started
+-- ('SpawnFailed'), or a stored session could not be resumed once the CLI's own
+-- bounded retries were spent ('ResumeFailed'). It is a third class beside a
+-- failed turn and a turn ceiling, because neither of their policies fits: no
+-- turn ran, so committing the batch as skipped would discard mail the seat
+-- still owes its senders an answer to, and re-running the batch in the same
+-- process cannot repair an environment that is down. The class exists so the
+-- runner can leave the batch behind its cursor for the next launch to
+-- re-deliver instead.
+data DeliveryFailure = DeliveryFailure
+  { dfKind :: DeliveryFailureKind,
+    dfDetail :: Text
+  }
+  deriving (Eq, Show)
+
+-- | Which part of the environment failed: the launch, or the session the
+-- launch was asked to resume.
+data DeliveryFailureKind = ResumeFailed | SpawnFailed
+  deriving (Eq, Show)
+
+-- | The detail is the message: a notice and a stderr line both want the
+-- reason, not a @Show@ rendering of a record.
+instance Exception DeliveryFailure where
+  displayException = T.unpack . dfDetail
+
+-- | Short wire word for a failure kind, for notices and log lines.
+deliveryFailureLabel :: DeliveryFailureKind -> Text
+deliveryFailureLabel ResumeFailed = "resume failed"
+deliveryFailureLabel SpawnFailed = "spawn failed"
 
 -- | Live, backend-neutral delivery cost and status.
 data TurnMetrics = TurnMetrics
