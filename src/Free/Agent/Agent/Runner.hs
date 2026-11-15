@@ -350,7 +350,7 @@ runAgentLoop agentName names root mQuiesce grant handleBatch = do
                 <> T.pack (show attemptNo)
                 <> " of "
                 <> T.pack (show maxDeliveryFailures)
-                <> "; no turn ran and the cursor is unmoved — the batch stays for the next launch"
+                <> "; this attempt ran no turn and the cursor is unmoved — the batch stays for the next launch"
             if attemptNo >= maxDeliveryFailures
               then pure Halt
               else threadDelay (deliveryBackoffMicros attemptNo) >> attempt n
