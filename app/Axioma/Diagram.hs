@@ -9,12 +9,12 @@ where
 import Axioma.Common (assert, iterateAgent, mkPost, runMono)
 import Circuit.Agent (Post, tape)
 import Circuit.Category (Category ((.)))
-import Circuit.Machine (Body (Body), Moore, delay, feedback, scan)
+import Circuit.Machine (Body (Body), Moore, delay, scan)
 import Circuit.Tensor (Const (..))
 import Circuit.Traced (Strength (strength), Trace (trace))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Free.Agent.Diagram (diagramStep, diagramSteps, liftProcess, machineProcess)
+import Free.Agent.Diagram (bend, diagramStep, diagramSteps, liftProcess, machineProcess)
 import Prelude hiding ((.))
 
 diagramTopic :: IO ()
@@ -50,21 +50,21 @@ diagramTopic = do
 
   -------------------------------------------------------------------------
   -- Bend with delay (endgame stage 1b): a stateful agent decomposes as a
-  -- stateless body plus cross-tick feedback; 'feedback' closes the state
+  -- stateless body plus cross-tick feedback; 'bend' closes the state
   -- wire with the one-tick 'delay' explicit in the wiring.
   -------------------------------------------------------------------------
   putStrLn "bend with delay"
   do
     -- a standalone delay emits the initial value, then each input one
     -- tick late.
-    -- (Inside feedback, where the feedback wire carries the body's own
+    -- (Inside the bend, where the feedback wire carries the body's own
     -- state output, this is exactly "observable one tick late".)
     assert "delay emits initial value, then each input one tick late" $
       scan (delay 0) [1, 2, 3, 4 :: Int] == [0, 1, 2, 3]
 
   do
     let sysN = Body (\i -> i) (\(s, i) -> s + i) (Const . (+ 1)) :: Moore (,) Int (->) Int Int
-    assert "feedback body with delay mirrors iterateAgent" $
+    assert "bend body with delay mirrors iterateAgent" $
       scan (machineProcess sysN 0) [1 .. 5] == iterateAgent sysN 0 [1 .. 5]
 
   do
@@ -72,17 +72,17 @@ diagramTopic = do
           tape (\hist -> [mkPost "bot" ["human"] ("n:" <> T.pack (show (length hist)))]) ::
             Moore (,) [Post Text] (->) (Post Text) [Post Text]
         ins = [mkPost "human" ["bot"] "one", mkPost "human" ["bot"] "two"]
-    assert "tape agent: feedback body with delay mirrors iterateAgent" $
+    assert "tape agent: bend body with delay mirrors iterateAgent" $
       scan (machineProcess echoObs []) ins == iterateAgent echoObs [] ins
 
-  -- The bend-and-delay identity from Circuit.Machine: for bodies whose
-  -- fixed point is independent of the initial feedback value, feedback's
-  -- wiring equals the cartesian trace with delay on the feedback wire.
+  -- The bend-and-delay identity: for bodies whose fixed point is
+  -- independent of the initial feedback value, the bend's wiring equals
+  -- the cartesian trace with delay on the feedback wire.
   do
     let body = liftProcess (\(i, _s) -> (i * 2, 0 :: Int))
         swapP = liftProcess (\(a, b) -> (b, a))
         ins = [1, 2, 3, 4 :: Int]
-        viaFeedback = scan (feedback 99 body) ins
+        viaBend = scan (bend 99 body) ins
         viaTrace = scan (trace (swapP . (body . strength (delay 99)) . swapP)) ins
-    assert "feedback ≡ trace with delay on the feedback wire" $
-      viaFeedback == viaTrace && viaFeedback == [2, 4, 6, 8]
+    assert "bend ≡ trace with delay on the feedback wire" $
+      viaBend == viaTrace && viaBend == [2, 4, 6, 8]
