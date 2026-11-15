@@ -19,17 +19,15 @@ import Circuit.Agent.Conch
     reservedFiles,
     stepConch,
   )
-import Circuit.Agent.Framing (Stamped, stamp, stamped, unframeStored)
-import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay)
+import Circuit.Agent.Framing (Log (..), Stamped, stamp, stamped)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, readMVar, takeMVar)
 import Control.Exception (SomeException, bracket, throwIO, try)
 import Data.List (sort)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Free.Agent.Bus (readFileStrict)
-import Free.Agent.Bus.Daemon (postViaDaemon, runDaemon)
+import Free.Agent.Bus (readFileStrict, readLogStrict)
 import Free.Agent.Conch (ConchReceipt (..), processConchPost, recoverConch)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removePathForcibly)
 import System.FilePath (takeDirectory, (</>))
@@ -63,9 +61,9 @@ postProcess :: ConchConfig -> FilePath -> ConchPost -> IO (Stamped ConchPayload)
 postProcess cfg root p = receiptPost <$> processConchPost cfg root p
 
 readConchLog :: FilePath -> IO [Stamped ConchPayload]
-readConchLog root =
-  mapMaybe (unframeStored @ConchPayload) . T.lines
-    <$> readFileStrict (root </> "log.jsonl")
+readConchLog root = do
+  Log posts <- readLogStrict (root </> "log.jsonl")
+  pure posts
 
 channelHandovers :: Name -> [Stamped ConchPayload] -> [Stamped ConchPayload]
 channelHandovers c =
@@ -121,20 +119,6 @@ conchTopic = do
       length parsed == length (T.lines raw)
         && map (body . stamped) parsed == map body posts
         && map (channel . stamped) parsed == map channel posts
-
-  putStrLn "Conch bare payload round-trips through the real FIFO daemon"
-  withRoot "free-agent-conch-daemon" $ \root ->
-    bracket (forkIO (runDaemon @ConchPayload root)) killThread $ \_ -> do
-      threadDelay 100000
-      let bare = handover "alice" "daemon-channel" ["bob"] (Just 41) "exact body: λ\nsecond line"
-      stored <- postViaDaemon root bare
-      parsed <- readConchLog root
-      assert "bare daemon round-trip preserves Just channel (catches framePost dropping channel)" $
-        channel (stamped stored) == Just "daemon-channel"
-      assert "bare daemon round-trip preserves exact body and Handover parent (catches payload or thread loss)" $
-        body (stamped stored) == body bare && thread (stamped stored) == [41] && to (stamped stored) == ["bob"]
-      assert "the real FIFO daemon durably stores the exact stamped ConchPayload (catches receipt/log divergence)" $
-        parsed == [stored]
 
   putStrLn "Conch dual handshake and named transfer"
   withRoot "free-agent-conch-handshake" $ \root -> do

@@ -10,20 +10,13 @@ module Free.Agent.Cli.Config
     CommandConfig (..),
     GatewayCliConfig (..),
     AcpCliConfig (..),
-    defaultHermesConfig,
-    defaultKimiConfig,
-    defaultDshConfig,
     defaultLlmConfig,
-    defaultCommandConfig,
     parseHermesConfig,
-    parseKimiConfig,
     parseDshConfig,
     parseLlmConfig,
     parseCommandConfig,
     swallowedSeatOption,
-    parseGatewayConfig,
     parseAcpConfig,
-    commonAgentOptions,
     rootOpt,
     namesOpt,
     promptOpt,
@@ -146,46 +139,6 @@ data AcpCliConfig = AcpCliConfig
 -- Defaults
 -- ---------------------------------------------------------------------------
 
-defaultHermesConfig :: HermesConfig
-defaultHermesConfig =
-  HermesConfig
-    { hcRoot = "bus/",
-      hcNames = [],
-      hcPromptFile = "",
-      hcSessionFile = Nothing,
-      hcModel = Nothing,
-      hcProvider = Nothing,
-      hcReasoning = Nothing,
-      hcYolo = True,
-      hcQuiesce = Nothing,
-      hcPitboss = Nothing
-    }
-
-defaultKimiConfig :: KimiConfig
-defaultKimiConfig =
-  KimiConfig
-    { kcRoot = "bus/",
-      kcNames = [],
-      kcPromptFile = "",
-      kcSessionFile = Nothing,
-      kcModel = Nothing,
-      kcProvider = Nothing,
-      kcQuiesce = Nothing,
-      kcPitboss = Nothing
-    }
-
-defaultDshConfig :: DshConfig
-defaultDshConfig =
-  DshConfig
-    { dcRoot = "bus/",
-      dcNames = [],
-      dcPromptFile = "",
-      dcDshPatch = "",
-      dcDshModelPatch = Nothing,
-      dcQuiesce = Nothing,
-      dcPitboss = Nothing
-    }
-
 defaultLlmConfig :: LlmConfig
 defaultLlmConfig =
   LlmConfig
@@ -197,17 +150,6 @@ defaultLlmConfig =
       lcKeyEnv = "DEEPSEEK_API_KEY",
       lcQuiesce = Nothing,
       lcPitboss = Nothing
-    }
-
-defaultCommandConfig :: CommandConfig
-defaultCommandConfig =
-  CommandConfig
-    { ccRoot = "bus/",
-      ccNames = [],
-      ccCmd = "",
-      ccArgs = [],
-      ccQuiesce = Nothing,
-      ccPitboss = Nothing
     }
 
 -- ---------------------------------------------------------------------------
@@ -310,24 +252,6 @@ pitbossOpt =
           <> help "Recipient for the quiescence marker (default: pitboss)"
       )
 
--- | Options shared by Hermes and Kimi configs.
-commonAgentOptions ::
-  Parser FilePath ->
-  Parser (Maybe FilePath) ->
-  Parser (Maybe Int) ->
-  Parser (Maybe Name) ->
-  Parser (FilePath, [Name], FilePath, Maybe FilePath, Maybe Text, Maybe Text, Maybe Int, Maybe Name)
-commonAgentOptions rootP sessP quiesceP pitbossP =
-  (,,,,,,,)
-    <$> rootP
-    <*> namesOpt
-    <*> promptOpt
-    <*> sessP
-    <*> modelOpt
-    <*> providerOpt
-    <*> quiesceP
-    <*> pitbossP
-
 -- ---------------------------------------------------------------------------
 -- Backend-specific parsers
 -- ---------------------------------------------------------------------------
@@ -347,18 +271,6 @@ parseHermesConfig =
     <*> pitbossOpt
   where
     yoloOpt = not <$> switch (long "no-yolo" <> help "Do not pass --yolo to hermes")
-
-parseKimiConfig :: Parser KimiConfig
-parseKimiConfig =
-  KimiConfig
-    <$> rootOpt
-    <*> namesOpt
-    <*> promptOpt
-    <*> sessionOpt
-    <*> modelOpt
-    <*> providerOpt
-    <*> quiesceOpt
-    <*> pitbossOpt
 
 parseDshConfig :: Parser DshConfig
 parseDshConfig =
@@ -481,33 +393,4 @@ parseAcpConfig =
             <> value "kimi"
             <> showDefault
             <> help "ACP executable (run as CMD acp)"
-        )
-
-parseGatewayConfig :: Parser GatewayCliConfig
-parseGatewayConfig =
-  GatewayCliConfig
-    <$> rootOpt
-    <*> namesOpt
-    <*> promptOpt
-    <*> baseUrlOpt
-    <*> keyEnvOpt
-    <*> quiesceOpt
-    <*> pitbossOpt
-  where
-    baseUrlOpt =
-      option
-        (T.pack <$> str)
-        ( long "base-url"
-            <> metavar "URL"
-            <> value "http://127.0.0.1:8642"
-            <> showDefault
-            <> help "Hermes gateway api_server base URL"
-        )
-    keyEnvOpt =
-      strOption
-        ( long "key-env"
-            <> metavar "NAME"
-            <> value "API_SERVER_KEY"
-            <> showDefault
-            <> help "Environment variable holding the api_server Bearer key"
         )

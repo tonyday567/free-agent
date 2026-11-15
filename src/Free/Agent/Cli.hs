@@ -3,14 +3,13 @@
 -- | Live CLI agents as opaque shards.
 --
 -- A 'Cli' recipe describes how to invoke an external CLI agent (hermes, kimi,
--- grok, or any shell command). 'cliDeliverTo' runs one interruptible turn with
+-- or any shell command). 'cliDeliverTo' runs one interruptible turn with
 -- session resume / stale fallback and explicit transcript causation.
 module Free.Agent.Cli
   ( -- * Invocation recipe
     Cli (..),
     StderrPolicy (..),
     kimiCli,
-    grokCli,
     dshCli,
     parseSessionId,
     cleanCliOut,
@@ -20,34 +19,18 @@ module Free.Agent.Cli
     cliInterrupted,
     cliCeiling,
 
-    -- * Shard adapters
-
     -- * Transcript
     TranscriptOutcome (..),
     TranscriptRecord (..),
     encodeTranscriptLine,
 
-    -- * Generic adapters (re-exported from 'Circuit.Agent.Query')
-    queryBody,
-    queryBodyWith,
-    synthBody,
-    echoBody,
-    sessionPrompt,
-    replyPosts,
+    -- * Generic adapter (re-exported from 'Circuit.Agent.Query')
     synthesisPosts,
   )
 where
 
 import Circuit.Agent (PostId)
-import Circuit.Agent.Query
-  ( echoBody,
-    queryBody,
-    queryBodyWith,
-    replyPosts,
-    sessionPrompt,
-    synthBody,
-    synthesisPosts,
-  )
+import Circuit.Agent.Query (synthesisPosts)
 import Control.Concurrent
   ( MVar,
     forkIO,
@@ -182,34 +165,6 @@ kimiText text =
    in case T.stripPrefix "• " clean of
         Just rest | "@" `T.isPrefixOf` rest -> rest
         _ -> clean
-
--- | Recipe for the grok CLI: @grok -p \<prompt\> --output-format json
--- [--resume \<sid\>]@.  Plain output carries no session id, so the JSON
--- format is used and the @text\/@sessionId@ fields are extracted.
-grokCli :: Maybe Text -> FilePath -> Cli
-grokCli model sessionFile =
-  Cli
-    { cliCommand = "grok",
-      cliArgv = \prompt mSid ->
-        ["-p", T.unpack prompt, "--output-format", "json"]
-          <> maybe [] (\m -> ["-m", T.unpack m]) model
-          <> maybe [] (\sid -> ["--resume", T.unpack sid]) mSid,
-      cliStdin = const "",
-      cliSessionFile = sessionFile,
-      cliSessionId = jsonField "sessionId",
-      cliStale = \code out ->
-        code /= ExitSuccess || "Failed to restore session" `T.isInfixOf` out,
-      cliExhausted = \_ _ -> False,
-      cliScrub = grokText,
-      cliStderr = StderrMerge,
-      cliStderrTee = Nothing,
-      cliSessionReport = Nothing
-    }
-
--- | Reply text is the JSON @text@ field, unescaped; if there is no such
--- field (an error page), keep the whole output so failures stay visible.
-grokText :: Text -> Text
-grokText out = maybe (T.strip out) unescapeJson (jsonField "text" out)
 
 -- | Best-effort extraction of a top-level @"key": "value"@ string field
 -- (space after the colon optional; escapes respected).  Not a JSON parser —

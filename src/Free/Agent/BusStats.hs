@@ -21,16 +21,11 @@ module Free.Agent.BusStats
     -- * Statistics
     Stats (..),
     computeStats,
-
-    -- * Rendering
-    renderStats,
-    renderStatsJson,
   )
 where
 
 import Circuit.Agent (Post (..))
 import Circuit.Agent.Framing (Stamped, stamp, stamped)
-import Circuit.Parser.Json (Json (..), encodeJson)
 import Data.Bifunctor (first)
 import Data.List (minimumBy, sort, sortOn)
 import Data.Map qualified as Map
@@ -38,11 +33,8 @@ import Data.Maybe (mapMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (decodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import Data.Vector qualified as V
-import Text.Printf (printf)
 import Text.Regex.TDFA ((=~))
 
 -- ---------------------------------------------------------------------------
@@ -149,7 +141,7 @@ slicePosts (WindowMinutes m) posts =
           end = addMinutes start m
        in T.concat [formatTs start, "..", formatTs end]
 slicePosts ByThread posts =
-  sortOn fst [(showt k, v) | (k, v) <- Map.toList roots]
+  sortOn fst [(T.pack (show k), v) | (k, v) <- Map.toList roots]
   where
     idx = Map.fromList [(snd (stamp p), p) | p <- posts]
     rootOf = go []
@@ -255,79 +247,3 @@ computeStats rules damping label posts =
          in case signalTimes of
               [] -> 0
               ts -> minutes start (maximum ts)
-
--- ---------------------------------------------------------------------------
--- Rendering
--- ---------------------------------------------------------------------------
-
--- | Human-readable plain-text report.
-renderStats :: Rules -> [Stats] -> Text
-renderStats rules stats =
-  T.unlines $
-    [ "bus-stats",
-      "  noise regex:    " <> noiseRE rules,
-      "  signal regex:   " <> signalRE rules,
-      "  deliverable:    " <> deliverableRE rules,
-      ""
-    ]
-      ++ concatMap renderSlice stats
-  where
-    renderSlice s =
-      [ "slice: " <> statSlice s,
-        "  posts:               " <> showt (statPosts s),
-        "  agents:              " <> showt (statAgents s),
-        "  duration (min):      " <> showd (statDurationMinutes s),
-        "  posts/min:           " <> showd (statPostsPerMinute s),
-        "  damping rules:       " <> showt (statDamping s),
-        "  Re_bus:              " <> showd (statReBus s),
-        "  signal:              " <> showt (statSignal s),
-        "  noise:               " <> showt (statNoise s),
-        "  unclassified:        " <> showt (statUnclassified s),
-        "  SNR:                 " <> maybe "-" showd (statSNR s),
-        "  SNR':                " <> maybe "-" showd (statSNRPrime s),
-        "  deliverables:        " <> showt (statDeliverables s),
-        "  done claims:         " <> showt (statDoneClaims s),
-        "  posts/deliverable:   " <> maybe "n/a" showd (statPostsPerDeliverable s),
-        "  time to quiescence (min): " <> showd (statTimeToQuiescenceMinutes s),
-        ""
-      ]
-
-showt :: (Show a) => a -> Text
-showt = T.pack . show
-
-showd :: Double -> Text
-showd = T.pack . printf "%0.3f"
-
--- | JSON report.
-renderStatsJson :: Rules -> [Stats] -> Text
-renderStatsJson rules stats =
-  decodeUtf8 (encodeJson (JObject [("rules", rulesObj), ("slices", JArray (V.fromList (map statsObject stats)))]))
-  where
-    rulesObj =
-      JObject
-        [ ("noise", JString (noiseRE rules)),
-          ("signal", JString (signalRE rules)),
-          ("deliverable", JString (deliverableRE rules))
-        ]
-    statsObject s =
-      JObject
-        [ ("slice", JString (statSlice s)),
-          ("posts", JNumber (fromIntegral (statPosts s))),
-          ("agents", JNumber (fromIntegral (statAgents s))),
-          ("duration_minutes", jdouble (statDurationMinutes s)),
-          ("posts_per_minute", jdouble (statPostsPerMinute s)),
-          ("damping_rules", JNumber (fromIntegral (statDamping s))),
-          ("re_bus", jdouble (statReBus s)),
-          ("signal", JNumber (fromIntegral (statSignal s))),
-          ("noise", JNumber (fromIntegral (statNoise s))),
-          ("unclassified", JNumber (fromIntegral (statUnclassified s))),
-          ("snr", jmaybe jdouble (statSNR s)),
-          ("snr_prime", jmaybe jdouble (statSNRPrime s)),
-          ("deliverables", JNumber (fromIntegral (statDeliverables s))),
-          ("done_claims", JNumber (fromIntegral (statDoneClaims s))),
-          ("posts_per_deliverable", jmaybe jdouble (statPostsPerDeliverable s)),
-          ("time_to_quiescence_minutes", jdouble (statTimeToQuiescenceMinutes s))
-        ]
-    jdouble = JNumber . fromRational . toRational
-    jmaybe _ Nothing = JNull
-    jmaybe f (Just x) = f x

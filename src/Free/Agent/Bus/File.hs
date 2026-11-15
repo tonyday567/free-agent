@@ -3,7 +3,7 @@
 
 -- | Out-of-process bus helpers: file cursors and an fsnotify-based tail
 -- loop. Used by the long-running agent executables that watch the JSONL log
--- directly instead of sharing STM state with the scribe.
+-- directly; this module owns file waiting and incremental reads.
 module Free.Agent.Bus.File
   ( -- * Cursor and transaction files
     cursorPath,
@@ -36,17 +36,15 @@ module Free.Agent.Bus.File
   )
 where
 
-import Circuit.Agent (Name, Post (..), PostId, deliversTo)
-import Circuit.Agent.Framing (Stamped, stamp, stamped, unframeStored)
+import Circuit.Agent (Name, PostId)
+import Circuit.Agent.Framing (Log (..), Stamped, stamp)
 import Circuit.Agent.Mark (Mark (Timeout), markGlyph)
 import Circuit.Machine (Body (..), Moore)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Tensor (Const (Const), unConst)
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM
-  ( TMVar,
-    TVar,
+  ( TVar,
     atomically,
     check,
     modifyTVar',
@@ -59,11 +57,10 @@ import Control.Concurrent.STM
     tryPutTMVar,
     writeTVar,
   )
-import Control.Monad (guard, unless, when)
+import Control.Monad (unless, when)
 import Data.ByteString qualified as BS
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isPrefixOf, sort)
-import Data.Maybe (mapMaybe)
 import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -71,7 +68,7 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
-import Free.Agent.Bus (readFileStrict, touchLog, withLogRead)
+import Free.Agent.Bus (decodeLogStrict, readFileStrict, readLogStrict, readSince, touchLog, withLogRead)
 import System.Directory (doesFileExist, listDirectory, removeFile)
 import System.FSNotify (Event (..), watchDir, withManager)
 import System.FilePath (takeDirectory, takeFileName, (</>))
@@ -188,13 +185,10 @@ latestPostId root = do
   if not logExists
     then pure 0
     else do
-      txt <- readFileStrict logPath
-      let ls = filter (not . T.null) (T.lines txt)
-      case ls of
-        [] -> pure 0
-        _ -> case unframeStored @Text (last ls) of
-          Just stored -> pure (snd (stamp stored) + 1)
-          Nothing -> pure (fromIntegral (length ls))
+      Log (posts :: [Stamped Text]) <- readLogStrict logPath
+      pure $ case posts of
+        [] -> 0
+        _ -> snd (stamp (last posts)) + 1
 
 -- | Persist the cursor for an agent. Writes @stamp + 1@ so the next wake
 -- starts after the post just processed.
@@ -374,7 +368,7 @@ tailLog path names startCursor mQuiesce cb = do
   unless exists $ do
     -- Touch an empty log so the scribe has a file to append to.
     touchLog path
-  (off0, halted0, _, _) <- drainFrom 0 (filterStoredSince startCursor)
+  (off0, halted0, _, _) <- drainFrom 0 startCursor
   offRef <- newIORef off0
   halted <- newTVarIO halted0
   lock <- newMVar ()
@@ -386,14 +380,14 @@ tailLog path names startCursor mQuiesce cb = do
     -- a wake; only deliveries reset the quiescence count.
     delivered <- newTVarIO 0 :: IO (TVar Int)
     _ <- watchDir mgr dir (\ev -> takeFileName (eventPath ev) == logName) $ \_ev -> do
-      (_, _, nDeliv) <- drainLocked lock offRef halted filterStored
+      (_, _, nDeliv) <- drainLocked lock offRef halted 0
       atomically $ do
         modifyTVar' delivered (+ nDeliv)
         _ <- tryPutTMVar signal ()
         pure ()
     -- Registration gap: a post appended before the watch was registered
     -- fired no event; read it by offset.
-    _ <- drainLocked lock offRef halted filterStored
+    _ <- drainLocked lock offRef halted 0
     case mQuiesce of
       Nothing -> pollLoop lock offRef signal halted
       Just (qc, onQuiesce) -> quiescePump qc signal delivered halted lock offRef onQuiesce
@@ -409,7 +403,7 @@ tailLog path names startCursor mQuiesce cb = do
           -- An event or the poll fallback: both are one drain. A decided
           -- halt is written by the drain that decided it, under the lock.
           _ <- timeout 1_000_000 (atomically (takeTMVar signal))
-          _ <- drainLocked lock offRef halted filterStored
+          _ <- drainLocked lock offRef halted 0
           pollLoop lock offRef signal halted
     -- Deliveries are serialized: the offset is read, the log drained,
     -- and the offset advanced under one lock, so the fsnotify watcher
@@ -435,10 +429,23 @@ tailLog path names startCursor mQuiesce cb = do
           writeIORef offRef off'
           when h (atomically (writeTVar halted True))
           pure (h, nAll, nDeliv)
-    drainFrom off filt = do
+    drainFrom off since = do
       (ls, off') <- readCompleteLines off
-      (nDeliv, halted) <- deliver (mapMaybe filt ls)
+      posts <-
+        either
+          (ioError . userError . malformedSuffix off)
+          (pure . unLog)
+          (decodeLogStrict (T.unlines ls))
+      (nDeliv, halted) <- deliver (readSince posts names since)
       pure (off', halted, length ls, nDeliv)
+
+    malformedSuffix off errors =
+      "Free.Agent.Bus.File: "
+        <> path
+        <> ": malformed appended JSONL row(s) "
+        <> show errors
+        <> "; row/character offsets are relative to the suffix beginning at byte "
+        <> show off
 
     -- Present each complete drained batch oldest first. An empty drain does
     -- not invoke the callback.
@@ -463,16 +470,6 @@ tailLog path names startCursor mQuiesce cb = do
             off + fromIntegral i + 1
           )
 
-    filterStoredSince cursor line = do
-      stored <- unframeStored @Text line
-      guard (snd (stamp stored) >= cursor)
-      guard (deliversTo (stamped stored) names)
-      pure stored
-
-    filterStored line = do
-      stored <- unframeStored @Text line
-      if deliversTo (stamped stored) names then Just stored else Nothing
-
     -- Wait for a halt or a new-posts signal, whichever lands first.
     awaitEvent signal halted =
       (readTVar halted >>= check >> pure True)
@@ -496,7 +493,7 @@ tailLog path names startCursor mQuiesce cb = do
               case m of
                 Just True -> pure ()
                 _ -> do
-                  (h', nAll, nDelivLocal) <- drainLocked lock offRef halted filterStored
+                  (h', nAll, nDelivLocal) <- drainLocked lock offRef halted 0
                   if h'
                     then pure ()
                     else do

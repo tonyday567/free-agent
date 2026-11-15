@@ -9,13 +9,12 @@ author: Tony Day
 maintainer: tonyday567@gmail.com
 homepage: https://github.com/tonyday567/free-agent#readme
 bug-reports: https://github.com/tonyday567/free-agent/issues
-synopsis: Free syntax above circuits-agent (Host / Shard seats)
+synopsis: Free syntax above circuits-agent (Host / Body seats)
 description:
   Free constructions above circuits-agent: FreeAgent category and Layer folds,
-  one-shot Host algebra (process / CLI / API hosts) folded into
-  Circuit.Agent.AgentShard values, and the bus runtime (runAgentLoop, the
-  watermark persister, cursor claims). Package role ABOVE — depends on
-  circuits-agent; does not replace Post/Agent/Shard.
+  one-shot Host algebra (process / CLI / API hosts) folded into Body clients,
+  and the file-log bus runtime (runAgentLoop and cursor claims). Package role
+  ABOVE — depends on circuits-agent; does not replace Post or Agent.
 
 build-type: Simple
 tested-with:
@@ -54,14 +53,12 @@ library
     Free.Agent.Bus
     Free.Agent.Bus.Claim
     Free.Agent.Bus.Cli
-    Free.Agent.Bus.Daemon
     Free.Agent.Bus.File
     Free.Agent.Bus.Heartbeat
     Free.Agent.BusStats
     Free.Agent.Cli
     Free.Agent.Cli.Config
     Free.Agent.Conch
-    Free.Agent.Connector
     Free.Agent.Delivery
     Free.Agent.Diagram
     Free.Agent.Gateway
@@ -108,20 +105,16 @@ executable free-agent-axioma
     Axioma.Bus
     Axioma.Common
     Axioma.Conch
-    Axioma.Connector
     Axioma.Delivery
-    Axioma.Diagram
     Axioma.Halt
     Axioma.Interrupt
     Axioma.Lifecycle
     Axioma.Meeting
-    Axioma.Persist
     Axioma.Quiesce
     Axioma.Recovery
     Axioma.Refresh
     Axioma.Resume
     Axioma.Seat
-    Axioma.Tensor
     Axioma.Transcript
     Axioma.Usage
 

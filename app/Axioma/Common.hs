@@ -5,7 +5,6 @@ module Axioma.Common
   ( assert,
     iterateAgent,
     runMono,
-    closeBusDurable,
     mkPost,
     tempRoot,
     boxLabels,
@@ -17,10 +16,7 @@ import Circuit.Agent (Post (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Machine (Body (Body), Moore, MooreT (..), scan)
 import Circuit.Tensor (unConst)
-import Control.Concurrent.STM (atomically)
-import Data.Either (isRight)
 import Data.Text (Text)
-import Free.Agent.Bus (Bus, awaitQuiescent, closeBus)
 import Free.Agent.Diagram (skeletonLabels)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile)
 import System.Exit (exitFailure)
@@ -43,16 +39,6 @@ iterateAgent (Body _ k o) s0 = scan (MooreT (Body (\i -> k (s0, i)) k o))
 -- function as an input-indexed state update.
 runMono :: Moore (,) s (->) i o -> s -> (o, i -> s)
 runMono (Body _ k o) s = (unConst (o s), \i -> k (s, i))
-
--- | Close a bus through the watermark idiom: wait (by predicate, never
--- handoff) until the image is on disk, assert the persister lived, stop
--- the thread. Under the ack-less scribe this replaces the old
--- "scribeIO blocked, so the file is complete by now" assumption.
-closeBusDurable :: Bus Text -> IO ()
-closeBusDurable bus = do
-  r <- atomically (awaitQuiescent bus)
-  closeBus bus
-  assert "persister alive at close" $ isRight r
 
 mkPost :: Text -> [Text] -> Text -> Post Text
 mkPost a ds = Post a Nothing ds []

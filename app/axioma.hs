@@ -9,20 +9,16 @@ module Main (main) where
 import Axioma.Acp (acpTopic)
 import Axioma.Bus (busTopic)
 import Axioma.Conch (conchTopic)
-import Axioma.Connector (connectorTopic)
 import Axioma.Delivery (deliveryTopic)
-import Axioma.Diagram (diagramTopic)
 import Axioma.Halt (haltTopic)
 import Axioma.Interrupt (interruptTopic)
 import Axioma.Lifecycle (lifecycleTopic)
 import Axioma.Meeting (meetingTopic)
-import Axioma.Persist (persistTopic)
 import Axioma.Quiesce (quiesceTopic)
 import Axioma.Recovery (recoveryTopic)
 import Axioma.Refresh (refreshTopic)
 import Axioma.Resume (resumeTopic)
 import Axioma.Seat (seatTopic)
-import Axioma.Tensor (tensorTopic)
 import Axioma.Transcript (transcriptTopic)
 import Axioma.Usage (usageTopic)
 import Options.Applicative
@@ -33,18 +29,14 @@ data Topic
   | Seat
   | Transcript
   | Delivery
-  | Diagram
   | Meeting
   | Bus
   | Halt
   | Interrupt
   | Quiesce
-  | Persist
   | Refresh
   | Recovery
   | Resume
-  | Tensor
-  | Connector
   | Acp
   | Lifecycle
   | Usage
@@ -56,18 +48,14 @@ topicName Conch = "conch"
 topicName Seat = "seat"
 topicName Transcript = "transcript"
 topicName Delivery = "delivery"
-topicName Diagram = "diagram"
 topicName Meeting = "meeting"
 topicName Bus = "bus"
 topicName Halt = "halt"
 topicName Interrupt = "interrupt"
 topicName Quiesce = "quiesce"
-topicName Persist = "persist"
 topicName Refresh = "refresh"
 topicName Recovery = "recovery"
 topicName Resume = "resume"
-topicName Tensor = "tensor"
-topicName Connector = "connector"
 topicName Acp = "acp"
 topicName Lifecycle = "lifecycle"
 topicName Usage = "usage"
@@ -78,20 +66,16 @@ topicDesc Conch = "Conch custody over real scratch-bus JSONL: Handovers, resourc
 topicDesc Seat = "host shard round-trips: echo/process/CLI host sketches, BodyLines split, session resume"
 topicDesc Transcript = "transcript oracle (B1): JSONL records, scrub agreement, silent failure"
 topicDesc Delivery = "delivery settlement: quiet response, exactly-once await, explicit root and reply posts"
-topicDesc Diagram = "diagram bridge + bend with delay: machine bodies as string diagrams"
 topicDesc Meeting = "meeting skeletons, panel meeting, replay, derivations as 2-cells"
-topicDesc Bus = "bus stats + seats: supervision, self-halt, card meetings, M1a ancestry, the seam (Q7)"
+topicDesc Bus = "file-log kernel, CLI projections, and runtime witnesses"
 topicDesc Halt = "the halt form (Y1): a status label is content, a bare first line is control"
 topicDesc Interrupt = "the interrupted handler (Z1): an interrupted turn is not retried"
 topicDesc Quiesce = "tailLog draining + the quiescence Moore (Q1-Q5)"
-topicDesc Persist = "watermark persister (B1-B3), anti-pollution (B4), stamping daemon"
 topicDesc Refresh = "automatic same-name session refresh and durable handoff"
 topicDesc Recovery = "B16 recovery classes: a resume failure is not a turn failure, and what a skip records"
-topicDesc Resume = "empty-reply drop (B2), empty-sentinel drop (B8), resume fix (B6)"
-topicDesc Tensor = "tensor/par probe: the stamping office as a connective toggle"
-topicDesc Connector = "connector turn grammar (B7): zero/one/two-frame turns"
+topicDesc Resume = "CLI resume, retry, and transcript witnesses"
 topicDesc Acp = "ACP seat (R2a): scripted double + wired-binary integration"
-topicDesc Lifecycle = "lifecycle hygiene (H): lock stress, daemon liveness, death honesty (L1-L5)"
+topicDesc Lifecycle = "file-log lock stress and same-process handle exclusion"
 topicDesc Usage = "Hermes latest-prompt usage anchor"
 
 topicParser :: Parser Topic
@@ -125,18 +109,14 @@ runTopic Conch = conchTopic
 runTopic Seat = seatTopic
 runTopic Transcript = transcriptTopic
 runTopic Delivery = deliveryTopic
-runTopic Diagram = diagramTopic
 runTopic Meeting = meetingTopic
 runTopic Bus = busTopic
 runTopic Halt = haltTopic
 runTopic Interrupt = interruptTopic
 runTopic Quiesce = quiesceTopic
-runTopic Persist = persistTopic
 runTopic Refresh = refreshTopic
 runTopic Recovery = recoveryTopic
 runTopic Resume = resumeTopic
-runTopic Tensor = tensorTopic
-runTopic Connector = connectorTopic
 runTopic Acp = acpTopic
 runTopic Lifecycle = lifecycleTopic
 runTopic Usage = usageTopic

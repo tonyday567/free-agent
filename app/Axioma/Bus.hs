@@ -1,21 +1,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 
--- | bus stats + seats: supervision, self-halt, multi-seat card meetings,
--- reply audience (R2b), reply ancestry (M1a), the seam (Q7).
+-- | File-log, CLI, and runtime witnesses.
 module Axioma.Bus
   ( busTopic,
   )
 where
 
-import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
-import Circuit.Agent (Agent, Post (..), PostId, PureAgent, cellToAgent, deliversTo, loop, mkChannelPost, tape, watch)
-import Circuit.Agent.Framing (Stamped, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
-import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph, markOf)
+import Axioma.Common (assert, mkPost, tempRoot)
+import Circuit.Agent (Post (..), PostId, PureAgent, cellToAgent, deliversTo, loop, mkChannelPost, tape, watch)
+import Circuit.Agent.Framing (Log (..), Stamped, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
+import Circuit.Agent.Mark (Mark (..), controlMark, isHalt, markGlyph)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, bracket, evaluate, try)
 import Data.Either (isLeft)
-import Data.Foldable (traverse_)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -24,7 +22,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time (addUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Free.Agent.Agent.Runner (runAgentLoop)
-import Free.Agent.Bus (malformedRows, openBus, postLocal, readFileStrict, runSeatBus)
+import Free.Agent.Bus (decodeLogStrict, postLocal, readFileStrict)
 import Free.Agent.Bus.Cli (BusCommand (..), Depth (..), SeatCircle (..), addressConflict, applyPostFlags, busParser, checkThreadId, readyPosts, readyWarnings, runBusCommand, runStatus, seatCircle)
 import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, readTransaction, writeCursor, writeTransaction)
 import Free.Agent.Bus.Heartbeat (HbState (..), hbPath, parseHb, readHeartbeat, writeHeartbeat)
@@ -39,16 +37,15 @@ import Free.Agent.BusStats
     slicePosts,
   )
 import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, newDeliveryGrant, replyAct)
-import Free.Agent.Host (hostBody, mkHost)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, info, renderFailure)
-import System.Directory (removePathForcibly)
-import System.Environment (getExecutablePath)
-import System.Exit (ExitCode (ExitSuccess))
+import System.Directory (doesFileExist, removePathForcibly)
+import System.Environment (getExecutablePath, unsetEnv)
+import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO (IOMode (WriteMode), hClose, hFlush, stdout, withFile)
 import System.Posix.Process (getProcessID)
-import System.Process (CreateProcess (..), createProcess, getPid, proc, terminateProcess, waitForProcess)
+import System.Process (CreateProcess (..), createProcess, getPid, proc, readProcessWithExitCode, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
 ioTurn :: IO [Post Text] -> IO (Turn [Post Text])
@@ -197,11 +194,16 @@ busTopic = do
   do
     let line0 = "{\"id\":0,\"ts\":\"2026-11-12T05:00:00\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"hi\"}\n"
         bad = "{\"id\":1,\"ts\":\"BROKEN\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"x\"}\n"
-    assert "a clean log has no malformed rows" $ malformedRows line0 == []
+    assert "a clean log decodes as one post" $
+      case decodeLogStrict @Text line0 of
+        Right (Log [_]) -> True
+        _ -> False
     assert "a malformed row is named by 1-based row and 0-based offset" $
-      malformedRows (line0 <> bad) == [(2, T.length line0)]
+      decodeLogStrict @Text (line0 <> bad) == Left [(2, T.length line0)]
     assert "blank and whitespace-only lines are tolerated, not flagged" $
-      malformedRows (line0 <> "\n\n   \n" <> line0) == []
+      case decodeLogStrict @Text (line0 <> "\n\n   \n" <> line0) of
+        Right (Log posts) -> length posts == 2
+        _ -> False
     -- The CLI refuses loudly: a malformed row exits non-zero rather than
     -- masquerading as an empty inbox (the B12 failure the probe showed).
     cliRoot <- tempRoot "free-agent-b12-cli"
@@ -251,6 +253,43 @@ busTopic = do
     assert "the stale root did not receive the DONE" (not ("DONE-b11-witness" `T.isInfixOf` staleLog))
     removePathForcibly launch
     removePathForcibly stale
+
+  -------------------------------------------------------------------------
+  -- CLI poll and post keep the named bus root separate from arbitrary paths
+  -- named in prompts and replies.
+  -------------------------------------------------------------------------
+  putStrLn "bus post anti-pollution"
+  do
+    busRoot <- tempRoot "free-agent-post-root"
+    badRoot <- tempRoot "free-agent-post-other"
+    freeAgentBin <- seatBinary
+    _ <- postLocal busRoot (mkPost "seed" ["agent"] "seed")
+    unsetEnv "FREE_AGENT_BUS_ROOT"
+    (code, _, err) <-
+      readProcessWithExitCode
+        freeAgentBin
+        [ "bus",
+          "post",
+          "--root",
+          busRoot,
+          "--from",
+          "tester",
+          "--to",
+          "agent",
+          "--thread",
+          "0",
+          "--body",
+          badRoot
+        ]
+        ""
+    assert "bus post exits successfully" (code == ExitSuccess)
+    assert "bus post reports no shell errors" (null err)
+    own <- TIO.readFile (busRoot </> "log.jsonl")
+    assert "bus post writes the named root" (T.pack badRoot `T.isInfixOf` own)
+    otherExists <- doesFileExist (badRoot </> "log.jsonl")
+    assert "bus post does not write a body-named path" (not otherExists)
+    removePathForcibly busRoot
+    removePathForcibly badRoot
 
   -------------------------------------------------------------------------
   -- Heartbeat evidence maps to the six status circles.
@@ -533,174 +572,6 @@ busTopic = do
             [warning] -> "post 44" `T.isInfixOf` warning && "offer 43" `T.isInfixOf` warning
             _ -> False
         _ -> False
-
-  -------------------------------------------------------------------------
-  -- Bus seat: the in-process runner, decided quiet included
-  --
-  -- openBus + postLocal + runSeatBus on a tmpdir bus.  The halt mark is
-  -- already on the log when the seat starts, so runSeatBus must process
-  -- the work, skip the mark (control, not content), and return.
-  -------------------------------------------------------------------------
-  putStrLn "bus seat"
-  do
-    root <- tempRoot "free-agent-seat-axioma"
-    _ <- postLocal root (mkPost "human" ["echo"] "hello")
-    _ <- postLocal root (mkPost "human" ["echo"] (markGlyph Landed))
-    bus <- openBus root
-    runSeatBus bus "echo" ["echo"] (hostBody (mkHost "echo" (pure . map ("echo:" <>))))
-    closeBusDurable bus
-    content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
-        fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
-    assert "seat replied to the work post with a thread edge" $
-      case fromEcho of
-        [p] -> body p == "echo:hello" && to p == ["human"] && thread p == [0]
-        _ -> False
-    assert "ids are coherent across postLocal and the seat scribe" $
-      map (snd . stamp) parsed == [0, 1, 2]
-    assert "the halt mark got silence, not a reply" $
-      length fromEcho == 1
-
-  -------------------------------------------------------------------------
-  -- Bus seat supervision: a handler exception becomes a 🔴 escalation,
-  -- the cursor advances, and the seat keeps listening.
-  -------------------------------------------------------------------------
-  putStrLn "bus seat supervision"
-  do
-    root <- tempRoot "free-agent-supervision-axioma"
-    _ <- postLocal root (mkPost "human" ["fragile"] "hello")
-    _ <- postLocal root (mkPost "human" ["fragile"] "boom")
-    _ <- postLocal root (mkPost "human" ["fragile"] "world")
-    _ <- postLocal root (mkPost "human" ["fragile"] (markGlyph Landed))
-    bus <- openBus root
-    let fragileHost = mkHost "fragile" $ \ws ->
-          if ws == ["boom"]
-            then error "boom"
-            else pure (map ("fragile:" <>) ws)
-    runSeatBus bus "fragile" ["fragile"] (hostBody fragileHost)
-    closeBusDurable bus
-    content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
-        fromFragile = [stamped s | s <- parsed, from (stamped s) == "fragile"]
-        escalations = filter (maybe False isEscalate . markOf) fromFragile
-    assert "seat replies to the first post" $
-      any (\p -> body p == "fragile:hello" && to p == ["human"] && thread p == [0]) fromFragile
-    assert "seat posts exactly one escalation on handler failure" $
-      case escalations of
-        [p] -> to p == ["human"] && "boom" `T.isInfixOf` body p
-        _ -> False
-    assert "seat replies to the third post after a failure" $
-      any (\p -> body p == "fragile:world" && to p == ["human"] && thread p == [2]) fromFragile
-    assert "ids are coherent across postLocal, replies, and escalation" $
-      map (snd . stamp) parsed == [0, 1, 2, 3, 4, 5, 6]
-
-  -------------------------------------------------------------------------
-  -- Bus seat self-halt (tail-chatter, R3c): a seat's own 🔵 stops the loop.
-  --
-  -- 🟢 stays exchange-level: a seat may land one exchange and host more.
-  -- 🔵 is seat-level: standing down is the seat deciding its own quiet.
-  -- The F2 self-post skip means the seat never reads its own mark back,
-  -- so the halt must be judged at commit time.  A post arriving after the
-  -- stand-down must go unanswered — the trailing 🟢 is only a safety
-  -- stopper for the buggy behaviour, where the seat lives on and answers.
-  -------------------------------------------------------------------------
-  putStrLn "bus seat self-halt"
-  do
-    root <- tempRoot "free-agent-selfhalt-axioma"
-    _ <- postLocal root (mkPost "human" ["echo"] "task")
-    _ <- postLocal root (mkPost "human" ["echo"] "hello")
-    _ <- postLocal root (mkPost "human" ["echo"] "finish")
-    _ <- postLocal root (mkPost "human" ["echo"] "ping")
-    _ <- postLocal root (mkPost "human" ["echo"] (markGlyph Landed))
-    bus <- openBus root
-    let host = mkHost "echo" $ \ws ->
-          pure $
-            if "task" `elem` ws
-              then [markGlyph Landed <> " task done"]
-              else
-                if "finish" `elem` ws
-                  then [markGlyph StandDown]
-                  else map ("echo:" <>) ws
-    runSeatBus bus "echo" ["echo"] (hostBody host)
-    closeBusDurable bus
-    content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
-        fromEcho = [stamped s | s <- parsed, from (stamped s) == "echo"]
-    assert "a 🟢 reply lands the exchange but the seat hosts more" $
-      any (\p -> body p == markGlyph Landed <> " task done" && thread p == [0]) fromEcho
-        && any (\p -> body p == "echo:hello" && thread p == [1]) fromEcho
-    assert "the seat posts its own stand-down" $
-      any (\p -> markOf p == Just StandDown) fromEcho
-    assert "no reply after the stand-down (tail-chatter)" $
-      not (any (\p -> "ping" `T.isInfixOf` body p) fromEcho)
-    assert "ids are coherent: 5 planted + 3 replies, then quiet" $
-      map (snd . stamp) parsed == [0, 1, 2, 3, 4, 5, 6, 7]
-
-  -------------------------------------------------------------------------
-  -- Multi-seat card meeting: two seat shards share a subscription on the bus
-  --
-  -- A seed addressed to a shared card wakes every seat; each replies to the
-  -- original sender.  A pre-planted halt mark stops all seats once they have
-  -- processed the seed.
-  -------------------------------------------------------------------------
-  putStrLn "multi-seat card meeting"
-  do
-    root <- tempRoot "free-agent-meeting-axioma"
-    let card = "panel"
-    _ <- postLocal root (mkPost "human" [card] "discuss")
-    _ <- postLocal root (mkPost "human" [card] (markGlyph Landed))
-    bus <- openBus root
-    let alphaSeat = hostBody (mkHost "alpha" (pure . map ("alpha:" <>)))
-        betaSeat = hostBody (mkHost "beta" (pure . map ("beta:" <>)))
-    doneAlpha <- newEmptyMVar
-    doneBeta <- newEmptyMVar
-    _ <- forkIO $ runSeatBus bus "alpha" [card] alphaSeat >> putMVar doneAlpha ()
-    _ <- forkIO $ runSeatBus bus "beta" [card] betaSeat >> putMVar doneBeta ()
-    takeMVar doneAlpha
-    takeMVar doneBeta
-    closeBusDurable bus
-    content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
-        fromAlpha = [stamped s | s <- parsed, from (stamped s) == "alpha"]
-        fromBeta = [stamped s | s <- parsed, from (stamped s) == "beta"]
-    assert "alpha replied to the seed" $
-      case fromAlpha of
-        [p] -> body p == "alpha:discuss" && to p == ["human"] && thread p == [0]
-        _ -> False
-    assert "beta replied to the seed" $
-      case fromBeta of
-        [p] -> body p == "beta:discuss" && to p == ["human"] && thread p == [0]
-        _ -> False
-    assert "ids are coherent across postLocal and seat scribes" $
-      map (snd . stamp) parsed == [0, 1, 2, 3]
-    assert "the halt mark got silence from every seat" $
-      length (fromAlpha ++ fromBeta) == 2
-
-  -------------------------------------------------------------------------
-  -- Reply audience: one spelling, branching factor 1 (R2b)
-  --
-  -- The card's default: a seat's reply lands in the channel it answers and
-  -- addresses the sender only — the channel is inherited, the recipient list
-  -- is not widened.  A reply carrying the channel's membership forward would
-  -- re-wake every member (the amplifier the design card flags), so a
-  -- wire-preserving "convergence" of the audience rule goes red here.
-  -------------------------------------------------------------------------
-  putStrLn "reply audience"
-  do
-    root <- tempRoot "free-agent-r2b-audience"
-    _ <- postLocal root (mkChannelPost "human" "commons" ["human", "aud"] ("ping" :: Text))
-    _ <- postLocal root (mkPost "human" ["aud"] (markGlyph Landed))
-    bus <- openBus root
-    runSeatBus bus "aud" ["commons", "aud"] (hostBody (mkHost "aud" (pure . map ("ack: " <>))))
-    closeBusDurable bus
-    content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
-        replies = [stamped s | s <- parsed, from (stamped s) == "aud"]
-    assert "R2b a reply lands in the channel and addresses the sender only (no amplifier)" $
-      case replies of
-        [r] -> body r == "ack: ping" && to r == ["human"] && channel r == Just "commons"
-        _ -> False
-    removePathForcibly root
 
   -------------------------------------------------------------------------
   -- Explicit post acts (M1a): runAgentLoop adds no inferred cause or ancestry.
@@ -1081,11 +952,11 @@ busTopic = do
     let parseFlags = execParserPure defaultPrefs (info busParser mempty)
     assert "post --thread and --channel reach the command record" $
       case parseFlags ["post", "--root", root, "--from", "seat", "--body", "reply", "--thread", "0", "--channel", "ops"] of
-        Success (PostCommand _ (Just "seat") _ (Just "reply") (Just 0) (Just "ops") False) -> True
+        Success (PostCommand _ (Just "seat") _ (Just "reply") (Just 0) (Just "ops")) -> True
         _ -> False
     assert "post without the flags stays a root with no channel" $
       case parseFlags ["post", "--root", root, "--from", "seat", "--body", "reply"] of
-        Success (PostCommand _ _ _ _ Nothing Nothing False) -> True
+        Success (PostCommand _ _ _ _ Nothing Nothing) -> True
         _ -> False
     -- `bus say` was removed: post is the surviving command, and it takes the
     -- piped body say used to take (the parser allows --from with no --body).
@@ -1095,7 +966,7 @@ busTopic = do
         _ -> False
     assert "post accepts --from with no --body, which is the piped-body form" $
       case parseFlags ["post", "--root", root, "--from", "seat", "--to", "human"] of
-        Success (PostCommand _ (Just "seat") ["human"] Nothing Nothing Nothing False) -> True
+        Success (PostCommand _ (Just "seat") ["human"] Nothing Nothing Nothing) -> True
         _ -> False
     -- help names both flags, so the interface is discoverable, not just parsed.
     assert "post --help names --thread and --channel" $
@@ -1106,7 +977,7 @@ busTopic = do
         _ -> False
     -- The effect: a flag post lands ancestry and a channel in the log, and the
     -- channel addresses it (an empty --to still delivers to a subscriber).
-    runBusCommand (PostCommand root (Just "seat") [] (Just "reply") (Just 0) (Just "ops") False)
+    runBusCommand (PostCommand root (Just "seat") [] (Just "reply") (Just 0) (Just "ops"))
     content <- TIO.readFile (root </> "log.jsonl")
     let landed = map stamped (mapMaybe (unframeStored @Text) (T.lines content))
         replyPost = last landed

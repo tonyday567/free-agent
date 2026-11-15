@@ -11,7 +11,6 @@ module Free.Agent.Delivery
     deliveryFailureLabel,
     TurnMetrics (..),
     deliverTo,
-    mapTurn,
     mapTurnIO,
     DeliveryGrant,
     DeliveryRefusal (..),
@@ -31,7 +30,7 @@ module Free.Agent.Delivery
 where
 
 import Circuit.Agent (Name, Post (..))
-import Circuit.Agent.Framing (PostBody, Stamped, stamp, stamped)
+import Circuit.Agent.Framing (PostBody, Stamped, stamp)
 import Control.Applicative ((<|>))
 import Control.Concurrent
   ( MVar,
@@ -132,9 +131,6 @@ data Turn a = Turn
     cancelTurn :: IO (),
     turnMetrics :: IO TurnMetrics
   }
-
-mapTurn :: (a -> b) -> Turn a -> Turn b
-mapTurn f turn = turn {awaitTurn = fmap (fmap f) (awaitTurn turn)}
 
 -- | Run an effect after settlement, never during turn construction or on cancellation.
 mapTurnIO :: (a -> IO b) -> Turn a -> Turn b

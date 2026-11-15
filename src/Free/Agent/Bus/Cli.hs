@@ -16,7 +16,6 @@
 --   ready [ROOT] [--depth 0|1|2]
 --   cursor [ROOT] get NAME
 --   cursor [ROOT] set NAME ID
---   ping-watch [ROOT] NAME
 --   status [ROOT] [--threshold SECS] [--depth 0|1|2] [--org]
 --
 -- @post@ is the only posting command: the body is @--body TEXT@ or piped on
@@ -65,26 +64,23 @@ module Free.Agent.Bus.Cli
 where
 
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
-import Circuit.Agent.Framing (Stamped, frameStored, parsePost, stamp, stamped, unframeStored)
-import Control.Applicative ((<|>))
-import Control.Concurrent (MVar, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Circuit.Agent.Framing (Log (..), Stamped, frameStored, parsePost, stamp, stamped)
 import Control.Exception (IOException, SomeException, displayException, try)
-import Control.Monad (forM_, forever, guard, unless, when)
+import Control.Monad (forM_, unless, when)
 import Data.Char (isAlphaNum, isAsciiUpper, isDigit)
 import Data.Foldable (traverse_)
 import Data.List (isPrefixOf, sort, sortOn)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe, maybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Ord (Down (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Data.Time (LocalTime, NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, localTimeToUTC, utc)
-import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
-import Free.Agent.Bus (malformedRows, postLocal, readFileStrict)
-import Free.Agent.Bus.Daemon (fifoPath, postViaDaemon, runDaemon)
-import Free.Agent.Bus.File (Human (..), attachHuman, humanNames, readCursor, readCursorAll, readHuman, removeHuman, writeCursor)
+import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Format.ISO8601 (iso8601Show)
+import Free.Agent.Bus (postLocal, readLogStrict, readSince)
+import Free.Agent.Bus.File (Flow (Continue), Human (..), attachHuman, humanNames, readCursor, readCursorAll, readHuman, removeHuman, tailLog, writeCursor)
 import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbPath, hbText, readHeartbeat)
 import Free.Agent.BusStats (SliceMode (..), slicePosts)
 import Free.Agent.Cli.Config (rootOpt)
@@ -92,24 +88,8 @@ import Options.Applicative
 import System.Directory (doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
-import System.FSNotify (Event (..), watchDir, withManager)
-import System.FilePath (takeDirectory, takeFileName, (</>))
-import System.IO
-  ( BufferMode (LineBuffering),
-    Handle,
-    IOMode (AppendMode, ReadMode),
-    SeekMode (AbsoluteSeek),
-    hFileSize,
-    hIsEOF,
-    hIsTerminalDevice,
-    hSeek,
-    hSetBuffering,
-    openFile,
-    stderr,
-    stdin,
-    stdout,
-    withFile,
-  )
+import System.FilePath ((</>))
+import System.IO (hIsTerminalDevice, stderr, stdin)
 import System.IO.Error (isDoesNotExistError, isPermissionError)
 import System.Posix.Signals (nullSignal, signalProcess)
 import System.Posix.Types (CPid)
@@ -123,7 +103,7 @@ data Since = SinceId PostId | SinceCursor Text
   deriving (Show)
 
 data BusCommand
-  = PostCommand FilePath (Maybe Text) [Text] (Maybe Text) (Maybe PostId) (Maybe Text) Bool
+  = PostCommand FilePath (Maybe Text) [Text] (Maybe Text) (Maybe PostId) (Maybe Text)
   | WatchCommand FilePath [Text]
   | ReadCommand FilePath [Text] (Maybe Since) (Maybe PostId) Depth
   | OrgCommand FilePath (Maybe PostId)
@@ -134,9 +114,7 @@ data BusCommand
   | ReadyCommand FilePath Depth
   | CursorGetCommand FilePath Text
   | CursorSetCommand FilePath Text PostId
-  | PingWatchCommand FilePath Text
   | StatusCommand FilePath NominalDiffTime Depth Bool
-  | DaemonCommand FilePath
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -235,8 +213,8 @@ checkThreadId root' tid = do
   if not exists
     then pure (Right ())
     else do
-      content <- readFileStrict (root' </> "log.jsonl")
-      let ids = map (snd . stamp) (postsOf content)
+      posts <- loadPosts (root' </> "log.jsonl")
+      let ids = map (snd . stamp) posts
       pure $
         if tid `elem` ids
           then Right ()
@@ -265,12 +243,7 @@ postCmd = do
       )
   thr <- threadOpt
   chan <- channelOpt
-  viaDaemon <-
-    switch
-      ( long "via-daemon"
-          <> help "Submit to the stamping daemon instead of self-stamping"
-      )
-  pure (PostCommand root fromName toNames bodyText thr chan viaDaemon)
+  pure (PostCommand root fromName toNames bodyText thr chan)
 
 watchCmd :: Parser BusCommand
 watchCmd = WatchCommand <$> rootOpt <*> namesArg
@@ -350,9 +323,6 @@ cursorCmd =
         <> command "set" (info (cursorSetCmd <**> helper) (progDesc "Set cursor"))
     )
 
-pingWatchCmd :: Parser BusCommand
-pingWatchCmd = PingWatchCommand <$> rootOpt <*> nameArg
-
 thresholdOpt :: Parser NominalDiffTime
 thresholdOpt =
   option
@@ -377,9 +347,6 @@ statusCmd = StatusCommand <$> rootOpt <*> thresholdOpt <*> depthOpt (Depth 1) <*
 orgOpt :: Parser Bool
 orgOpt = switch (long "org" <> help "Org status output for fab-open-status")
 
-daemonCmd :: Parser BusCommand
-daemonCmd = DaemonCommand <$> rootOpt
-
 busParser :: Parser BusCommand
 busParser =
   subparser
@@ -393,9 +360,7 @@ busParser =
         <> command "retire" (info (retireCmd <**> helper) (progDesc "Write the dead marker to NAME's heartbeat: the seat joins the retired circle, its cursor, log and transcripts stay as evidence; no process is signalled"))
         <> command "ready" (info (readyCmd <**> helper) (progDesc "List unclaimed open TASKs with no unresolved blocker"))
         <> command "cursor" (info (cursorCmd <**> helper) (progDesc "Read or write agent cursor"))
-        <> command "ping-watch" (info (pingWatchCmd <**> helper) (progDesc "Watch the ping file for NAME and exit on change"))
         <> command "status" (info (statusCmd <**> helper) (progDesc "Unified seat census: circle counts, directed unread, and last-post anchors"))
-        <> command "daemon" (info (daemonCmd <**> helper) (progDesc "Run the single-writer stamping daemon"))
     )
 
 -- ---------------------------------------------------------------------------
@@ -403,8 +368,8 @@ busParser =
 -- ---------------------------------------------------------------------------
 
 runBusCommand :: BusCommand -> IO ()
-runBusCommand (PostCommand root mfrom mto mbody mthr mchan viaDaemon) =
-  runPost root mfrom mto mbody mthr mchan viaDaemon
+runBusCommand (PostCommand root mfrom mto mbody mthr mchan) =
+  runPost root mfrom mto mbody mthr mchan
 runBusCommand (WatchCommand root names) = runWatch root names
 runBusCommand (ReadCommand root names since thr depth) = runRead root names since thr depth
 runBusCommand (OrgCommand root thr) = runOrg root thr
@@ -415,9 +380,7 @@ runBusCommand (RetireCommand root name) = runRetire root name
 runBusCommand (ReadyCommand root depth) = runReady root depth
 runBusCommand (CursorGetCommand root name) = runCursorGet root name
 runBusCommand (CursorSetCommand root name pid) = runCursorSet root name pid
-runBusCommand (PingWatchCommand root name) = runPingWatch root name
 runBusCommand (StatusCommand root threshold depth org) = runStatus root threshold depth org
-runBusCommand (DaemonCommand root) = runDaemon @Text root
 
 -- ---------------------------------------------------------------------------
 -- act: post
@@ -455,8 +418,8 @@ requireBus root = do
 
 -- | One command on the act path: body as words or on stdin, sender and
 -- recipients defaulted, thread optional.
-runPost :: FilePath -> Maybe Text -> [Text] -> Maybe Text -> Maybe PostId -> Maybe Text -> Bool -> IO ()
-runPost root mfrom mto mbody mthr mchan viaDaemon = do
+runPost :: FilePath -> Maybe Text -> [Text] -> Maybe Text -> Maybe PostId -> Maybe Text -> IO ()
+runPost root mfrom mto mbody mthr mchan = do
   root' <- resolveRoot root
   -- An addressee beside a channel would be written and then ignored; refuse it
   -- here, where the flags are visible, rather than let the log carry a
@@ -517,17 +480,7 @@ runPost root mfrom mto mbody mthr mchan viaDaemon = do
         TIO.hPutStrLn stderr ("🔴 post: " <> why)
         exitFailure
       Right () -> pure ()
-  let p = applyPostFlags mthr mchan built
-  stored <-
-    if viaDaemon
-      then do
-        let fifo = fifoPath root'
-        fifoExists <- doesFileExist fifo
-        unless fifoExists $ do
-          TIO.putStrLn ("🔴 " <> T.pack fifo <> " — no bus.fifo; is the daemon running?")
-          exitFailure
-        postViaDaemon root' p
-      else postChecked root' p
+  stored <- postChecked root' (applyPostFlags mthr mchan built)
   TIO.putStrLn (frameStored stored)
 
 -- ---------------------------------------------------------------------------
@@ -540,55 +493,22 @@ runWatch root names = do
     TIO.putStrLn "🔴 watch requires at least one name"
     exitFailure
   let path = root </> "log.jsonl"
-      logName = takeFileName path
-      dir = takeDirectory path
   exists <- doesFileExist path
-  unless exists $ withFile path AppendMode (\_ -> pure ())
-  h <- openFile path ReadMode
-  hSetBuffering h LineBuffering
-  hSeek h AbsoluteSeek 0
-  -- Skip existing content; agents start watching from now.
-  size <- hFileSize h
-  hSeek h AbsoluteSeek size
-  withManager $ \mgr -> do
-    _ <- watchDir mgr dir (\ev -> takeFileName (eventPath ev) == logName) $ \_ev -> do
-      drain h names
-    -- Block forever; the watch listener runs in the background.
-    forever (threadDelay 1000000)
-  where
-    drain :: Handle -> [Text] -> IO ()
-    drain h names' = do
-      eof <- hIsEOF h
-      unless eof $ do
-        line <- TIO.hGetLine h
-        traverse_ TIO.putStrLn (filterStored names' line)
-        drain h names'
+  posts <- if exists then loadPosts path else pure []
+  let start = case posts of
+        [] -> 0
+        _ -> highestId posts + 1
+  tailLog path names start Nothing $ \batch -> do
+    traverse_ (TIO.putStrLn . frameStored) batch
+    pure Continue
 
-filterStored :: [Name] -> Text -> Maybe Text
-filterStored names line = do
-  stored <- unframeStored @Text line
-  let p = stamped stored
-  if deliversTo p names then Just line else Nothing
-
--- ---------------------------------------------------------------------------
--- read
--- ---------------------------------------------------------------------------
-
--- | Refuse a log whose non-blank rows do not all decode, naming each bad
--- row's 1-based line and 0-based character offset on stderr and exiting
--- non-zero. Without this, one malformed row reads as an empty inbox (B12):
--- the read is indistinguishable from no mail. Blank and whitespace-only
--- lines are not rows and are tolerated.
-requireDecodable :: FilePath -> Text -> IO ()
-requireDecodable path content = case malformedRows content of
-  [] -> pure ()
-  rows -> do
-    traverse_ (TIO.hPutStrLn stderr . badRow) rows
-    TIO.hPutStrLn stderr ("🔴 " <> T.pack path <> ": malformed JSONL row(s); decode failed, so no mail was read")
-    exitFailure
-  where
-    badRow (row, offset) =
-      "🔴 row " <> T.pack (show row) <> " (offset " <> T.pack (show offset) <> "): not a valid stored post line"
+-- | Strictly decode the complete log. A malformed row is an error, never an
+-- empty view; the diagnostic carries its 1-based row and 0-based character
+-- offset.
+loadPosts :: FilePath -> IO [Stamped Text]
+loadPosts path = do
+  Log posts <- readLogStrict path
+  pure posts
 
 -- | Read a thread (all posts sharing a root id with the given post), or
 -- posts addressed to NAMEs. A thread view ignores NAMEs. A path that is not
@@ -598,10 +518,9 @@ runRead root names since mThread depth = do
   root' <- resolveRoot root
   requireBus root'
   let path = root' </> "log.jsonl"
-  content <- readFileStrict path
-  requireDecodable path content
+  posts <- loadPosts path
   case mThread of
-    Just tid -> runThreadView (postsOf content) tid depth
+    Just tid -> runThreadView posts tid depth
     Nothing -> do
       when (null names) $ do
         TIO.putStrLn "🔴 read requires NAME(s) or --thread ID"
@@ -610,8 +529,7 @@ runRead root names since mThread depth = do
         Nothing -> pure 0
         Just (SinceId pid) -> pure pid
         Just (SinceCursor name) -> readCursorAll root' name
-      let lines' = T.lines content
-      traverse_ (TIO.putStrLn . renderStored depth) (mapMaybe (filterSince names sinceId) lines')
+      traverse_ (TIO.putStrLn . renderStored depth) (readSince posts names sinceId)
 
 -- | Print NAME's unread mail: posts addressed to NAME with id at or after
 -- @.cursor-NAME@ (the cursor holds the next unread id, as 'readCursor' and
@@ -624,10 +542,9 @@ runInbox root name markRead depth = do
   root' <- resolveRoot root
   requireBus root'
   let path = root' </> "log.jsonl"
-  content <- readFileStrict path
-  requireDecodable path content
+  posts <- loadPosts path
   sinceId <- readCursorAll root' name
-  let shown = mapMaybe (filterSince [name] sinceId) (T.lines content)
+  let shown = readSince posts [name] sinceId
   traverse_ (TIO.putStrLn . renderStored depth) shown
   when (markRead && not (null shown)) $
     writeCursor root' name (highestId shown + 1)
@@ -708,9 +625,6 @@ runRetire root name = do
     )
   TIO.putStrLn ("⚫ " <> name <> " retired on " <> T.pack root')
 
-postsOf :: Text -> [Stamped Text]
-postsOf content = mapMaybe (unframeStored @Text) (filter (not . T.null) (T.lines content))
-
 -- | Print the open offers, then the lint rows.  The root must be a bus
 -- like every other command requires, and a view that dies partway names
 -- its death on stderr and exits non-zero rather than trailing off like
@@ -720,8 +634,7 @@ runReady root depth = do
   root' <- resolveRoot root
   requireBus root'
   view <- try @SomeException $ do
-    content <- readFileStrict (root' </> "log.jsonl")
-    let posts = postsOf content
+    posts <- loadPosts (root' </> "log.jsonl")
     traverse_ (TIO.putStrLn . renderStored depth) (readyPosts posts)
     traverse_ (TIO.hPutStrLn stderr) (readyWarnings posts)
   case view of
@@ -936,8 +849,8 @@ runOrg root mThread = do
       TIO.putStrLn "🔴 org requires --thread ID"
       exitFailure
     Just tid -> do
-      content <- readFileStrict (root' </> "log.jsonl")
-      case [vs | (_, vs) <- slicePosts ByThread (postsOf content), any ((== tid) . snd . stamp) vs] of
+      posts <- loadPosts (root' </> "log.jsonl")
+      case [vs | (_, vs) <- slicePosts ByThread posts, any ((== tid) . snd . stamp) vs] of
         (vs : _) -> TIO.putStr (renderOrgThread tid vs)
         [] -> do
           TIO.putStrLn ("🔴 no post with id " <> T.pack (show tid))
@@ -1001,14 +914,6 @@ isPostType w =
   let n = T.length w
    in n >= 2 && T.all (\c -> isAsciiUpper c || isDigit c) w
 
-filterSince :: [Name] -> PostId -> Text -> Maybe (Stamped Text)
-filterSince names sinceId line = do
-  stored <- unframeStored @Text line
-  let p = stamped stored
-  guard (snd (stamp stored) >= sinceId)
-  guard (deliversTo p names)
-  pure stored
-
 -- | Render a stored post at a cascade depth: the route, the line, the
 -- verbatim frame.
 renderStored :: Depth -> Stamped Text -> Text
@@ -1046,24 +951,6 @@ runCursorGet root name = do
 
 runCursorSet :: FilePath -> Text -> PostId -> IO ()
 runCursorSet root name pid = writeCursor root name pid
-
--- ---------------------------------------------------------------------------
--- ping-watch
--- ---------------------------------------------------------------------------
-
-runPingWatch :: FilePath -> Text -> IO ()
-runPingWatch root name = do
-  let pingPath = root </> (".ping-" <> T.unpack name)
-      pingName = takeFileName pingPath
-  exists <- doesFileExist pingPath
-  unless exists $ withFile pingPath AppendMode (\_ -> pure ())
-  withManager $ \mgr -> do
-    done <- newEmptyMVar
-    _ <- watchDir mgr root (\ev -> takeFileName (eventPath ev) == pingName) $ \_ev -> do
-      txt <- readFileStrict pingPath
-      TIO.putStrLn txt
-      putMVar done ()
-    takeMVar done
 
 -- ---------------------------------------------------------------------------
 -- status
@@ -1138,8 +1025,7 @@ data StatusSnapshot = StatusSnapshot
 readStatus :: FilePath -> NominalDiffTime -> IO StatusSnapshot
 readStatus root threshold = do
   requireBus root
-  content <- readFileStrict (root </> "log.jsonl")
-  let posts = mapMaybe (unframeStored @Text) (filter (not . T.null) (T.lines content))
+  posts <- loadPosts (root </> "log.jsonl")
   now <- getCurrentTime
   entries <- listDirectory root
   let cursorNames = sort [T.pack (drop (length (".cursor-" :: String)) e) | e <- entries, ".cursor-" `isPrefixOf` e]

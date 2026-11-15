@@ -7,7 +7,7 @@
 -- serialises the read/decide/append sequence under the bus log lock, and
 -- appends any system Handover immediately after its causing Claim.  Recovery
 -- folds the same stamped history through 'reconstructConch' without appending
--- posts or writing recipient pings.
+-- posts or writing other side files.
 module Free.Agent.Conch
   ( ConchReceipt (..),
     processConchPost,
@@ -31,26 +31,13 @@ import Circuit.Agent.Framing
     Stamped,
     stamp,
     stamped,
-    unframeStored,
     pattern Stamped,
   )
-import Control.Monad (unless)
 import Data.Bifunctor (first)
-import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe)
-import Data.Text qualified as T
-import Data.Text.Encoding qualified as TE
-import Data.Time (getCurrentTime)
-import Free.Agent.Bus
-  ( appendStoredPostsUnlocked,
-    readLogStrict,
-    touchLog,
-    withLogLock,
-    writePings,
-  )
-import System.Directory (createDirectoryIfMissing, doesFileExist, makeAbsolute)
-import System.FilePath (isRelative, normalise, (<.>), (</>))
+import Free.Agent.Bus (postLocalWith, readLogStrict)
+import System.Directory (doesFileExist, makeAbsolute)
+import System.FilePath (isRelative, normalise, (</>))
 
 -- | Durable evidence for one submitted post.  A refused Claim or an
 -- unauthorised Handover has no system Handovers; ordinary conversation and
@@ -71,15 +58,10 @@ data ConchReceipt = ConchReceipt
 processConchPost :: ConchConfig -> FilePath -> ConchPost -> IO ConchReceipt
 processConchPost cfg root post = do
   absoluteRoot <- makeAbsolute root
-  createDirectoryIfMissing True absoluteRoot
-  let path = absoluteRoot </> "log.jsonl"
-  exists <- doesFileExist path
-  unless exists $ touchLog path
-  (receipt, appended) <- withLogLock (path <.> "lock") $ do
-    (prior, nextId) <- readLogUnlocked absoluteRoot path
-    now <- getCurrentTime
+  (appended, finalState) <- postLocalWith absoluteRoot $ \prior nextId now ->
     let incoming = Stamped (now, nextId) (normaliseConchPost absoluteRoot post)
-        priorPairs = stampedPairs prior
+        normalisedPrior = map (normaliseStored absoluteRoot) prior
+        priorPairs = stampedPairs normalisedPrior
         state = reconstructConch cfg priorPairs
         byId = Map.fromList priorPairs
         lookupPost = (`Map.lookup` byId)
@@ -89,14 +71,14 @@ processConchPost cfg root post = do
           | (offset, response) <- zip [1 :: Int ..] responses
           ]
         appendedPosts = incoming : handovers
-        finalState = reconstructConch cfg (stampedPairs (prior ++ appendedPosts))
-    appendStoredPostsUnlocked path appendedPosts
-    pure (ConchReceipt incoming handovers finalState, appendedPosts)
-  writePings path appended
-  pure receipt
+        final = reconstructConch cfg (stampedPairs (normalisedPrior ++ appendedPosts))
+     in (map stamped appendedPosts, final)
+  case appended of
+    [] -> ioError (userError "Free.Agent.Conch: locked append returned no incoming post")
+    incoming : handovers -> pure (ConchReceipt incoming handovers finalState)
 
 -- | Reconstruct current custody and reservations from durable Handovers.
--- This performs no appends, system transitions, or ping writes.
+-- This performs no appends, system transitions, or side-file writes.
 recoverConch :: ConchConfig -> FilePath -> IO ConchState
 recoverConch cfg root = do
   absoluteRoot <- makeAbsolute root
@@ -107,13 +89,6 @@ recoverConch cfg root = do
     else do
       Log posts <- readLogStrict path
       pure (reconstructConch cfg (stampedPairs (map (normaliseStored absoluteRoot) posts)))
-
-readLogUnlocked :: FilePath -> FilePath -> IO ([Stamped ConchPayload], PostId)
-readLogUnlocked root path = do
-  bytes <- BS.readFile path
-  let nextId = fromIntegral (BS.count 0x0A bytes)
-      posts = mapMaybe unframeStored (filter (not . T.null) (T.lines (TE.decodeUtf8 bytes)))
-  pure (map (normaliseStored root) posts, nextId)
 
 stampedPairs :: [Stamped ConchPayload] -> [(PostId, ConchPost)]
 stampedPairs = map (\stored -> (snd (stamp stored), stamped stored))

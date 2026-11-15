@@ -48,11 +48,8 @@ module Free.Agent.Acp
     acpInitialize,
     acpNewSession,
     acpSetConfigOption,
-    acpSetModeAuto,
     acpPrompt,
     PromptResult (..),
-    acpCancel,
-    acpReadStderr,
 
     -- * Seat
     acpHost,
@@ -70,10 +67,9 @@ import Circuit.Agent.StdPorts qualified as Ports
 import Circuit.Category (K (..))
 import Circuit.Machine (Poles (..))
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
-import Circuit.Syntax (eval, run)
+import Circuit.Syntax (eval)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
-import Data.Foldable (foldr)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Scientific (toBoundedInteger)
@@ -449,11 +445,6 @@ acpSetConfigOption c micros sid configId value =
         ]
     )
 
--- | Switch a session to @auto@ mode.  Do NOT use @session\/set_mode@ — it
--- hangs in kimi 0.33.0.
-acpSetModeAuto :: AcpClient -> Int -> Text -> IO (Maybe Json, [Json])
-acpSetModeAuto c micros sid = acpSetConfigOption c micros sid "mode" "auto"
-
 -- | The result of one prompt turn.
 data PromptResult = PromptResult
   { -- | Assembled @agent_message_chunk@ text (the reply).
@@ -517,38 +508,6 @@ acpPrompt c micros sid promptText = do
                 Just (AgentRequest i m p) -> acpAnswer c i m p
                 _ -> pure ()
               go (v : acc)
-
--- | @session/cancel@ notification — cancels the current turn.
-acpCancel :: AcpClient -> Text -> IO ()
-acpCancel c sid =
-  acpSendValue
-    c
-    ( JObject
-        [ ("jsonrpc", JString t2),
-          ("method", JString ("session/cancel" :: Text)),
-          ("params", JObject [("sessionId", JString sid)])
-        ]
-    )
-  where
-    t2 = "2.0" :: Text
-
--- ---------------------------------------------------------------------------
--- Misc
--- ---------------------------------------------------------------------------
-
--- | Drain pending stderr diagnostics (bounded: returns after ~100ms of
--- quiet).  Stderr is diagnostics, not dialogue — a bounded drain, not a
--- blocking read, so a silent stderr cannot stall the caller.  The drain
--- ends at the terminal 'Exited' frame, like any other quiet spell.
-acpReadStderr :: AcpClient -> IO Text
-acpReadStderr c = go []
-  where
-    go acc = do
-      m <- timeout 100_000 $ runK (emit (stdErr (acpPorts c))) ()
-      case m of
-        Nothing -> pure (T.unlines (reverse acc))
-        Just (Ports.Payload l) -> go (l : acc)
-        Just (Ports.Exited _) -> pure (T.unlines (reverse acc))
 
 -- ---------------------------------------------------------------------------
 -- Seat
