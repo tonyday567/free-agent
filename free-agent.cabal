@@ -50,6 +50,7 @@ library
   exposed-modules:
     Free.Agent.Acp
     Free.Agent.Agent.Runner
+    Free.Agent.Backend
     Free.Agent.Bus
     Free.Agent.Bus.Claim
     Free.Agent.Bus.Cli
@@ -102,6 +103,7 @@ executable free-agent-axioma
   ghc-options: -threaded
   other-modules:
     Axioma.Acp
+    Axioma.Backend
     Axioma.Bus
     Axioma.Common
     Axioma.Conch

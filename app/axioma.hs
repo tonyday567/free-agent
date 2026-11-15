@@ -7,6 +7,7 @@
 module Main (main) where
 
 import Axioma.Acp (acpTopic)
+import Axioma.Backend (backendTopic)
 import Axioma.Bus (busTopic)
 import Axioma.Conch (conchTopic)
 import Axioma.Delivery (deliveryTopic)
@@ -38,6 +39,7 @@ data Topic
   | Recovery
   | Resume
   | Acp
+  | Backend
   | Lifecycle
   | Usage
   deriving (Show, Eq, Bounded, Enum)
@@ -57,6 +59,7 @@ topicName Refresh = "refresh"
 topicName Recovery = "recovery"
 topicName Resume = "resume"
 topicName Acp = "acp"
+topicName Backend = "backend"
 topicName Lifecycle = "lifecycle"
 topicName Usage = "usage"
 
@@ -75,6 +78,7 @@ topicDesc Refresh = "automatic same-name session refresh and durable handoff"
 topicDesc Recovery = "B16 recovery classes: a resume failure is not a turn failure, and what a skip records"
 topicDesc Resume = "CLI resume, retry, and transcript witnesses"
 topicDesc Acp = "ACP seat (R2a): scripted double + wired-binary integration"
+topicDesc Backend = "Backend recipes, independent Session legs, typed outcomes, cancellation, and local protocol peers"
 topicDesc Lifecycle = "file-log lock stress and same-process handle exclusion"
 topicDesc Usage = "Hermes latest-prompt usage anchor"
 
@@ -118,6 +122,7 @@ runTopic Refresh = refreshTopic
 runTopic Recovery = recoveryTopic
 runTopic Resume = resumeTopic
 runTopic Acp = acpTopic
+runTopic Backend = backendTopic
 runTopic Lifecycle = lifecycleTopic
 runTopic Usage = usageTopic
 
