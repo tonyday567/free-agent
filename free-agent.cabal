@@ -117,6 +117,7 @@ executable free-agent-axioma
     Axioma.Meeting
     Axioma.Persist
     Axioma.Quiesce
+    Axioma.Recovery
     Axioma.Refresh
     Axioma.Resume
     Axioma.Seat

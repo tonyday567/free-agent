@@ -18,6 +18,7 @@ import Axioma.Lifecycle (lifecycleTopic)
 import Axioma.Meeting (meetingTopic)
 import Axioma.Persist (persistTopic)
 import Axioma.Quiesce (quiesceTopic)
+import Axioma.Recovery (recoveryTopic)
 import Axioma.Refresh (refreshTopic)
 import Axioma.Resume (resumeTopic)
 import Axioma.Seat (seatTopic)
@@ -40,6 +41,7 @@ data Topic
   | Quiesce
   | Persist
   | Refresh
+  | Recovery
   | Resume
   | Tensor
   | Connector
@@ -62,6 +64,7 @@ topicName Interrupt = "interrupt"
 topicName Quiesce = "quiesce"
 topicName Persist = "persist"
 topicName Refresh = "refresh"
+topicName Recovery = "recovery"
 topicName Resume = "resume"
 topicName Tensor = "tensor"
 topicName Connector = "connector"
@@ -83,6 +86,7 @@ topicDesc Interrupt = "the interrupted handler (Z1): an interrupted turn is not 
 topicDesc Quiesce = "tailLog draining + the quiescence Moore (Q1-Q5)"
 topicDesc Persist = "watermark persister (B1-B3), anti-pollution (B4), stamping daemon"
 topicDesc Refresh = "automatic same-name session refresh and durable handoff"
+topicDesc Recovery = "B16 recovery classes: a resume failure is not a turn failure, and what a skip records"
 topicDesc Resume = "empty-reply drop (B2), empty-sentinel drop (B8), resume fix (B6)"
 topicDesc Tensor = "tensor/par probe: the stamping office as a connective toggle"
 topicDesc Connector = "connector turn grammar (B7): zero/one/two-frame turns"
@@ -129,6 +133,7 @@ runTopic Interrupt = interruptTopic
 runTopic Quiesce = quiesceTopic
 runTopic Persist = persistTopic
 runTopic Refresh = refreshTopic
+runTopic Recovery = recoveryTopic
 runTopic Resume = resumeTopic
 runTopic Tensor = tensorTopic
 runTopic Connector = connectorTopic

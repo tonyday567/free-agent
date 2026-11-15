@@ -28,7 +28,7 @@ where
 
 import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Agent (Post (..), body)
-import Circuit.Agent.Framing (stamped, unframeStored)
+import Circuit.Agent.Framing (stamped)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, fromException, throwIO, try)
@@ -40,7 +40,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (postLocal)
-import Free.Agent.Bus.File (readCursor, readTransaction, writeCursor)
+import Free.Agent.Bus.File (readCursor, writeCursor)
 import Free.Agent.Cli
   ( Cli (..),
     StderrPolicy (StderrMerge),
@@ -49,9 +49,7 @@ import Free.Agent.Cli
     cliInterrupted,
   )
 import Free.Agent.Delivery
-  ( DeliveryFailure (..),
-    DeliveryFailureKind (..),
-    Turn (..),
+  ( Turn (..),
     TurnCeiling (..),
     TurnMetrics (..),
     TurnResult (..),
@@ -252,16 +250,6 @@ cancelledTurn =
       turnMetrics = pure (TurnMetrics False False 0)
     }
 
--- | A handler whose delivery environment, not its turn, failed: the stored
--- session will not resume.
-resumeFailedTurn :: String -> Turn [Post Text]
-resumeFailedTurn why =
-  Turn
-    { awaitTurn = throwIO (DeliveryFailure ResumeFailed (T.pack why)),
-      cancelTurn = pure (),
-      turnMetrics = pure (TurnMetrics False False 0)
-    }
-
 -- | Bounded wait for the cursor to reach n.
 awaitCursor :: FilePath -> Text -> Int -> IO Bool
 awaitCursor root name n = go (500 :: Int)
@@ -448,59 +436,6 @@ interruptTopic = do
     seenH' == ["first"]
   assert "Z2k the halt decided by one batch stops the loop" exitedH
   assert ("Z2l and it leaves the cursor at the decided batch (cursor " <> show cursorH <> ")") (cursorH == 1)
-  -------------------------------------------------------------------------
-  -- Z4 · the delivery-environment failure
-  -------------------------------------------------------------------------
-  putStrLn "the delivery-environment failure (Z4)"
-  -- A resume failure is not a failed turn: no turn ran, so the batch is not
-  -- committed, not skipped, and not read past. The seat re-presents it to its
-  -- own small ceiling and then stops with the mail still behind the cursor.
-  rootP <- tempRoot "free-agent-env-failure"
-  writeCursor rootP "seat" 0
-  _ <- postLocal rootP (mkPost "human" ["seat"] "first")
-  _ <- postLocal rootP (mkPost "human" ["seat"] "second")
-  callsP <- newIORef (0 :: Int)
-  doneP <- newEmptyMVar
-  grantP <- newDeliveryGrant 100
-  let handlerP _ =
-        modifyIORef' callsP (+ 1)
-          >> pure (resumeFailedTurn "resume failed: the stored session will not resume")
-  _ <- forkIO (runAgentLoop "seat" ["seat"] rootP Nothing grantP handlerP >> putMVar doneP ())
-  exitedP <- fmap isJust (timeout 60000000 (takeMVar doneP))
-  callsP' <- readIORef callsP
-  cursorP <- readCursor rootP "seat"
-  txnP <- readTransaction rootP "seat"
-  logP <- linesOf (rootP </> "log.jsonl")
-  let noticesP =
-        [ stamped s
-          | l <- logP,
-            Just s <- [unframeStored @Text l],
-            from (stamped s) == "seat"
-        ]
-      noticeTextP = T.intercalate " " (map body noticesP)
-  assert ("Z4a a resume failure costs its own three attempts, not the batch's two (attempts " <> show callsP' <> ")") (callsP' == 3)
-  assert ("Z4b and the cursor never moves (cursor " <> show cursorP <> ")") (cursorP == 0)
-  assert "Z4c so no transaction marker authorises the unread batch" (isNothing txnP)
-  assert "Z4d the seat stops at the ceiling instead of spinning" exitedP
-  assert ("Z4e the notice is unaddressed, so no seat can spend a turn on it (notices " <> show (length noticesP) <> ")") $
-    not (null noticesP) && all (null . to) noticesP
-  assert "Z4f and it names every post id in the batch, not only the head" $
-    "posts 0,1" `T.isInfixOf` noticeTextP
-  assert "Z4g and says what disk knows about the turn, so never-ran reads as never-ran" $
-    "evidence published none" `T.isInfixOf` noticeTextP
-  -- The restart: the same batch reaches a working turn, because nothing
-  -- advanced past it.
-  seenQ <- newIORef ([] :: [Text])
-  doneQ <- newEmptyMVar
-  grantQ <- newDeliveryGrant 100
-  let handlerQ batch = do
-        modifyIORef' seenQ (++ map (body . stamped) batch)
-        pure (settledTurn [mkPost "seat" ["human"] "answered after restart"])
-  _ <- forkIO (runAgentLoop "seat" ["seat"] rootP Nothing grantQ handlerQ >> putMVar doneQ ())
-  answeredQ <- awaitCursor rootP "seat" 2
-  seenQ' <- readIORef seenQ
-  assert ("Z4h a restarted seat re-delivers the whole batch (seen " <> show seenQ' <> ")") $
-    answeredQ && seenQ' == ["first", "second"]
   -------------------------------------------------------------------------
   -- Z3 · the tool-iteration ceiling
   -------------------------------------------------------------------------
