@@ -7,7 +7,7 @@ module Axioma.Acp
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Post (..), closeShardIO)
+import Circuit.Agent (Post (..), runAgent)
 import Circuit.Agent.Framing (stamped, unframeStored)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
 import Circuit.Agent.StdPorts (DoubleStep (..), scriptedDouble)
@@ -23,7 +23,7 @@ import Data.Text.IO qualified as TIO
 import Free.Agent.Acp (AcpClient (..), acpHost, acpInitialize, acpNewSession, defaultAcpConfig, jsonToInt)
 import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.File (writeCursor)
-import Free.Agent.Host (hostShard)
+import Free.Agent.Host (hostBody)
 import System.Directory (findExecutable, removePathForcibly)
 import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
@@ -63,9 +63,9 @@ acpTopic = do
     assert "R2a initialize and session/new yield the peer's session id" $
       msid == Just "fake-session"
     let sid = fromMaybe "fake-session" msid
-        sh = hostShard (acpHost "acp-seat" 1_000_000 "You are terse." client sid)
+        sh = hostBody (acpHost "acp-seat" 1_000_000 "You are terse." client sid)
         ask = mkPost "human" ["acp-seat"] "hello"
-    (outs, _) <- closeShardIO sh [ask] []
+    outs <- runAgent sh [ask]
     assert "R2a the ACP seat answers from the streamed chunk" $
       case outs of
         [o] -> from o == "acp-seat" && body o == "acp says hi"

@@ -66,13 +66,13 @@ module Free.Agent.Bus
 where
 
 import Circuit.Agent
-  ( AgentShard,
+  ( Agent,
     Name,
     Post (..),
     PostId,
-    closeShardIO,
     deliversTo,
     mkPost,
+    runAgent,
     sortNub,
   )
 import Circuit.Agent.Framing
@@ -442,7 +442,7 @@ awaitSince bus names since = do
 -- Self-halt: a 🔵 reply is the agent deciding its own quiet — scribe it and
 -- stop, mid-batch if need be; later posts go unanswered (the agent is gone).
 -- 🟢 stays exchange-level: an agent may land one exchange and host more.
-runSeatBus :: Bus Text -> Name -> [Name] -> AgentShard [Post Text] [Post Text] -> IO ()
+runSeatBus :: Bus Text -> Name -> [Name] -> Agent s -> IO ()
 runSeatBus bus agentName names sh = loop 0
   where
     loop lastId = do
@@ -474,7 +474,7 @@ runSeatBus bus agentName names sh = loop 0
         try @SomeException $ do
           let p = stamped stored
               parentId = snd (stamp stored)
-          (outs, _st) <- closeShardIO sh [p] []
+          outs <- runAgent sh [p]
           pure [out {thread = sortNub (parentId : thread out)} | out <- outs]
       case er of
         Left e -> do

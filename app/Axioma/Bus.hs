@@ -9,7 +9,7 @@ module Axioma.Bus
 where
 
 import Axioma.Common (assert, closeBusDurable, mkPost, tempRoot)
-import Circuit.Agent (Agent, Post (..), PostId, cellToAgent, deliversTo, loop, mkChannelPost, tape, watch)
+import Circuit.Agent (Agent, Post (..), PostId, PureAgent, cellToAgent, deliversTo, loop, mkChannelPost, tape, watch)
 import Circuit.Agent.Framing (Stamped, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
 import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph, markOf)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -39,7 +39,7 @@ import Free.Agent.BusStats
     slicePosts,
   )
 import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, newDeliveryGrant, replyAct)
-import Free.Agent.Host (hostShard, mkHost)
+import Free.Agent.Host (hostBody, mkHost)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, info, renderFailure)
 import System.Directory (removePathForcibly)
@@ -547,7 +547,7 @@ busTopic = do
     _ <- postLocal root (mkPost "human" ["echo"] "hello")
     _ <- postLocal root (mkPost "human" ["echo"] (markGlyph Landed))
     bus <- openBus root
-    runSeatBus bus "echo" ["echo"] (hostShard (mkHost "echo" (pure . map ("echo:" <>))))
+    runSeatBus bus "echo" ["echo"] (hostBody (mkHost "echo" (pure . map ("echo:" <>))))
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -577,7 +577,7 @@ busTopic = do
           if ws == ["boom"]
             then error "boom"
             else pure (map ("fragile:" <>) ws)
-    runSeatBus bus "fragile" ["fragile"] (hostShard fragileHost)
+    runSeatBus bus "fragile" ["fragile"] (hostBody fragileHost)
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -621,7 +621,7 @@ busTopic = do
                 if "finish" `elem` ws
                   then [markGlyph StandDown]
                   else map ("echo:" <>) ws
-    runSeatBus bus "echo" ["echo"] (hostShard host)
+    runSeatBus bus "echo" ["echo"] (hostBody host)
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -650,8 +650,8 @@ busTopic = do
     _ <- postLocal root (mkPost "human" [card] "discuss")
     _ <- postLocal root (mkPost "human" [card] (markGlyph Landed))
     bus <- openBus root
-    let alphaSeat = hostShard (mkHost "alpha" (pure . map ("alpha:" <>)))
-        betaSeat = hostShard (mkHost "beta" (pure . map ("beta:" <>)))
+    let alphaSeat = hostBody (mkHost "alpha" (pure . map ("alpha:" <>)))
+        betaSeat = hostBody (mkHost "beta" (pure . map ("beta:" <>)))
     doneAlpha <- newEmptyMVar
     doneBeta <- newEmptyMVar
     _ <- forkIO $ runSeatBus bus "alpha" [card] alphaSeat >> putMVar doneAlpha ()
@@ -691,7 +691,7 @@ busTopic = do
     _ <- postLocal root (mkChannelPost "human" "commons" ["human", "aud"] ("ping" :: Text))
     _ <- postLocal root (mkPost "human" ["aud"] (markGlyph Landed))
     bus <- openBus root
-    runSeatBus bus "aud" ["commons", "aud"] (hostShard (mkHost "aud" (pure . map ("ack: " <>))))
+    runSeatBus bus "aud" ["commons", "aud"] (hostBody (mkHost "aud" (pure . map ("ack: " <>))))
     closeBusDurable bus
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (unframeStored @Text) (T.lines content)
@@ -956,7 +956,7 @@ busTopic = do
                 Just m
                   | isHalt m -> []
                 _ -> [(mkPost seatName [from p] ("ack: " <> body p)) {thread = [parentId]}]
-        agent = cellToAgent (tape q7Seat) :: Agent (->) [Post Text] (Post Text) [Post Text]
+        agent = cellToAgent (tape q7Seat) :: PureAgent [Post Text] (Post Text) [Post Text]
         a = mkPost "human" [seatName] "one"
         b = mkPost "human" [seatName] "two"
         c = mkPost "human" [seatName] "three"

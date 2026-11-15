@@ -9,7 +9,7 @@ module Axioma.Lifecycle
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Post (..), ioShard)
+import Circuit.Agent (Post (..), ioAgent)
 import Circuit.Agent.Framing (stamp, stamped, unLog, unframeStored, pattern Stamped)
 import Control.Concurrent (forkFinally, forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.STM (atomically)
@@ -263,7 +263,7 @@ lifecycleTopic = do
     root <- tempRoot "free-agent-l5-persister-death"
     bus <- openBus root
     seatDied <- newEmptyMVar
-    _ <- forkFinally (runSeatBus bus "l5" ["l5"] (ioShard (const (pure [])))) (putMVar seatDied)
+    _ <- forkFinally (runSeatBus bus "l5" ["l5"] (ioAgent (const (pure [])))) (putMVar seatDied)
     closeBus bus
     answered <- timeout 5_000_000 (atomically (awaitSince bus ["l5"] 0))
     assert "L5 awaitSince answers with the persister's failure" $

@@ -28,11 +28,10 @@ module Free.Agent.Cli
     encodeTranscriptLine,
 
     -- * Generic adapters (re-exported from 'Circuit.Agent.Query')
-    queryShard,
-    queryShardWith,
-    synthShard,
-    echoShard,
-    runShardIO,
+    queryBody,
+    queryBodyWith,
+    synthBody,
+    echoBody,
     sessionPrompt,
     replyPosts,
     synthesisPosts,
@@ -41,13 +40,12 @@ where
 
 import Circuit.Agent (PostId)
 import Circuit.Agent.Query
-  ( echoShard,
-    queryShard,
-    queryShardWith,
+  ( echoBody,
+    queryBody,
+    queryBodyWith,
     replyPosts,
-    runShardIO,
     sessionPrompt,
-    synthShard,
+    synthBody,
     synthesisPosts,
   )
 import Control.Concurrent

@@ -9,14 +9,14 @@ module Axioma.Seat
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (AgentShard, Post (..), closeShardIO)
+import Circuit.Agent (Agent, Post (..), runAgent)
 import Control.Monad (when)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliDeliverTo, parseSessionId)
 import Free.Agent.Delivery (TurnResult (..), awaitTurn)
-import Free.Agent.Host (BodyMode (..), Host (..), hostShard, mkHost, processHost)
+import Free.Agent.Host (BodyMode (..), Host (..), hostBody, mkHost, processHost)
 import System.Directory (doesFileExist, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -30,44 +30,41 @@ seatTopic = do
 
   do
     let h = mkHost "echo" (pure . map ("echo:" <>))
-        sh :: AgentShard [Post Text] [Post Text]
-        sh = hostShard h
+        sh :: Agent [Post Text]
+        sh = hostBody h
         p = mkPost "human" ["echo"] "hi there"
-    (outs, st) <- closeShardIO sh [p] []
+    outs <- runAgent sh [p]
     assert "host replies to sender" $
       map body outs == ["echo:hi", "echo:there"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
         && all (\x -> thread x == []) outs
-    assert "host buffer cleared after emit" $ st == []
 
   do
     let h = mkHost "echo" (pure . map ("echo:" <>))
-        sh :: AgentShard [Post Text] [Post Text]
-        sh = hostShard h
+        sh :: Agent [Post Text]
+        sh = hostBody h
         posts =
           [ mkPost "human" ["echo"] "one two",
             mkPost "human" ["echo"] "three"
           ]
-    (outs, st) <- closeShardIO sh posts []
+    outs <- runAgent sh posts
     assert "host emits one reply batch per committed post" $
       map body outs == ["echo:one", "echo:two", "echo:three"]
         && length outs == 3
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
-    assert "multi-post host buffer cleared after emit" $ st == []
 
   do
     let h = (mkHost "echo" (pure . map ("echo:" <>))) {hostBodyMode = BodyLines}
-        sh :: AgentShard [Post Text] [Post Text]
-        sh = hostShard h
+        sh :: Agent [Post Text]
+        sh = hostBody h
         p = mkPost "human" ["echo"] "hi\nthere"
-    (outs, st) <- closeShardIO sh [p] []
+    outs <- runAgent sh [p]
     assert "host BodyLines splits on newlines" $
       map body outs == ["echo:hi", "echo:there"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
-    assert "BodyLines host buffer cleared after emit" $ st == []
 
   -------------------------------------------------------------------------
   -- Real-host sketch: external process
@@ -76,13 +73,12 @@ seatTopic = do
 
   do
     let h = processHost "shell" "echo" ["hello"]
-        sh :: AgentShard [Post Text] [Post Text]
-        sh = hostShard h
+        sh :: Agent [Post Text]
+        sh = hostBody h
         p = mkPost "human" ["shell"] "ignored"
-    (outs, st) <- closeShardIO sh [p] []
+    outs <- runAgent sh [p]
     assert "process host runs echo and replies" $
       map body outs == ["hello ignored"] && all (\x -> to x == ["human"]) outs
-    assert "process host buffer cleared after emit" $ st == []
 
   -------------------------------------------------------------------------
   -- Real-host sketch: live CLI host (fake binary, exact oracle)

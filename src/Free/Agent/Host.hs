@@ -11,7 +11,7 @@ module Free.Agent.Host
     BareConfig (..),
     mkHost,
     hostResponse,
-    hostShard,
+    hostBody,
     processHost,
     hermesCli,
     bareHost,
@@ -19,7 +19,7 @@ module Free.Agent.Host
   )
 where
 
-import Circuit.Agent (AgentShard, Post (..), ioShard, mkPost)
+import Circuit.Agent (Agent, Post (..), ioAgent, mkPost)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL
@@ -53,7 +53,7 @@ data BodyMode
 --
 -- The host receives arguments derived from the body of an incoming post and
 -- produces output lines.  The caller decides how to turn those lines back into
--- posts; 'hostShard' uses the default mapping (reply to sender).
+-- posts; 'hostBody' uses the default mapping (reply to sender).
 --
 -- The default is the design card's branching factor exactly 1: a reply
 -- addresses the sender only, and the @all@ magic top is localised by
@@ -86,10 +86,11 @@ hostResponse h p = do
   outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
   pure [(mkPost (hostName h) [from p] o) {channel = channel p} | o <- outs]
 
--- | Turn a host into a stateful shard that consumes every committed post.
--- The shard remembers committed posts and emits 'hostResponse' batches.
-hostShard :: Host -> AgentShard [Post Text] [Post Text]
-hostShard h = ioShard (fmap concat . traverse (hostResponse h))
+-- | Turn a host into an input-seeded agent. Commits collect posts
+-- independently; the first emit runs every 'hostResponse' and returns the
+-- concatenated replies beside 'Done'.
+hostBody :: Host -> Agent [Post Text]
+hostBody h = ioAgent (fmap concat . traverse (hostResponse h))
 
 -- | A host backed by an external process.
 --
