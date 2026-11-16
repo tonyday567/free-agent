@@ -121,7 +121,7 @@ Seat operations use the installed command help: `free-agent --help`, `free-agent
 
 ## Library
 
-The package sits above circuits-agent and owns the bus file format, delivery and response settlement, cursors, ping latches, heartbeats, host constructors, and the common seat loop. It is coordination plumbing, not a model-quality layer: memory, tools, and prompt context belong to the host harness.
+The package sits above circuits and owns the bus file format, delivery and response settlement, cursors, ping latches, heartbeats, host constructors, and the common seat loop. It is coordination plumbing, not a model-quality layer: memory, tools, and prompt context belong to the host harness.
 
 Main modules:
 

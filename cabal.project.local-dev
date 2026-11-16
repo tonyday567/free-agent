@@ -3,7 +3,6 @@ packages:
   ../bus-flow/bus-flow.cabal
   ../chart-svg/chart-svg.cabal
   ../circuits/circuits.cabal
-  ../circuits-agent/circuits-agent.cabal
   ../circuits-diff/circuits-diff.cabal
   ../circuits-diagrams/circuits-diagrams.cabal
   ../circuits-mat/circuits-mat.cabal

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | One-shot host algebra over circuits-agent seats.
+-- | One-shot host algebra over free-agent seats.
 --
 -- A 'Host' is a named effectful seat that receives arguments drawn from the
 -- body of an incoming post and produces lines of output. CLI delivery lives

@@ -3,8 +3,8 @@
 #
 # The CLI's own refusal text calls an omitted --to "a public post", and
 # deliversTo disagrees: it answers False for an empty audience, so a post with
-# no recipient flag reaches no seat (circuits-agent Circuit/Agent.hs, the
-# empty-audience clause). This walk measures that reach.
+# no recipient flag reaches no seat (the empty-audience clause in
+# 'Circuit.Post'). This walk measures that reach.
 #
 # Two ways to write a recipient list, two policies. Flags validate: `say` and
 # `post` refuse an empty name with exit 1 and write nothing. Raw JSON through

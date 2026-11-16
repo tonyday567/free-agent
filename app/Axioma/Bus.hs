@@ -692,11 +692,11 @@ busTopic = do
   -- The seam (Q7): one deterministic seat, two machines.
   --
   -- The same index-citing seat runs through the pure calculus 'loop'
-  -- (circuits-agent) and through the operational 'runAgentLoop'
-  -- (free-agent). Both handlers deliberately cite the parent's id; the
-  -- operational runner preserves that explicit ancestry without inferring
-  -- another cause. The final logs must be the SAME [Post Text Text] once stamps
-  -- are stripped — no modulo left in the comparison.
+  -- and through the operational 'runAgentLoop'. Both handlers deliberately
+  -- cite the parent's id; the operational runner preserves that explicit
+  -- ancestry without inferring another cause. The final logs must be the SAME
+  -- [Post Text Text] once stamps are stripped — no modulo left in the
+  -- comparison.
   --
   -- Counterexamples this pins: a runner that drops or rewrites deliberate
   -- ancestry, a cold-boot cursor that skips the script (the seat answers
