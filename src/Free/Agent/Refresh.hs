@@ -9,7 +9,7 @@ module Free.Agent.Refresh
   )
 where
 
-import Circuit.Agent (Name)
+import Free.Agent.Agent (Name)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)

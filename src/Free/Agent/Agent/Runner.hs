@@ -12,7 +12,7 @@ module Free.Agent.Agent.Runner
   )
 where
 
-import Circuit.Agent (Name)
+import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (Stored, decodeRow)
 import Circuit.Post (Post (..), PostId, mkPost)
 import Circuit.Shared (stamp, stamped)

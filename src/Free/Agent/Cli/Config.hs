@@ -29,7 +29,7 @@ module Free.Agent.Cli.Config
   )
 where
 
-import Circuit.Agent (Name)
+import Free.Agent.Agent (Name)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Options.Applicative

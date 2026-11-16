@@ -34,7 +34,7 @@ module Free.Agent.Meeting
   )
 where
 
-import Circuit.Agent (Name)
+import Free.Agent.Agent (Name)
 import Circuit.Post (Post (..), PostId, coneByIndex, deliversTo, mkPost, sortNub)
 import Free.Agent.Cli (synthesisPosts)
 import Circuit.Machine (Body (Body), Moore)

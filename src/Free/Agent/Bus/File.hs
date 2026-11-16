@@ -36,7 +36,7 @@ module Free.Agent.Bus.File
   )
 where
 
-import Circuit.Agent (Name)
+import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (Stored)
 import Circuit.Post (Post, PostId)
 import Circuit.Shared (stamp, stamped)

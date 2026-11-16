@@ -15,7 +15,7 @@
 --   free-agent status [ROOT] [--threshold SECS]
 module Main (main) where
 
-import Circuit.Agent (Name)
+import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (Stored)
 import Circuit.Post (Post (..), mkPost)
 import Circuit.Shared (stamp, stamped)

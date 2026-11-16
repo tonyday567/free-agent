@@ -25,7 +25,7 @@ module Free.Agent.Bus
   )
 where
 
-import Circuit.Agent (Name)
+import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (RowError (..), Stored, decodeLog, encodeRow)
 import Circuit.Post (Post, PostId, deliversTo)
 import Circuit.Shared (Stamped (..), stamp, stamped)

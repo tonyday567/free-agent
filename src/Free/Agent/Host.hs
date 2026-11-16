@@ -19,7 +19,7 @@ module Free.Agent.Host
   )
 where
 
-import Circuit.Agent (Agent, ioAgent)
+import Free.Agent.Agent (Agent, ioAgent)
 import Circuit.Post (Post (..), mkPost)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Data.ByteString.Char8 qualified as BC8

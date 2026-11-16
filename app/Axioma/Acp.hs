@@ -7,7 +7,7 @@ module Axioma.Acp
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (runAgent)
+import Free.Agent.Agent (runAgent)
 import Circuit.Parser.Framing (decodeRow)
 import Circuit.Post (Post (..))
 import Circuit.Shared (stamped)

@@ -64,7 +64,7 @@ module Free.Agent.Bus.Cli
 where
 
 import Bus.Flow (SliceMode (..), slicePosts)
-import Circuit.Agent (Name)
+import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (Stored, encodeRow)
 import Circuit.Post (Post (..), PostId, deliversTo, mkPost, sortNub)
 import Circuit.Shared (stamp, stamped)

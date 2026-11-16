@@ -49,6 +49,7 @@ library
   hs-source-dirs: src
   exposed-modules:
     Free.Agent.Acp
+    Free.Agent.Agent
     Free.Agent.Agent.Runner
     Free.Agent.Backend
     Free.Agent.Bus
@@ -65,6 +66,7 @@ library
     Free.Agent.Lineage
     Free.Agent.Mark
     Free.Agent.Meeting
+    Free.Agent.Query
     Free.Agent.Refresh
     Free.Agent.Usage
 

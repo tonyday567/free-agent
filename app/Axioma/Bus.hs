@@ -8,7 +8,7 @@ module Axioma.Bus
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (PureAgent, cellToAgent, loop, tape)
+import Free.Agent.Agent (PureAgent, cellToAgent, loop, tape)
 import Circuit.Parser.Framing (RowError (..), Stored, decodeRow)
 import Circuit.Post (Post (..), PostId, deliversTo, mkChannelPost, watch)
 import Circuit.Shared (Stamped (..), stamp, stamped)

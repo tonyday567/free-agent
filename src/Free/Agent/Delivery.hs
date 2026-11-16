@@ -29,7 +29,7 @@ module Free.Agent.Delivery
   )
 where
 
-import Circuit.Agent (Name)
+import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (Stored)
 import Circuit.Post (Post (..))
 import Circuit.Shared (stamp)

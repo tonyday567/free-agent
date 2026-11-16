@@ -9,7 +9,7 @@ module Axioma.Seat
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Agent, runAgent)
+import Free.Agent.Agent (Agent, runAgent)
 import Circuit.Post (Post (..))
 import Control.Monad (when)
 import Data.Text (Text)
