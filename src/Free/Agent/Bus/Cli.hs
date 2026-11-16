@@ -129,6 +129,13 @@ data BusCommand
 nameArg :: Parser Text
 nameArg = argument (T.pack <$> str) (metavar "NAME" <> help "Agent name")
 
+recipientReader :: ReadM Text
+recipientReader = eitherReader $ \s ->
+  let name = T.pack s
+   in if T.isInfixOf "," name
+        then Left ("recipient contains a comma: " <> s)
+        else Right name
+
 namesArg :: Parser [Text]
 namesArg =
   some
@@ -251,8 +258,8 @@ postCmd = do
   toNames <-
     many
       ( option
-          (T.pack <$> str)
-          (long "to" <> metavar "NAME" <> help "Recipient name (repeatable); refused beside --channel, which is the whole address")
+          recipientReader
+          (long "to" <> metavar "NAME" <> help "Recipient name (repeatable, no commas); refused beside --channel, which is the whole address")
       )
   bodyText <-
     optional

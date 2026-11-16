@@ -868,6 +868,18 @@ busTopic = do
           let (msg, _) = renderFailure f "free-agent"
            in "--thread" `T.isInfixOf` T.pack msg && "--channel" `T.isInfixOf` T.pack msg
         _ -> False
+    -- A joined recipient is a sender error, not two addresses and not a post.
+    freeAgentBin <- seatBinary
+    beforeRefused <- TIO.readFile (root </> "log.jsonl")
+    (commaCode, _, commaError) <-
+      readProcessWithExitCode
+        freeAgentBin
+        ["bus", "post", "--root", root, "--from", "seat", "--to", "a,b", "--body", "must not land"]
+        ""
+    afterRefused <- TIO.readFile (root </> "log.jsonl")
+    assert "bus post refuses a recipient containing a comma" $ commaCode /= ExitSuccess
+    assert "the comma refusal names the offending recipient" $ "a,b" `T.isInfixOf` T.pack commaError
+    assert "the comma refusal happens before anything lands" $ afterRefused == beforeRefused
     -- The effect: a flag post lands ancestry and a channel in the log, and the
     -- channel addresses it (an empty --to still delivers to a subscriber).
     runBusCommand (PostCommand root (Just "seat") [] (Just "reply") (Just 0) (Just "ops"))
