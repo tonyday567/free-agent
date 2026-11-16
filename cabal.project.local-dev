@@ -1,5 +1,6 @@
 packages:
   free-agent.cabal
+  ../bus-flow/bus-flow.cabal
   ../chart-svg/chart-svg.cabal
   ../circuits/circuits.cabal
   ../circuits-agent/circuits-agent.cabal

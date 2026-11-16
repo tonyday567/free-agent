@@ -63,6 +63,7 @@ module Free.Agent.Bus.Cli
   )
 where
 
+import Bus.Flow (SliceMode (..), slicePosts)
 import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
 import Circuit.Agent.Framing (Log (..), Stamped, frameStored, parsePost, stamp, stamped)
 import Control.Exception (IOException, SomeException, displayException, try)
@@ -82,7 +83,6 @@ import Data.Time.Format.ISO8601 (iso8601Show)
 import Free.Agent.Bus (postLocal, readLogStrict, readSince)
 import Free.Agent.Bus.File (Flow (Continue), Human (..), attachHuman, humanNames, readCursor, readCursorAll, readHuman, removeHuman, tailLog, writeCursor)
 import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbPath, hbText, readHeartbeat)
-import Free.Agent.BusStats (SliceMode (..), slicePosts)
 import Free.Agent.Cli.Config (rootOpt)
 import Options.Applicative
 import System.Directory (doesFileExist, listDirectory)
@@ -825,7 +825,7 @@ parseBlockLink text = case T.words text of
 -- | The thread view: the connected component of the given id under the
 -- schema's @thread@ field. Roots carry @thread = []@, replies cite their
 -- ancestors, so the root of a post is the least ancestor present in the
--- log — the same walk BusStats uses to slice by thread.
+-- log — the same walk Bus.Flow uses to slice by thread.
 runThreadView :: [Stamped Text] -> PostId -> Depth -> IO ()
 runThreadView posts tid depth =
   case [vs | (_, vs) <- slicePosts ByThread posts, any ((== tid) . snd . stamp) vs] of
