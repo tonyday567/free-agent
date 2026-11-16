@@ -14,6 +14,7 @@ import Axioma.Halt (haltTopic)
 import Axioma.Interrupt (interruptTopic)
 import Axioma.Lifecycle (lifecycleTopic)
 import Axioma.Meeting (meetingTopic)
+import Axioma.Ports (portsTopic)
 import Axioma.Quiesce (quiesceTopic)
 import Axioma.Recovery (recoveryTopic)
 import Axioma.Refresh (refreshTopic)
@@ -29,6 +30,7 @@ data Topic
   | Transcript
   | Delivery
   | Meeting
+  | Ports
   | Bus
   | Halt
   | Interrupt
@@ -48,6 +50,7 @@ topicName Seat = "seat"
 topicName Transcript = "transcript"
 topicName Delivery = "delivery"
 topicName Meeting = "meeting"
+topicName Ports = "ports"
 topicName Bus = "bus"
 topicName Halt = "halt"
 topicName Interrupt = "interrupt"
@@ -66,6 +69,7 @@ topicDesc Seat = "host shard round-trips: echo/process/CLI host sketches, BodyLi
 topicDesc Transcript = "transcript oracle (B1): JSONL records, scrub agreement, silent failure"
 topicDesc Delivery = "delivery settlement: quiet response, exactly-once await, explicit root and reply posts"
 topicDesc Meeting = "meeting skeletons, panel meeting, replay, derivations as 2-cells"
+topicDesc Ports = "process framing, death-as-content, merged stdio, and honest doubles (S1-S6)"
 topicDesc Bus = "file-log kernel, CLI projections, and runtime witnesses"
 topicDesc Halt = "the halt form (Y1): a status label is content, a bare first line is control"
 topicDesc Interrupt = "the interrupted handler (Z1): an interrupted turn is not retried"
@@ -109,6 +113,7 @@ runTopic Seat = seatTopic
 runTopic Transcript = transcriptTopic
 runTopic Delivery = deliveryTopic
 runTopic Meeting = meetingTopic
+runTopic Ports = portsTopic
 runTopic Bus = busTopic
 runTopic Halt = haltTopic
 runTopic Interrupt = interruptTopic

@@ -38,7 +38,7 @@ import System.Process (readProcess)
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Free.Agent.Host
--- >>> import Circuit.Agent
+-- >>> import Free.Agent.Agent
 
 -- | How to turn a post body into arguments for 'hostRun'.
 data BodyMode

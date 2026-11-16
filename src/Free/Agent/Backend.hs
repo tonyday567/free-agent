@@ -42,7 +42,7 @@ module Free.Agent.Backend
   )
 where
 
-import Circuit.Agent.StdPorts (frameAgent, sseMarks)
+import Free.Agent.StdPorts (frameAgent, sseMarks)
 import Circuit.Machine (Body (Body), Moore)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Tensor (unConst)

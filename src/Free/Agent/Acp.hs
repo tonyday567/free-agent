@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | ACP (Agent Client Protocol) JSON-RPC 2.0 NDJSON client over
--- 'Circuit.Agent.Process' ends.
+-- 'Free.Agent.StdPorts' ends.
 --
 -- The wire: one JSON object per line on the child's stdout (no
 -- Content-Length headers); stdin takes the same framing; stderr is
@@ -20,7 +20,7 @@
 --     spec's @path@ — both are accepted here.
 --
 -- Requests travel through the shared stdin 'commit' port of
--- 'Circuit.Agent.StdPorts'; replies are line-framed blocking reads from the
+-- 'Free.Agent.StdPorts'; replies are line-framed blocking reads from the
 -- stdout queue.
 module Free.Agent.Acp
   ( -- * Configuration
@@ -56,14 +56,13 @@ module Free.Agent.Acp
   )
 where
 
-import Circuit.Agent.StdPorts
+import Free.Agent.StdPorts
   ( ProcConfig (..),
     StdPorts (..),
-    defaultProcConfig,
     lineMarks,
     openStdPorts,
   )
-import Circuit.Agent.StdPorts qualified as Ports
+import Free.Agent.StdPorts qualified as Ports
 import Circuit.Category (K (..))
 import Circuit.Machine (Poles (..))
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
@@ -134,11 +133,12 @@ openAcp cfg = do
   let wd = acpWorkDir cfg
   createDirectoryIfMissing True wd
   let replCfg =
-        defaultProcConfig
+        ProcConfig
           { procCommand = acpCommand cfg,
             procArgs = acpArgs cfg,
             procWorkingDir = wd,
-            procMarks = lineMarks
+            procMarks = lineMarks,
+            procMergeStderr = False
           }
   pp <- runK (eval (openStdPorts encodeUtf8 decodeUtf8 replCfg)) ()
   nref <- newIORef 1

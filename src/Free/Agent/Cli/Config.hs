@@ -122,7 +122,7 @@ data GatewayCliConfig = GatewayCliConfig
   }
   deriving (Show)
 
--- | ACP seat configuration: a persistent 'Circuit.Agent.StdPorts' child
+-- | ACP seat configuration: a persistent 'Free.Agent.StdPorts' child
 -- speaking JSON-RPC over stdio (see "Free.Agent.Acp").
 data AcpCliConfig = AcpCliConfig
   { acRoot :: FilePath,
