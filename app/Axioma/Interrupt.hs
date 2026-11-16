@@ -29,7 +29,7 @@ where
 import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Post (Post (..), body)
 import Circuit.Shared (stamped)
-import Circuit.Agent.Mark (Mark (..), markGlyph)
+import Free.Agent.Mark (Mark (..), markGlyph)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, fromException, throwIO, try)
 import Control.Monad (void)
