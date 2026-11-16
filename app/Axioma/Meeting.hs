@@ -7,7 +7,7 @@ module Axioma.Meeting
 where
 
 import Axioma.Common (assert, boxLabels, countSpiders, mkPost)
-import Circuit.Agent (Post (..), branchesByIndex, coneByIndex, replyTo, sortNub, synthesis)
+import Circuit.Post (Post (..), branchesByIndex, coneByIndex, replyTo, sortNub, synthesis)
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper
   ( BoundaryEnd (..),

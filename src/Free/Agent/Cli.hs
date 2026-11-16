@@ -24,13 +24,12 @@ module Free.Agent.Cli
     TranscriptRecord (..),
     encodeTranscriptLine,
 
-    -- * Generic adapter (re-exported from 'Circuit.Agent.Query')
+    -- * Synthesis reply construction
     synthesisPosts,
   )
 where
 
-import Circuit.Agent (PostId)
-import Circuit.Agent.Query (synthesisPosts)
+import Circuit.Post (Post (..), PostId, mkPost, sortNub, synthesis)
 import Control.Concurrent
   ( MVar,
     forkIO,
@@ -67,6 +66,17 @@ import System.Process qualified as Process
 --
 -- Everything a session needs is plain data; there are no laws here beyond
 -- what the CLI itself honours.
+-- | Build one synthesis post from a cleaned agent response.
+synthesisPosts :: Text -> [Post Text Text] -> [PostId] -> Text -> [Post Text Text]
+synthesisPosts who ins ids reply =
+  case (ins, T.strip reply) of
+    (_, r) | T.null r -> []
+    ([], _) -> []
+    (_, r) ->
+      let audience = filter (/= who) (sortNub (concatMap (\p -> from p : to p) ins))
+          parentIds = take (length ins) ids
+       in [if null parentIds then mkPost who audience r else synthesis who audience parentIds r]
+
 data Cli = Cli
   { -- | The executable (e.g. @"hermes"@, @"/bin/sh"@).
     cliCommand :: FilePath,

@@ -12,7 +12,7 @@ module Axioma.Common
   )
 where
 
-import Circuit.Agent (Post (..))
+import Circuit.Post (Post (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Machine (Body (Body), Moore, MooreT (..), scan)
 import Circuit.Tensor (unConst)
@@ -40,8 +40,8 @@ iterateAgent (Body _ k o) s0 = scan (MooreT (Body (\i -> k (s0, i)) k o))
 runMono :: Moore (,) s (->) i o -> s -> (o, i -> s)
 runMono (Body _ k o) s = (unConst (o s), \i -> k (s, i))
 
-mkPost :: Text -> [Text] -> Text -> Post Text
-mkPost a ds = Post a Nothing ds []
+mkPost :: Text -> [Text] -> Text -> Post Text Text
+mkPost f t b = Post f Nothing t [] b
 
 -- | Per-run unique directory under the temp root: @TMPDIR/name-XXXXXX@,
 -- created fresh through 'openTempFile''s exclusive naming. Sibling suite

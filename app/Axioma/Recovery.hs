@@ -21,14 +21,15 @@ module Axioma.Recovery
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Post (..), PostId)
-import Circuit.Agent.Framing (stamp, stamped, unframeStored)
+import Circuit.Parser.Framing (decodeRow)
+import Circuit.Post (Post (..), PostId)
+import Circuit.Shared (stamp, stamped)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, fromException, throwIO, try)
 import Control.Monad (unless, void)
 import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -56,7 +57,7 @@ resumeMessage =
 
 -- | A turn that settles nothing: the shape every witness uses as a stand-in
 -- whenever the turn itself is not the subject.
-settled :: Turn [Post Text]
+settled :: Turn [Post Text Text]
 settled =
   Turn
     { awaitTurn = pure (TurnResponse []),
@@ -65,10 +66,10 @@ settled =
     }
 
 -- | Every post in the root's log, in log order.
-logPosts :: FilePath -> IO [Post Text]
+logPosts :: FilePath -> IO [Post Text Text]
 logPosts root = do
   content <- TIO.readFile (root <> "/log.jsonl")
-  pure [stamped s | l <- T.lines content, Just s <- [unframeStored @Text l]]
+  pure [stamped s | l <- T.lines content, Right s <- [decodeRow l]]
 
 recoveryTopic :: IO ()
 recoveryTopic = do

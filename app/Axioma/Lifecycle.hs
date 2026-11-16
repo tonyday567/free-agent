@@ -8,11 +8,11 @@ module Axioma.Lifecycle
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent.Framing (Log (..), Stamped, stamp)
+import Circuit.Parser.Framing (Stored)
+import Circuit.Shared (stamp)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, displayException, try)
 import Data.List (sort)
-import Data.Text (Text)
 import Data.Text qualified as T
 import Free.Agent.Bus (postLocal, readLogStrict, withBusFiles)
 import System.Directory (removePathForcibly)
@@ -53,7 +53,7 @@ lifecycleTopic = do
       case settled of
         Just (Right _) -> True
         _ -> False
-    Log (posts :: [Stamped Text]) <- readLogStrict (root </> "log.jsonl")
+    (posts :: [Stored]) <- readLogStrict (root </> "log.jsonl")
     assert "both posts survive the excluded handle windows" $
       length posts == 2
     removePathForcibly root
@@ -89,7 +89,7 @@ lifecycleTopic = do
       Just collected -> do
         assert "locked appends return every unique file id exactly once" $
           sort (concat collected) == [0 .. total - 1]
-        Log (posts :: [Stamped Text]) <- readLogStrict (root </> "log.jsonl")
+        (posts :: [Stored]) <- readLogStrict (root </> "log.jsonl")
         assert "the file contains every locked append exactly once" $
           sort (map (snd . stamp) posts) == [0 .. total - 1]
     removePathForcibly root

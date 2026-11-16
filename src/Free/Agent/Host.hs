@@ -19,7 +19,8 @@ module Free.Agent.Host
   )
 where
 
-import Circuit.Agent (Agent, Post (..), ioAgent, mkPost)
+import Circuit.Agent (Agent, ioAgent)
+import Circuit.Post (Post (..), mkPost)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL
@@ -81,7 +82,7 @@ bodyArgs BodyWhole = (: [])
 
 -- | Run a host on one post and apply the default reply-to-sender mapping.
 -- Generic hosts have no stamped id; callers add ancestry where it exists.
-hostResponse :: Host -> Post Text -> IO [Post Text]
+hostResponse :: Host -> Post Text Text -> IO [Post Text Text]
 hostResponse h p = do
   outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
   pure [(mkPost (hostName h) [from p] o) {channel = channel p} | o <- outs]
@@ -89,7 +90,7 @@ hostResponse h p = do
 -- | Turn a host into an input-seeded agent. Commits collect posts
 -- independently; the first emit runs every 'hostResponse' and returns the
 -- concatenated replies beside 'Done'.
-hostBody :: Host -> Agent [Post Text]
+hostBody :: Host -> Agent [Post Text Text]
 hostBody h = ioAgent (fmap concat . traverse (hostResponse h))
 
 -- | A host backed by an external process.

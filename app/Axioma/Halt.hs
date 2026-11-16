@@ -15,8 +15,8 @@ module Axioma.Halt
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Post (..), body)
-import Circuit.Agent.Framing (stamped)
+import Circuit.Post (Post (..), body)
+import Circuit.Shared (stamped)
 import Circuit.Agent.Mark (Mark (..), controlMark, markGlyph, markOf)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (unless)

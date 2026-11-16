@@ -9,7 +9,8 @@ module Axioma.Seat
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Agent, Post (..), runAgent)
+import Circuit.Agent (Agent, runAgent)
+import Circuit.Post (Post (..))
 import Control.Monad (when)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -30,7 +31,7 @@ seatTopic = do
 
   do
     let h = mkHost "echo" (pure . map ("echo:" <>))
-        sh :: Agent [Post Text]
+        sh :: Agent [Post Text Text]
         sh = hostBody h
         p = mkPost "human" ["echo"] "hi there"
     outs <- runAgent sh [p]
@@ -42,7 +43,7 @@ seatTopic = do
 
   do
     let h = mkHost "echo" (pure . map ("echo:" <>))
-        sh :: Agent [Post Text]
+        sh :: Agent [Post Text Text]
         sh = hostBody h
         posts =
           [ mkPost "human" ["echo"] "one two",
@@ -57,7 +58,7 @@ seatTopic = do
 
   do
     let h = (mkHost "echo" (pure . map ("echo:" <>))) {hostBodyMode = BodyLines}
-        sh :: Agent [Post Text]
+        sh :: Agent [Post Text Text]
         sh = hostBody h
         p = mkPost "human" ["echo"] "hi\nthere"
     outs <- runAgent sh [p]
@@ -73,7 +74,7 @@ seatTopic = do
 
   do
     let h = processHost "shell" "echo" ["hello"]
-        sh :: Agent [Post Text]
+        sh :: Agent [Post Text Text]
         sh = hostBody h
         p = mkPost "human" ["shell"] "ignored"
     outs <- runAgent sh [p]

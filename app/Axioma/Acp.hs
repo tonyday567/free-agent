@@ -7,8 +7,10 @@ module Axioma.Acp
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Post (..), runAgent)
-import Circuit.Agent.Framing (stamped, unframeStored)
+import Circuit.Agent (runAgent)
+import Circuit.Parser.Framing (decodeRow)
+import Circuit.Post (Post (..))
+import Circuit.Shared (stamped)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
 import Circuit.Agent.StdPorts (DoubleStep (..), scriptedDouble)
 import Circuit.Parser.Json (Json (..), decodeJson)
@@ -16,7 +18,6 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (when)
 import Data.IORef (newIORef)
 import Data.Maybe (fromMaybe, mapMaybe)
-import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
@@ -114,7 +115,7 @@ acpTopic = do
     _ <- postLocal root (mkPost "human" ["acp1"] (markGlyph Landed))
     code <- takeMVar done
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+    let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "acp1"]
     assert "R2a the wired acp seat answers the bus through a real pipe" $
       code == ExitSuccess

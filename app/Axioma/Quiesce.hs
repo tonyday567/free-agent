@@ -8,15 +8,21 @@ module Axioma.Quiesce
 where
 
 import Axioma.Common (assert, iterateAgent, mkPost, tempRoot)
-import Circuit.Agent (Post (..))
-import Circuit.Agent.Framing (frameStored, parseTimeText, stamped, pattern Stamped)
+import Circuit.Parser.Framing (encodeRow)
+import Circuit.Post (Post (..))
+import Circuit.Shared (Stamped (..), stamped)
 import Circuit.Agent.Mark (Mark (..), markGlyph, markOf)
 import Control.Concurrent (forkIO, killThread, modifyMVar_, newMVar, readMVar, threadDelay)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.Time (UTCTime, defaultTimeLocale, parseTimeM)
 import Free.Agent.Bus.File (Decision (..), Flow (..), QEvent (..), quiesceAgent, tailLog)
 import System.FilePath ((</>))
+
+parseTimeText :: Text -> Maybe UTCTime
+parseTimeText = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" . T.unpack
 
 quiesceTopic :: IO ()
 quiesceTopic = do
@@ -34,7 +40,7 @@ quiesceTopic = do
         mkStored i ts f t b = case parseTimeText ts of
           Just ts' -> Stamped (ts', i) (Post f Nothing t [] b)
           Nothing -> error $ "bad timestamp: " <> show ts
-        frame i ts f t b = frameStored @Text (mkStored i ts f t b)
+        frame i ts f t b = encodeRow (mkStored i ts f t b)
     -- Write one complete line and one partial line (no trailing newline).
     TIO.writeFile
       path

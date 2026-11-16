@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
 
 -- | A small JSONL file log with locked, file-truth appends.
 --
@@ -26,24 +25,14 @@ module Free.Agent.Bus
   )
 where
 
-import Circuit.Agent (Name, Post, PostId, deliversTo)
-import Circuit.Agent.Framing
-  ( Log (..),
-    PostBody,
-    Stamped,
-    frameStored,
-    stamp,
-    stamped,
-    unframeStored,
-    pattern Stamped,
-  )
+import Circuit.Agent (Name)
+import Circuit.Parser.Framing (RowError (..), Stored, decodeLog, encodeRow)
+import Circuit.Post (Post, PostId, deliversTo)
+import Circuit.Shared (Stamped (..), stamp, stamped)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
-import Data.Either (partitionEithers)
-import Data.List (intercalate)
-import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -60,7 +49,7 @@ import System.IO.Unsafe (unsafePerformIO)
 -- Timestamp and id are assigned from file truth under the exclusive lock.
 -- The id is the current count of complete lines. The append handle is closed
 -- before the stamped receipt is returned; no recipient side files are written.
-postLocal :: (PostBody a) => FilePath -> Post a -> IO (Stamped a)
+postLocal :: FilePath -> Post Text Text -> IO Stored
 postLocal root p = do
   (stored, ()) <- postLocalWith root (\_ _ _ -> ([p], ()))
   case stored of
@@ -72,9 +61,8 @@ postLocal root p = do
 -- The decision receives the strictly decoded prior posts, the next
 -- file-positional id and one timestamp. It returns the posts to append and a
 -- result computed from the same file truth. The posts receive consecutive ids
--- and are appended in one open/close window. This is the atomic transition
--- needed by Conch; there is no public unlocked append.
-postLocalWith :: (PostBody a) => FilePath -> ([Stamped a] -> PostId -> UTCTime -> ([Post a], b)) -> IO ([Stamped a], b)
+-- and are appended in one open/close window. There is no public unlocked append.
+postLocalWith :: FilePath -> ([Stored] -> PostId -> UTCTime -> ([Post Text Text], b)) -> IO ([Stored], b)
 postLocalWith root decide = do
   createDirectoryIfMissing True root
   let path = root </> "log.jsonl"
@@ -82,7 +70,7 @@ postLocalWith root decide = do
     exists <- doesFileExist path
     unless exists $ withFile path AppendMode (\_ -> pure ())
     bytes <- BS.readFile path
-    Log prior <-
+    prior <-
       either
         (ioError . userError . formatDecodeErrors path)
         pure
@@ -92,7 +80,7 @@ postLocalWith root decide = do
         (posts, result) = decide prior nextId ts
         stored = zipWith (\pid p -> Stamped (ts, pid) p) [nextId ..] posts
     withFile path AppendMode $ \h ->
-      TIO.hPutStr h (T.concat (map ((<> "\n") . frameStored) stored))
+      TIO.hPutStr h (T.concat (map ((<> "\n") . encodeRow) stored))
     pure (stored, result)
 
 -- | Acquire the log's exclusive lock without blocking the runtime in flock.
@@ -141,44 +129,31 @@ readFileStrict :: FilePath -> IO Text
 readFileStrict path = withBusFiles (TE.decodeUtf8 <$> BS.readFile path)
 
 -- | Strictly read and decode a stored log. Any malformed nonblank row fails
--- the whole read and names its row and character offset.
-readLogStrict :: (PostBody a) => FilePath -> IO (Log a)
+-- the whole read and names its row, character offset and parser reason.
+readLogStrict :: FilePath -> IO [Stored]
 readLogStrict path = do
   content <- readFileStrict path
   either (ioError . userError . formatDecodeErrors path) pure (decodeLogStrict content)
 
--- | Decode a complete JSONL log. Blank and whitespace-only lines are ignored.
--- Every malformed nonblank row is reported as a 1-based row and 0-based
--- character offset; valid rows retain their file order.
-decodeLogStrict :: (PostBody a) => Text -> Either [(Int, Int)] (Log a)
-decodeLogStrict content =
-  case partitionEithers (map decodeRow rows) of
-    ([], posts) -> Right (Log (catMaybes posts))
-    (errors, _) -> Left errors
-  where
-    rows = zip3 [1 :: Int ..] offsets (T.lines content)
-    offsets = scanl (\offset line -> offset + T.length line + 1) 0 (T.lines content)
+-- | Decode a complete JSONL log through the canonical row codec.
+decodeLogStrict :: Text -> Either RowError [Stored]
+decodeLogStrict = decodeLog
 
-decodeRow :: (PostBody a) => (Int, Int, Text) -> Either (Int, Int) (Maybe (Stamped a))
-decodeRow (row, offset, line)
-  | T.null (T.strip line) = Right Nothing
-  | otherwise = case unframeStored line of
-      Nothing -> Left (row, offset)
-      Just stored -> Right (Just stored)
-
-formatDecodeErrors :: FilePath -> [(Int, Int)] -> String
-formatDecodeErrors path rows =
+formatDecodeErrors :: FilePath -> RowError -> String
+formatDecodeErrors path (RowError row offset reason) =
   "Free.Agent.Bus: "
     <> path
-    <> ": malformed JSONL row(s); decode failed at "
-    <> intercalate ", " (map formatRow rows)
-  where
-    formatRow (row, offset) = "row " <> show row <> ", character offset " <> show offset
+    <> ": malformed JSONL row; decode failed at row "
+    <> show row
+    <> ", character offset "
+    <> show offset
+    <> ": "
+    <> T.unpack reason
 
 -- | Select addressed posts with ids at or after the cursor. The cursor is the
 -- next unprocessed id. This is pure; file waiting and incremental reads belong
 -- to the watcher.
-readSince :: [Stamped a] -> [Name] -> PostId -> [Stamped a]
+readSince :: [Stored] -> [Name] -> PostId -> [Stored]
 readSince posts names since =
   [ stored
   | stored <- posts,

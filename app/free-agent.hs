@@ -15,8 +15,10 @@
 --   free-agent status [ROOT] [--threshold SECS]
 module Main (main) where
 
-import Circuit.Agent (Name, Post (..), mkPost)
-import Circuit.Agent.Framing (Stamped, stamp, stamped)
+import Circuit.Agent (Name)
+import Circuit.Parser.Framing (Stored)
+import Circuit.Post (Post (..), mkPost)
+import Circuit.Shared (stamp, stamped)
 import Circuit.Agent.Mark (Mark (StandDown), markGlyph)
 import Control.Exception (finally)
 import Control.Monad (forM_, unless)
@@ -341,19 +343,19 @@ buildQuiesce (Just n) mp = Just (QuiesceConfig n (fromMaybe "pitboss" mp) 100000
 
 -- | Decorate incoming mail with the ids available for deliberate citation and
 -- its senders. A batch is rendered without dropping or reordering any post.
-decoratePost :: Stamped Text -> Stamped Text
+decoratePost :: Stored -> Stored
 decoratePost stored =
   let p = stamped stored
       pid = T.pack (show (snd (stamp stored)))
    in stored {stamped = p {body = "[post " <> pid <> "] " <> from p <> ": " <> body p}}
 
-renderMail :: [Stamped Text] -> Text
+renderMail :: [Stored] -> Text
 renderMail = T.intercalate "\n\n" . map (body . stamped . decoratePost)
 
-batchBoundary :: [Stamped Text] -> Stamped Text
+batchBoundary :: [Stored] -> Stored
 batchBoundary = last
 
-runSeat :: Int -> Text -> [Name] -> FilePath -> Maybe QuiesceConfig -> ([Stamped Text] -> IO (Turn [Post Text])) -> IO ()
+runSeat :: Int -> Text -> [Name] -> FilePath -> Maybe QuiesceConfig -> ([Stored] -> IO (Turn [Post Text Text])) -> IO ()
 runSeat budget agentName names root mQuiesce handle = do
   -- The launch root is the single source for delivery, cursor, publish, and
   -- heartbeat. Export it absolutely so every child process — the CLI backend
@@ -395,7 +397,7 @@ midLineAddress t = go 0 t
                     then Just (off + T.length pre, nm)
                     else go (off + T.length pre + 1) after
 
-hostTurn :: FilePath -> Host -> [Stamped Text] -> IO (Turn [Post Text])
+hostTurn :: FilePath -> Host -> [Stored] -> IO (Turn [Post Text Text])
 hostTurn root host storedBatch = do
   notes <- takeStrandNotes root (hostName host)
   deliverTo

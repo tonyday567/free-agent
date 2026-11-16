@@ -36,8 +36,10 @@ module Free.Agent.Bus.File
   )
 where
 
-import Circuit.Agent (Name, PostId)
-import Circuit.Agent.Framing (Log (..), Stamped, stamp)
+import Circuit.Agent (Name)
+import Circuit.Parser.Framing (Stored)
+import Circuit.Post (Post, PostId)
+import Circuit.Shared (stamp, stamped)
 import Circuit.Agent.Mark (Mark (Timeout), markGlyph)
 import Circuit.Machine (Body (..), Moore)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
@@ -185,7 +187,7 @@ latestPostId root = do
   if not logExists
     then pure 0
     else do
-      Log (posts :: [Stamped Text]) <- readLogStrict logPath
+      posts <- readLogStrict logPath
       pure $ case posts of
         [] -> 0
         _ -> snd (stamp (last posts)) + 1
@@ -361,7 +363,7 @@ tailLog ::
   -- | Optional quiescence config and verdict action.
   Maybe (QuiesceConfig, Decision -> IO ()) ->
   -- | Callback for one drained batch; return 'Halt' to stop.
-  ([Stamped Text] -> IO Flow) ->
+  ([Stored] -> IO Flow) ->
   IO ()
 tailLog path names startCursor mQuiesce cb = do
   exists <- doesFileExist path
@@ -434,7 +436,7 @@ tailLog path names startCursor mQuiesce cb = do
       posts <-
         either
           (ioError . userError . malformedSuffix off)
-          (pure . unLog)
+          pure
           (decodeLogStrict (T.unlines ls))
       (nDeliv, halted) <- deliver (readSince posts names since)
       pure (off', halted, length ls, nDeliv)

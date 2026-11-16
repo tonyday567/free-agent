@@ -64,10 +64,14 @@ module Free.Agent.Bus.Cli
 where
 
 import Bus.Flow (SliceMode (..), slicePosts)
-import Circuit.Agent (Name, Post (..), PostId, deliversTo, mkPost, sortNub)
-import Circuit.Agent.Framing (Log (..), Stamped, frameStored, parsePost, stamp, stamped)
+import Circuit.Agent (Name)
+import Circuit.Parser.Framing (Stored, encodeRow)
+import Circuit.Post (Post (..), PostId, deliversTo, mkPost, sortNub)
+import Circuit.Shared (stamp, stamped)
 import Control.Exception (IOException, SomeException, displayException, try)
 import Control.Monad (forM_, unless, when)
+import Data.Aeson (eitherDecodeStrict, withObject, (.!=), (.:), (.:?))
+import Data.Aeson.Types (parseEither)
 import Data.Char (isAlphaNum, isAsciiUpper, isDigit)
 import Data.Foldable (traverse_)
 import Data.List (isPrefixOf, sort, sortOn)
@@ -77,6 +81,7 @@ import Data.Ord (Down (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
@@ -182,7 +187,21 @@ channelOpt =
 -- tool's statement, so it wins over whatever the JSON said; with neither flag
 -- the post is exactly what the caller wrote, which is the compatibility rule
 -- the JSON path relies on.
-applyPostFlags :: Maybe PostId -> Maybe Text -> Post a -> Post a
+-- | Parse the un-stamped JSON accepted by @bus post@ on stdin.
+parsePostText :: Text -> Either String (Post Text Text)
+parsePostText line =
+  eitherDecodeStrict (TE.encodeUtf8 line)
+    >>= parseEither
+      ( withObject "Post" $ \o ->
+          Post
+            <$> o .: "from"
+            <*> o .:? "channel"
+            <*> o .: "to"
+            <*> o .:? "thread" .!= []
+            <*> o .: "body"
+      )
+
+applyPostFlags :: Maybe PostId -> Maybe Text -> Post Text a -> Post Text a
 applyPostFlags mthr mchan p =
   p
     { thread = maybe (thread p) pure mthr,
@@ -396,7 +415,7 @@ resolveRoot root = do
     _ -> root
 
 -- | Post to a root, refusing loudly when there is no bus there.
-postChecked :: FilePath -> Post Text -> IO (Stamped Text)
+postChecked :: FilePath -> Post Text Text -> IO (Stored)
 postChecked root p = do
   requireBus root
   postLocal root p
@@ -464,11 +483,11 @@ runPost root mfrom mto mbody mthr mchan = do
         exitFailure
       Nothing -> do
         line <- TIO.getLine
-        case parsePost line of
-          Nothing -> do
+        case parsePostText line of
+          Left _ -> do
             TIO.putStrLn "🔴 invalid post JSON"
             exitFailure
-          Just p -> pure p
+          Right p -> pure p
   forM_ mchan $ \c ->
     when (T.null c) $ do
       TIO.hPutStrLn stderr "🔴 post: empty channel name — omit --channel to address by --to"
@@ -481,7 +500,7 @@ runPost root mfrom mto mbody mthr mchan = do
         exitFailure
       Right () -> pure ()
   stored <- postChecked root' (applyPostFlags mthr mchan built)
-  TIO.putStrLn (frameStored stored)
+  TIO.putStrLn (encodeRow stored)
 
 -- ---------------------------------------------------------------------------
 -- watch
@@ -499,15 +518,15 @@ runWatch root names = do
         [] -> 0
         _ -> highestId posts + 1
   tailLog path names start Nothing $ \batch -> do
-    traverse_ (TIO.putStrLn . frameStored) batch
+    traverse_ (TIO.putStrLn . encodeRow) batch
     pure Continue
 
 -- | Strictly decode the complete log. A malformed row is an error, never an
 -- empty view; the diagnostic carries its 1-based row and 0-based character
 -- offset.
-loadPosts :: FilePath -> IO [Stamped Text]
+loadPosts :: FilePath -> IO [Stored]
 loadPosts path = do
-  Log posts <- readLogStrict path
+  posts <- readLogStrict path
   pure posts
 
 -- | Read a thread (all posts sharing a root id with the given post), or
@@ -550,7 +569,7 @@ runInbox root name markRead depth = do
     writeCursor root' name (highestId shown + 1)
 
 -- | The highest id in a non-empty set of stored posts.
-highestId :: [Stamped Text] -> PostId
+highestId :: [Stored] -> PostId
 highestId = maximum . map (snd . stamp)
 
 -- | Record NAME as the human attached to this root: write the per-root
@@ -650,7 +669,7 @@ runReady root depth = do
 
 -- | Open TASK offers that have no claim, owner DONE, or unresolved blocker.
 -- A directed TASK is assigned at creation and is therefore not an open offer.
-readyPosts :: [Stamped Text] -> [Stamped Text]
+readyPosts :: [Stored] -> [Stored]
 readyPosts posts = filter isReady [task | task <- posts, isRootTask task, null (to (stamped task))]
   where
     index = componentIndex posts
@@ -686,7 +705,7 @@ readyPosts posts = filter isReady [task | task <- posts, isRootTask task, null (
 
 -- | Diagnose CLAIM and DONE posts that cannot settle any incomplete public
 -- offer because they lie outside every such offer's thread component.
-readyWarnings :: [Stamped Text] -> [Text]
+readyWarnings :: [Stored] -> [Text]
 readyWarnings posts =
   [ warning stray offer
   | stray <- posts,
@@ -745,7 +764,7 @@ idDistance a b
 
 -- | Choose the closest-looking offer without changing offer or component
 -- semantics: an explicit id wins, then shared body tokens, then id distance.
-resemblingOffer :: Stamped Text -> [Stamped Text] -> Maybe (Stamped Text)
+resemblingOffer :: Stored -> [Stored] -> Maybe (Stored)
 resemblingOffer stray offers =
   listToMaybe
     [ offer
@@ -770,7 +789,7 @@ resemblingOffer stray offers =
 -- | The thread component holding a post, looked up by post id from a
 -- partition built once by 'componentIndex'. The fallback to @[task]@ keeps
 -- the prior behaviour when a post belongs to no slice.
-componentOf :: Map.Map PostId [Stamped Text] -> Stamped Text -> [Stamped Text]
+componentOf :: Map.Map PostId [Stored] -> Stored -> [Stored]
 componentOf index task =
   case Map.lookup (snd (stamp task)) index of
     Just vs -> sortOn (snd . stamp) vs
@@ -780,22 +799,22 @@ componentOf index task =
 -- groups every post by its thread root; flattening it into a @Map@ turns
 -- each READY component lookup from a whole-log re-slice into a single
 -- logarithmic lookup, which is what keeps @bus ready@ linear on long logs.
-componentIndex :: [Stamped Text] -> Map.Map PostId [Stamped Text]
+componentIndex :: [Stored] -> Map.Map PostId [Stored]
 componentIndex posts =
   Map.fromList [(snd (stamp p), vs) | (_, vs) <- slicePosts ByThread posts, p <- vs]
 
-taskOwner :: Stamped Text -> [Stamped Text] -> Maybe Name
+taskOwner :: Stored -> [Stored] -> Maybe Name
 taskOwner task component =
   case to (stamped task) of
     [assignee] -> Just assignee
     [] -> listToMaybe [from (stamped reply) | reply <- component, hasKind "CLAIM" reply]
     _ -> Nothing
 
-taskComplete :: Maybe Name -> [Stamped Text] -> Bool
+taskComplete :: Maybe Name -> [Stored] -> Bool
 taskComplete owner component =
   maybe False (\name -> any (\reply -> hasKind "DONE" reply && from (stamped reply) == name) component) owner
 
-isRootTask :: Stamped Text -> Bool
+isRootTask :: Stored -> Bool
 isRootTask stored = null (thread (stamped stored)) && hasKind "TASK" stored
 
 -- | The post's kind is its first meaningful word. A leading @@@name:@@@
@@ -803,7 +822,7 @@ isRootTask stored = null (thread (stamped stored)) && hasKind "TASK" stored
 -- @\@fox: CLAIM · task 2@, and the kind is still the second word. Counted as
 -- a kind, the addressed claim would be invisible to 'taskOwner' and to the
 -- READY lint, which is the silence this strips away.
-postKind :: Stamped Text -> Text
+postKind :: Stored -> Text
 postKind stored = case T.words (dropAddress (body (stamped stored))) of
   (w : _) -> w
   [] -> ""
@@ -813,7 +832,7 @@ postKind stored = case T.words (dropAddress (body (stamped stored))) of
       _ -> t
     isAddress w = "@" `T.isPrefixOf` w && ":" `T.isSuffixOf` w && T.length w > 2
 
-hasKind :: Text -> Stamped Text -> Bool
+hasKind :: Text -> Stored -> Bool
 hasKind kind stored = postKind stored == kind
 
 parseBlockLink :: Text -> Maybe (PostId, PostId)
@@ -826,7 +845,7 @@ parseBlockLink text = case T.words text of
 -- schema's @thread@ field. Roots carry @thread = []@, replies cite their
 -- ancestors, so the root of a post is the least ancestor present in the
 -- log — the same walk Bus.Flow uses to slice by thread.
-runThreadView :: [Stamped Text] -> PostId -> Depth -> IO ()
+runThreadView :: [Stored] -> PostId -> Depth -> IO ()
 runThreadView posts tid depth =
   case [vs | (_, vs) <- slicePosts ByThread posts, any ((== tid) . snd . stamp) vs] of
     (vs : _) -> traverse_ (TIO.putStrLn . renderStored depth) (sortOn (snd . stamp) vs)
@@ -856,7 +875,7 @@ runOrg root mThread = do
           TIO.putStrLn ("🔴 no post with id " <> T.pack (show tid))
           exitFailure
 
-renderOrgThread :: PostId -> [Stamped Text] -> Text
+renderOrgThread :: PostId -> [Stored] -> Text
 renderOrgThread tid posts =
   heading
     <> "\n"
@@ -875,7 +894,7 @@ renderOrgThread tid posts =
         (Just c : _) -> Just c
         _ -> Nothing
 
-renderOrgPost :: Stamped Text -> Text
+renderOrgPost :: Stored -> Text
 renderOrgPost stored =
   "** " <> from p <> " [#" <> T.pack (show (snd (stamp stored))) <> "]" <> label <> "\n" <> rest
   where
@@ -916,7 +935,7 @@ isPostType w =
 
 -- | Render a stored post at a cascade depth: the route, the line, the
 -- verbatim frame.
-renderStored :: Depth -> Stamped Text -> Text
+renderStored :: Depth -> Stored -> Text
 renderStored = renderStoredWith (const "")
 
 -- | 'renderStored' with a per-name label appended to the names of the head
@@ -925,11 +944,11 @@ renderStored = renderStoredWith (const "")
 --
 -- The label annotates names the row already carries; it adds, removes and
 -- reorders nothing, so a view's rows are the same rows with or without it.
-renderStoredWith :: (Name -> Text) -> Depth -> Stamped Text -> Text
+renderStoredWith :: (Name -> Text) -> Depth -> Stored -> Text
 renderStoredWith label (Depth d) stored
   | d <= 0 = headLine
   | d == 1 = headLine <> " " <> excerpt
-  | otherwise = frameStored stored
+  | otherwise = encodeRow stored
   where
     p = stamped stored
     headLine = pid <> " " <> mark (from p) <> "→" <> route
@@ -1011,11 +1030,11 @@ data StatusRow = StatusRow
     statusUnread :: Int,
     statusCursor :: Maybe PostId,
     statusHeartbeat :: Maybe Heartbeat,
-    statusLast :: Maybe (Stamped Text)
+    statusLast :: Maybe (Stored)
   }
 
 data StatusSnapshot = StatusSnapshot
-  { snapshotLast :: Maybe (Stamped Text),
+  { snapshotLast :: Maybe (Stored),
     snapshotRows :: [StatusRow]
   }
 
@@ -1084,7 +1103,7 @@ renderStatus (Depth d) org snapshot =
 presentCircles :: [StatusRow] -> [SeatCircle]
 presentCircles rows = [c | c <- [minBound .. maxBound], any ((== c) . statusCircle) rows]
 
-statusHeader :: Maybe (Stamped Text) -> [StatusRow] -> Text
+statusHeader :: Maybe (Stored) -> [StatusRow] -> Text
 statusHeader mlast rows =
   T.intercalate " " (counts <> ["| " <> lastText])
   where
@@ -1122,7 +1141,7 @@ statusEvidence :: StatusRow -> [Text]
 statusEvidence row =
   maybe [] heartbeatEvidence (statusHeartbeat row)
     <> ["    cursor: " <> maybe "—" (T.pack . show) (statusCursor row)]
-    <> maybe [] (\s -> ["    log: " <> frameStored s]) (statusLast row)
+    <> maybe [] (\s -> ["    log: " <> encodeRow s]) (statusLast row)
   where
     heartbeatEvidence (st, ts, mpid) =
       [ "    hb: "

@@ -5,8 +5,9 @@ module Free.Agent.Diagram
   )
 where
 
-import Circuit.Agent (Post (..))
 import Circuit.Poly.StringDiagram (SDiagram (..))
+import Circuit.Post (Post (..))
+import Data.Text (Text)
 import Data.List (delete, elemIndex, mapAccumL)
 import Data.Text qualified as T
 
@@ -24,7 +25,7 @@ import Data.Text qualified as T
 -- layer — permute the parent wires to the back (adjacent 'SSwap's), merge,
 -- box, fork.  A dangling thread edge (parent not in the log) becomes a
 -- free input wire, present from the left boundary.
-meetingSkeleton :: [Post a] -> SDiagram
+meetingSkeleton :: [Post Text a] -> SDiagram
 meetingSkeleton [] = SWire
 meetingSkeleton ps = foldr1 SThenD (snd (mapAccumL step dangling [0 .. length ps - 1]))
   where

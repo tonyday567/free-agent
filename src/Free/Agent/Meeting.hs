@@ -34,8 +34,9 @@ module Free.Agent.Meeting
   )
 where
 
-import Circuit.Agent (Name, Post (..), PostId, coneByIndex)
-import Circuit.Agent.Query (synthesisPosts)
+import Circuit.Agent (Name)
+import Circuit.Post (Post (..), PostId, coneByIndex, deliversTo, mkPost, sortNub)
+import Free.Agent.Cli (synthesisPosts)
 import Circuit.Machine (Body (Body), Moore)
 import Circuit.Tensor (Const (..), unConst)
 import Data.List (inits, intersect)
@@ -53,11 +54,11 @@ import Data.Text qualified as T
 -- (post-input timing), so there is no separate observation certificate to
 -- keep in agreement with the step.
 data AgentBox where
-  AgentBox :: s -> Moore (,) s (->) ([Post Text], [PostId]) [Post Text] -> AgentBox
+  AgentBox :: s -> Moore (,) s (->) ([Post Text Text], [PostId]) [Post Text Text] -> AgentBox
 
 -- | One batch step: commit the input and its ids, emit the answer
 -- (post-input timing — output is read from the state after consuming the input).
-runAgentBox :: AgentBox -> [Post Text] -> [PostId] -> ([Post Text], AgentBox)
+runAgentBox :: AgentBox -> [Post Text Text] -> [PostId] -> ([Post Text Text], AgentBox)
 runAgentBox (AgentBox s (Body j k o)) ins ids =
   let s' = k (s, (ins, ids))
    in (unConst (o s'), AgentBox s' (Body j k o))
@@ -65,12 +66,12 @@ runAgentBox (AgentBox s (Body j k o)) ins ids =
 -- | Lift an agent that ignores ids into one that accepts the boxed
 -- @(posts, ids)@ input.  This is the minimal adapter for existing agents
 -- that do not need provenance.
-withIds :: Moore (,) s (->) [Post Text] [Post Text] -> Moore (,) s (->) ([Post Text], [PostId]) [Post Text]
+withIds :: Moore (,) s (->) [Post Text Text] [Post Text Text] -> Moore (,) s (->) ([Post Text Text], [PostId]) [Post Text Text]
 withIds (Body j k o) = Body (\(ins, _ids) -> j ins) (\(s, (ins, _ids)) -> k (s, ins)) o
 
 -- | The quoter's output at a state: one honest synthesis post per non-empty
 -- batch, quoting what it saw.
-quoterOut :: Name -> Text -> [Post Text] -> [PostId] -> [Post Text]
+quoterOut :: Name -> Text -> [Post Text Text] -> [PostId] -> [Post Text Text]
 quoterOut who tag batch batchIds = case batch of
   [] -> []
   _ -> synthesisPosts who batch batchIds (tag <> " saw " <> T.pack (show (map from batch)))
@@ -82,7 +83,7 @@ quoterOut who tag batch batchIds = case batch of
 -- Output depends only on the state (the emit leg reads the recorded
 -- batch): the state carries the last batch and its ids seen, and the
 -- emit answers it.
-quoter :: Name -> Text -> Moore (,) ([Post Text], [PostId], [Post Text], [PostId]) (->) ([Post Text], [PostId]) [Post Text]
+quoter :: Name -> Text -> Moore (,) ([Post Text Text], [PostId], [Post Text Text], [PostId]) (->) ([Post Text Text], [PostId]) [Post Text Text]
 quoter who tag =
   Body
     (\(ins, insIds) -> (reverse ins, reverse insIds, ins, insIds))
@@ -93,13 +94,13 @@ quoter who tag =
 
 -- | Run @n@ rounds over a roster.  Every box sees the previous round's
 -- concatenated outputs (round 1 sees the seed).  Returns the rounds.
-meet :: Int -> [AgentBox] -> [Post Text] -> [[Post Text]]
+meet :: Int -> [AgentBox] -> [Post Text Text] -> [[Post Text Text]]
 meet n boxes seed = map (map snd) rounds
   where
     (rounds, _) = meetWithIds n boxes (zip [0 ..] seed) (fromIntegral (length seed))
 
 -- | Internal driver that threads positional ids through the rounds.
-meetWithIds :: Int -> [AgentBox] -> [(PostId, Post Text)] -> PostId -> ([[(PostId, Post Text)]], [AgentBox])
+meetWithIds :: Int -> [AgentBox] -> [(PostId, Post Text Text)] -> PostId -> ([[(PostId, Post Text Text)]], [AgentBox])
 meetWithIds 0 boxes _ _ = ([], boxes)
 meetWithIds k boxes ins nextId =
   let (outs, boxes') = runRound boxes (map snd ins) (map fst ins)
@@ -111,7 +112,7 @@ meetWithIds k boxes ins nextId =
 
 -- | One round: every box sees the same batch; outputs concatenate in
 -- roster order.
-runRound :: [AgentBox] -> [Post Text] -> [PostId] -> ([Post Text], [AgentBox])
+runRound :: [AgentBox] -> [Post Text Text] -> [PostId] -> ([Post Text Text], [AgentBox])
 runRound boxes ins ids =
   let results = map (\b -> runAgentBox b ins ids) boxes
    in (concatMap fst results, map snd results)
@@ -120,12 +121,12 @@ runRound boxes ins ids =
 -- Ids are assigned positionally by the driver, so 'thread' fields in the
 -- returned posts are valid ids against this log ('indexToIdMap' reproduces
 -- the same assignment).
-meetLog :: Int -> [AgentBox] -> [Post Text] -> [Post Text]
+meetLog :: Int -> [AgentBox] -> [Post Text Text] -> [Post Text Text]
 meetLog n boxes seed = seed ++ concat (meet n boxes seed)
 
 -- | The posts of a log whose ancestry cone avoids the given names — the
 -- subtrees a swap of those names cannot touch.
-unchanged :: [Name] -> [Post Text] -> [Post Text]
+unchanged :: [Name] -> [Post Text Text] -> [Post Text Text]
 unchanged banned posts =
   [ p
   | (prior, p) <- zip (inits posts) posts,

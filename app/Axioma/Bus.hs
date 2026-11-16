@@ -8,8 +8,10 @@ module Axioma.Bus
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Post (..), PostId, PureAgent, cellToAgent, deliversTo, loop, mkChannelPost, tape, watch)
-import Circuit.Agent.Framing (Log (..), Stamped, parseTimeText, stamp, stamped, unframeStored, pattern Stamped)
+import Circuit.Agent (PureAgent, cellToAgent, loop, tape)
+import Circuit.Parser.Framing (RowError (..), Stored, decodeRow)
+import Circuit.Post (Post (..), PostId, deliversTo, mkChannelPost, watch)
+import Circuit.Shared (Stamped (..), stamp, stamped)
 import Circuit.Agent.Mark (Mark (..), controlMark, isHalt, markGlyph)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, bracket, evaluate, try)
@@ -19,7 +21,7 @@ import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time (UTCTime, addUTCTime, defaultTimeLocale, getCurrentTime, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (decodeLogStrict, postLocal, readFileStrict)
@@ -38,14 +40,17 @@ import System.Posix.Process (getProcessID)
 import System.Process (CreateProcess (..), createProcess, getPid, proc, readProcessWithExitCode, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
-ioTurn :: IO [Post Text] -> IO (Turn [Post Text])
+parseTimeText :: Text -> Maybe UTCTime
+parseTimeText = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" . T.unpack
+
+ioTurn :: IO [Post Text Text] -> IO (Turn [Post Text Text])
 ioTurn action =
   deliverTo
     (\_ _ -> pure Invocation {runInvocation = TurnResponse <$> action, cancelInvocation = pure False})
     ()
     ""
 
-runTestAgent :: Text -> [Text] -> FilePath -> Maybe QuiesceConfig -> ([Stamped Text] -> IO (Turn [Post Text])) -> IO ()
+runTestAgent :: Text -> [Text] -> FilePath -> Maybe QuiesceConfig -> ([Stored] -> IO (Turn [Post Text Text])) -> IO ()
 runTestAgent agentName names root mQuiesce handle = do
   grant <- newDeliveryGrant 100
   runAgentLoop agentName names root mQuiesce grant handle
@@ -80,16 +85,17 @@ busTopic = do
   putStrLn "bus malformed-row decode"
   do
     let line0 = "{\"id\":0,\"ts\":\"2026-11-12T05:00:00\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"hi\"}\n"
-        bad = "{\"id\":1,\"ts\":\"BROKEN\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"x\"}\n"
+        bad = "{\"id\":1,\"ts\":\"2026-08-07T01:01:14.369092+00:00\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"x\"}\n"
     assert "a clean log decodes as one post" $
-      case decodeLogStrict @Text line0 of
-        Right (Log [_]) -> True
+      case decodeLogStrict line0 of
+        Right [_] -> True
         _ -> False
-    assert "a malformed row is named by 1-based row and 0-based offset" $
-      decodeLogStrict @Text (line0 <> bad) == Left [(2, T.length line0)]
+    assert "a malformed row carries its 1-based row, 0-based offset and parser reason" $
+      decodeLogStrict (line0 <> bad)
+        == Left (RowError 2 (T.length line0) "ts: expected %Y-%m-%dT%H:%M:%S UTC timestamp")
     assert "blank and whitespace-only lines are tolerated, not flagged" $
-      case decodeLogStrict @Text (line0 <> "\n\n   \n" <> line0) of
-        Right (Log posts) -> length posts == 2
+      case decodeLogStrict (line0 <> "\n\n   \n" <> line0) of
+        Right posts -> length posts == 2
         _ -> False
     -- The CLI refuses loudly: a malformed row exits non-zero rather than
     -- masquerading as an empty inbox (the B12 failure the probe showed).
@@ -491,7 +497,7 @@ busTopic = do
     _ <- plant
     takeMVar done
     content <- TIO.readFile path
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+    let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "m1a"]
     assert "M1a runAgentLoop does not infer ancestry for an explicit post act" $
       case replies of
@@ -541,7 +547,7 @@ busTopic = do
     cursor <- readCursor root "batch"
     transaction <- readTransaction root "batch"
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+    let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
         publications = [stamped s | s <- parsed, from (stamped s) == "batch"]
     assert "backlog drains into one turn and live singleton delivery is a batch of one" $
       batches == [[0, 1], [2]]
@@ -669,7 +675,7 @@ busTopic = do
     _ <- postLocal root (mkPost "human" ["m1r"] (markGlyph Escalate))
     takeMVar done
     content <- TIO.readFile path
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+    let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
         relays =
           [ stamped s
           | s <- parsed,
@@ -689,7 +695,7 @@ busTopic = do
   -- (circuits-agent) and through the operational 'runAgentLoop'
   -- (free-agent). Both handlers deliberately cite the parent's id; the
   -- operational runner preserves that explicit ancestry without inferring
-  -- another cause. The final logs must be the SAME [Post Text] once stamps
+  -- another cause. The final logs must be the SAME [Post Text Text] once stamps
   -- are stripped — no modulo left in the comparison.
   --
   -- Counterexamples this pins: a runner that drops or rewrites deliberate
@@ -704,7 +710,7 @@ busTopic = do
         -- (post-step observation), so the parent's log index is
         -- length hist - 1.  Halt marks are control: silence, and the
         -- loop quiesces.
-        q7Seat :: [Post Text] -> [Post Text]
+        q7Seat :: [Post Text Text] -> [Post Text Text]
         q7Seat hist =
           let p = case hist of
                 (x : _) -> x
@@ -714,7 +720,7 @@ busTopic = do
                 Just m
                   | isHalt m -> []
                 _ -> [(mkPost seatName [from p] ("ack: " <> body p)) {thread = [parentId]}]
-        agent = cellToAgent (tape q7Seat) :: PureAgent [Post Text] (Post Text) [Post Text]
+        agent = cellToAgent (tape q7Seat) :: PureAgent [Post Text Text] (Post Text Text) [Post Text Text]
         a = mkPost "human" [seatName] "one"
         b = mkPost "human" [seatName] "two"
         c = mkPost "human" [seatName] "three"
@@ -767,7 +773,7 @@ busTopic = do
     putMVar planted ()
     takeMVar done
     content <- readFileStrict logPath
-    let fileLog = map stamped (mapMaybe (unframeStored @Text) (T.lines content))
+    let fileLog = map stamped (mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content))
     assert "Q7 the run produced the full script plus replies (no silent pair)" $
       length fileLog == 7 && length pureTimeline == 7
     assert "Q7 the seam: loop and runAgentLoop give the same final log modulo stamps" $
@@ -792,7 +798,7 @@ busTopic = do
     _ <- postLocal root (mkPost "human" ["quiet"] (markGlyph Landed))
     takeMVar done
     content <- TIO.readFile (root </> "log.jsonl")
-    let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+    let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "quiet"]
     assert "LOCAL response text publishes no reply act" $ replies == []
     let acts = replyAct "quiet" "@human: acknowledged"
@@ -866,7 +872,7 @@ busTopic = do
     -- channel addresses it (an empty --to still delivers to a subscriber).
     runBusCommand (PostCommand root (Just "seat") [] (Just "reply") (Just 0) (Just "ops"))
     content <- TIO.readFile (root </> "log.jsonl")
-    let landed = map stamped (mapMaybe (unframeStored @Text) (T.lines content))
+    let landed = map stamped (mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content))
         replyPost = last landed
     assert "post --thread stores one ancestry edge to the named post" $
       thread replyPost == [0]

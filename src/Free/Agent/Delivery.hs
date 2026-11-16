@@ -29,8 +29,10 @@ module Free.Agent.Delivery
   )
 where
 
-import Circuit.Agent (Name, Post (..))
-import Circuit.Agent.Framing (PostBody, Stamped, stamp)
+import Circuit.Agent (Name)
+import Circuit.Parser.Framing (Stored)
+import Circuit.Post (Post (..))
+import Circuit.Shared (stamp)
 import Control.Applicative ((<|>))
 import Control.Concurrent
   ( MVar,
@@ -192,10 +194,10 @@ useDeliveryGrant (DeliveryGrant budget) =
 -- unit. The post receipt is returned even when delivery is refused.
 directPostTo ::
   DeliveryGrant ->
-  (Stamped Text -> IO (Turn a)) ->
+  (Stored -> IO (Turn a)) ->
   FilePath ->
-  Post Text ->
-  IO (Stamped Text, Either DeliveryRefusal (Turn a))
+  Post Text Text ->
+  IO (Stored, Either DeliveryRefusal (Turn a))
 directPostTo grant deliver root post = do
   stored <- postTo root post
   granted <- useDeliveryGrant grant
@@ -213,14 +215,14 @@ directPostTo grant deliver root post = do
 -- suffix outside a fenced quotation is published; the prefix is not bus
 -- content. Inline mentions and Markdown blockquote addresses are not explicit
 -- addresses.
-replyAct :: Name -> Text -> [Post Text]
+replyAct :: Name -> Text -> [Post Text Text]
 replyAct agent response =
   case parseAddress response <|> parseLaterLineAddress agent response of
     Nothing -> []
     Just (recipient, replyBody) -> pure (Post agent Nothing [recipient] [] replyBody)
 
 -- | Publish an intentional response after making a misplaced address visible.
-replyActIO :: Name -> Text -> IO [Post Text]
+replyActIO :: Name -> Text -> IO [Post Text Text]
 replyActIO agent response = do
   traverse_ (TIO.hPutStrLn stderr) (replyWarning agent response)
   pure (replyAct agent response)
@@ -295,7 +297,7 @@ strandNotePath root name = root </> (".strand-" <> T.unpack name)
 -- line's addressed suffix and the text above the address stayed local. It is
 -- a harness fact for the seat's next delivery, never formatting blame; a
 -- prefix-first address, plain prose, and local responses leave no note.
-strandedNote :: Name -> Stamped Text -> Text -> Maybe Text
+strandedNote :: Name -> Stored -> Text -> Maybe Text
 strandedNote agent stored response =
   case parseAddress response of
     Just _ -> Nothing
@@ -311,7 +313,7 @@ strandedNote agent stored response =
 
 -- | Record a stranded reply for the seat's next delivery; silence otherwise.
 -- A failed write is bookkeeping loss, not turn failure.
-noteStrand :: FilePath -> Name -> Stamped Text -> Text -> IO ()
+noteStrand :: FilePath -> Name -> Stored -> Text -> IO ()
 noteStrand root agent stored response =
   catch
     ( traverse_
@@ -341,5 +343,5 @@ strandBlock [] = ""
 strandBlock notes = "\n\nHarness notes:\n" <> T.intercalate "\n" notes
 
 -- | Append a post to the public tape. This operation never invokes an agent.
-postTo :: (PostBody a) => FilePath -> Post a -> IO (Stamped a)
+postTo :: FilePath -> Post Text Text -> IO Stored
 postTo = postLocal

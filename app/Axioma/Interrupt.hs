@@ -27,8 +27,8 @@ module Axioma.Interrupt
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Post (..), body)
-import Circuit.Agent.Framing (stamped)
+import Circuit.Post (Post (..), body)
+import Circuit.Shared (stamped)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, fromException, throwIO, try)
@@ -211,7 +211,7 @@ oneTurnClassified root cli = do
   pure (result, length seen, used)
 
 -- | A handler whose turn was stopped at the host budget.
-ceilingTurn :: String -> Turn [Post Text]
+ceilingTurn :: String -> Turn [Post Text Text]
 ceilingTurn why =
   Turn
     { awaitTurn = throwIO (TurnCeiling (T.pack why)),
@@ -226,7 +226,7 @@ isCeiling = either (isJust . (fromException :: SomeException -> Maybe TurnCeilin
 -- Z2 helpers
 -- ---------------------------------------------------------------------------
 
-settledTurn :: [Post Text] -> Turn [Post Text]
+settledTurn :: [Post Text Text] -> Turn [Post Text Text]
 settledTurn ps =
   Turn
     { awaitTurn = pure (TurnResponse ps),
@@ -234,7 +234,7 @@ settledTurn ps =
       turnMetrics = pure (TurnMetrics False False 0)
     }
 
-failingTurn :: String -> Turn [Post Text]
+failingTurn :: String -> Turn [Post Text Text]
 failingTurn why =
   Turn
     { awaitTurn = ioError (userError why),
@@ -242,7 +242,7 @@ failingTurn why =
       turnMetrics = pure (TurnMetrics False False 0)
     }
 
-cancelledTurn :: Turn [Post Text]
+cancelledTurn :: Turn [Post Text Text]
 cancelledTurn =
   Turn
     { awaitTurn = pure TurnCancelled,

@@ -12,8 +12,10 @@ module Free.Agent.Agent.Runner
   )
 where
 
-import Circuit.Agent (Name, Post (..), PostId, mkPost)
-import Circuit.Agent.Framing (Stamped, stamp, stamped, unframeStored)
+import Circuit.Agent (Name)
+import Circuit.Parser.Framing (Stored, decodeRow)
+import Circuit.Post (Post (..), PostId, mkPost)
+import Circuit.Shared (stamp, stamped)
 import Circuit.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph)
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, displayException, fromException, try)
@@ -93,7 +95,7 @@ batchBackoffMicros n = 1_000_000 * n
 --
 -- The caller supplies the subscription names, the bus root, an optional
 -- quiescence config, a finite delivery grant, and a handler that turns one
--- drained batch of incoming 'Stamped Text' into a live turn of explicit post
+-- drained batch of incoming 'Stored' into a live turn of explicit post
 -- acts. The handler is responsible for decoration, scrubbing, response
 -- interpretation, and any deliberate ancestry on those acts.
 --
@@ -143,7 +145,7 @@ runAgentLoop ::
   -- | Finite authority to invoke this seat.
   DeliveryGrant ->
   -- | Handler: incoming mail batch -> turn of explicit post acts.
-  ([Stamped Text] -> IO (Turn [Post Text])) ->
+  ([Stored] -> IO (Turn [Post Text Text])) ->
   IO ()
 runAgentLoop agentName names root mQuiesce grant handleBatch = do
   hSetBuffering stdout LineBuffering
@@ -433,7 +435,7 @@ batchEvidence root agentName ids = do
           let hits =
                 [ snd (stamp s)
                   | l <- ls,
-                    Just s <- [unframeStored @Text l],
+                    Right s <- [decodeRow l],
                     let p = stamped s,
                     from p == agentName,
                     not (null (to p)),

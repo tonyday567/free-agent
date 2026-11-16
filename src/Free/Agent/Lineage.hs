@@ -25,22 +25,22 @@ module Free.Agent.Lineage
   )
 where
 
-import Circuit.Agent (Post (..))
+import Circuit.Post (Post (..), PostId)
 import Data.List (genericIndex)
 
 -- | A lineage square: @dPost@ is the output (the square's target);
 -- @dParents@ are the resolved vertical sources, in 'thread' order.
 -- Dangling ids are an error (the log is expected to be well-formed).
-data Lineage a = Lineage
-  { dPost :: Post a,
-    dParents :: [Post a]
+data Lineage n a = Lineage
+  { dPost :: Post n a,
+    dParents :: [Post n a]
   }
   deriving (Show, Eq)
 
 -- | The square of a post against the posts prior to it (oldest first).
 -- Each 'thread' edge is a 'PostId' interpreted as a positional index into
--- @prior@, exactly as in 'Circuit.Agent.branches'.
-lineage :: [Post a] -> Post a -> Lineage a
+-- @prior@, exactly as in 'Circuit.Post.branches'.
+lineage :: [Post n a] -> Post n a -> Lineage n a
 lineage prior p =
   Lineage
     p
@@ -50,7 +50,7 @@ lineage prior p =
 
 -- | A square is valid when every vertical edge resolves to a
 -- strictly-earlier post — no dangling ancestry.
-valid :: [Post a] -> Post a -> Bool
+valid :: [Post n a] -> Post n a -> Bool
 valid prior p = all (< fromIntegral (length prior)) (thread p)
 
 -- | The posts reachable from the last post by chasing lineage back
@@ -59,7 +59,7 @@ valid prior p = all (< fromIntegral (length prior)) (thread p)
 --
 -- Posts are compared by value; duplicate posts collapse (bag at the wire,
 -- but the chase is a set walk).
-chaseLog :: (Eq a) => [Post a] -> [Post a]
+chaseLog :: (Eq n, Eq a) => [Post n a] -> [Post n a]
 chaseLog [] = []
 chaseLog posts = go [] [last posts]
   where

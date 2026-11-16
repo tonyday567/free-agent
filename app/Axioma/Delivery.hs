@@ -8,8 +8,9 @@ module Axioma.Delivery
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Agent (Post (..), replyTo)
-import Circuit.Agent.Framing (stamp, stamped, unframeStored)
+import Circuit.Parser.Framing (decodeRow)
+import Circuit.Post (Post (..), replyTo)
+import Circuit.Shared (stamp, stamped)
 import Circuit.Agent.Mark (Mark (..), markGlyph)
 import Control.Concurrent (threadDelay)
 import Data.IORef (modifyIORef', newIORef, readIORef)
@@ -120,7 +121,7 @@ deliveryTopic = do
     length (T.lines callLog) == 1
 
   quietLog <- TIO.readFile (root </> "log.jsonl")
-  let quietPosts = mapMaybe (unframeStored @Text) (T.lines quietLog)
+  let quietPosts = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines quietLog)
   assert "a settled response publishes zero posts by itself" $
     length quietPosts == 1
   transcript <- TIO.readFile transcriptLog
@@ -142,7 +143,7 @@ deliveryTopic = do
   assert "explicit reply publication preserves audience and ancestry" $
     to (stamped replied) == ["human"] && thread (stamped replied) == [postId]
   finalLog <- TIO.readFile (root </> "log.jsonl")
-  let finalPosts = mapMaybe (unframeStored @Text) (T.lines finalLog)
+  let finalPosts = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines finalLog)
   assert "the public tape contains only the cause and two explicit post acts" $
     length finalPosts == 3
   finalCalls <- TIO.readFile calls
@@ -214,7 +215,7 @@ deliveryTopic = do
           && "partial-response" `T.isInfixOf` record
       _ -> False
   cancelLog <- TIO.readFile (cancelRoot </> "log.jsonl")
-  let cancelPosts = mapMaybe (unframeStored @Text) (T.lines cancelLog)
+  let cancelPosts = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines cancelLog)
   assert "a cancelled response publishes nothing and starts no retry" $
     length cancelPosts == 1 && length cancelRecords == 1
   removePathForcibly cancelRoot
@@ -432,7 +433,7 @@ deliveryTopic = do
   assert ("the wired Kimi batch completes" <> if code == ExitSuccess then "" else ": " <> err) $
     code == ExitSuccess
   content <- TIO.readFile (kimiRoot </> "log.jsonl")
-  let parsed = mapMaybe (unframeStored @Text) (T.lines content)
+  let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
       replies = [stamped s | s <- parsed, from (stamped s) == "kimi1"]
   assert "only the explicitly addressed batch response publishes, with no inferred ancestry" $
     case replies of
@@ -477,7 +478,7 @@ deliveryTopic = do
         [_, checkCall] -> "[post 5] yang: CHECK-CASE" `T.isInfixOf` checkCall && noteLine (2 :: Int) `T.isInfixOf` checkCall
         _ -> False
   checkContent <- TIO.readFile (kimiRoot </> "log.jsonl")
-  let checkParsed = mapMaybe (unframeStored @Text) (T.lines checkContent)
+  let checkParsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines checkContent)
       checkReplies = [stamped s | s <- checkParsed, from (stamped s) == "kimi1"]
   assert "unaddressed singleton prose stays local" $
     length checkReplies == 1
@@ -546,7 +547,7 @@ deliveryTopic = do
   assert ("the wired Hermes batch completes" <> if code2 == ExitSuccess then "" else ": " <> err2) $
     code2 == ExitSuccess
   hermesContent <- TIO.readFile (hermesRoot </> "log.jsonl")
-  let hermesParsed = mapMaybe (unframeStored @Text) (T.lines hermesContent)
+  let hermesParsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines hermesContent)
       hermesReplies = [stamped s | s <- hermesParsed, from (stamped s) == "hermes1"]
   assert "the addressed Hermes batch response publishes without inferred ancestry" $
     case hermesReplies of
