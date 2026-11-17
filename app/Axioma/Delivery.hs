@@ -11,7 +11,6 @@ import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Parser.Framing (decodeRow)
 import Circuit.Post (Post (..), replyTo)
 import Circuit.Shared (stamp, stamped)
-import Free.Agent.Mark (Mark (..), markGlyph)
 import Control.Concurrent (threadDelay)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
@@ -29,6 +28,7 @@ import Free.Agent.Delivery
     cancelTurn,
     deliverTo,
     directPostTo,
+    mapTurnIO,
     newDeliveryGrant,
     noteStrand,
     postTo,
@@ -40,6 +40,7 @@ import Free.Agent.Delivery
     takeStrandNotes,
     turnMetrics,
   )
+import Free.Agent.Mark (Mark (..), markGlyph)
 import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable, removePathForcibly)
 import System.Environment (getEnv, getExecutablePath, setEnv)
 import System.Exit (ExitCode (..))
@@ -149,6 +150,38 @@ deliveryTopic = do
   finalCalls <- TIO.readFile calls
   assert "neither publication shape invokes another turn" $
     length (T.lines finalCalls) == 1
+
+  putStrLn "mapped settlement is shared"
+  mappedEffects <- newIORef []
+  let mappedTurn label = do
+        base <-
+          deliverTo
+            ( \() _ ->
+                pure
+                  Invocation
+                    { runInvocation = pure (TurnResponse label),
+                      cancelInvocation = pure False
+                    }
+            )
+            ()
+            ""
+        pure $
+          mapTurnIO
+            (\response -> modifyIORef' mappedEffects (<> [response]) >> pure response)
+            base
+  firstMapped <- mappedTurn ("first" :: Text)
+  secondMapped <- mappedTurn "second"
+  firstResult1 <- awaitTurn firstMapped
+  firstResult2 <- awaitTurn firstMapped
+  secondResult1 <- awaitTurn secondMapped
+  secondResult2 <- awaitTurn secondMapped
+  effects <- readIORef mappedEffects
+  assert "B22 repeated awaits run one mapped effect and never share another turn's result" $
+    firstResult1 == TurnResponse "first"
+      && firstResult2 == firstResult1
+      && secondResult1 == TurnResponse "second"
+      && secondResult2 == secondResult1
+      && effects == ["first", "second"]
   removePathForcibly root
 
   putStrLn "delivery cancellation and live metrics"

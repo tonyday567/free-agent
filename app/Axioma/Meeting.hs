@@ -7,7 +7,6 @@ module Axioma.Meeting
 where
 
 import Axioma.Common (assert, boxLabels, countSpiders, mkPost)
-import Circuit.Post (Post (..), branchesByIndex, coneByIndex, replyTo, sortNub, synthesis)
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Diagram.Hyper
   ( BoundaryEnd (..),
@@ -18,11 +17,14 @@ import Circuit.Diagram.Hyper
     hyperEquiv,
     normalise,
   )
+import Circuit.Post (Post (..), branchesByIndex, coneByIndex, replyTo, sortNub, synthesis)
 import Data.List (inits)
 import Data.Text qualified as T
+import Free.Agent.Agent (runAgent)
 import Free.Agent.Diagram (meetingSkeleton, skeletonLabels)
 import Free.Agent.Lineage (chaseLog, dParents, lineage, valid)
 import Free.Agent.Meeting (AgentBox (..), meetLog, quoter, unchanged)
+import Free.Agent.Query (queryBody, synthBody)
 
 meetingTopic :: IO ()
 meetingTopic = do
@@ -144,4 +146,20 @@ meetingTopic = do
           let prior = take 5 log3
            in map from (dParents (lineage prior p))
                 == map (\i -> from (prior !! fromIntegral i)) (thread p)
+        _ -> False
+
+  putStrLn "query ancestry"
+  do
+    let inputs = [mkPost "a" ["query"] "one", mkPost "b" ["query"] "two"]
+    replyAgent <- queryBody "query" [0, 1] pure
+    replies <- runAgent replyAgent inputs
+    assert "B24 queryBody passes supplied ancestry to the reply builder" $
+      case replies of
+        [reply] -> thread reply == [1] && to reply == ["b"]
+        _ -> False
+    synthesisAgent <- synthBody "query" [0, 1] pure
+    syntheses <- runAgent synthesisAgent inputs
+    assert "B24 synthBody passes the same ancestry through to synthesis" $
+      case syntheses of
+        [reply] -> thread reply == [0, 1] && to reply == ["a", "b"]
         _ -> False

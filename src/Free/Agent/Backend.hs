@@ -42,7 +42,6 @@ module Free.Agent.Backend
   )
 where
 
-import Free.Agent.StdPorts (frameAgent, sseMarks)
 import Circuit.Machine (Body (Body), Moore)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Tensor (unConst)
@@ -65,6 +64,7 @@ import Free.Agent.Acp (AcpClient, AcpConfig (..), Frame (..), Update (..), acpIn
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliCeiling, cliExhausted, cliInterrupted, cliScrub, cliStale, dshCli, kimiCli)
 import Free.Agent.Gateway (GatewayClient (..), GatewayConfig (..), openGateway, parseSseFrame)
 import Free.Agent.Host (BareConfig (..), hermesCli)
+import Free.Agent.StdPorts (frameAgent, sseMarks)
 import Network.HTTP.Client hiding (defaultRequest)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -396,9 +396,10 @@ worker state turn request = do
   let outcome = case result of
         Left err -> Failed ProcessFailure err emptyEvidence
         Right value -> value
-  writeChan (stateEvents state) (Settled outcome)
+  modifyMVar (stateActive state) $ \_ -> do
+    writeChan (stateEvents state) (Settled outcome)
+    pure (Nothing, ())
   putMVar (activeOutcome turn) outcome
-  modifyMVar (stateActive state) (\_ -> pure (Nothing, ()))
   putMVar (activeDone turn) ()
 
 sessionChoiceSupported :: SessionSupport -> BackendSession -> Bool

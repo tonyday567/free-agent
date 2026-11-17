@@ -215,6 +215,21 @@ commandWitness = do
   assert "B25b a no-session command rejects explicit resume" $ unsupported == Left SendUnsupportedSession
   closeSession session
 
+  immediate <- openBackend (commandBackend "/bin/true" [])
+  accepted <- mapM (immediateResend immediate) [1 .. 100 :: Int]
+  assert "B28c observing Settled always leaves the next send free to start" $
+    all (== Right ()) accepted
+  closeSession immediate
+
+immediateResend :: Session -> Int -> IO (Either SendError ())
+immediateResend session n = do
+  accepted <- sendSession session (defaultRequest (T.pack (show n)))
+  case accepted of
+    Left err -> pure (Left err)
+    Right () -> do
+      _ <- drainEvents session
+      pure (Right ())
+
 httpWitnesses :: IO ()
 httpWitnesses = do
   root <- tempRoot "free-agent-backend-http"

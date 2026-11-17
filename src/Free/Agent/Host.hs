@@ -19,15 +19,15 @@ module Free.Agent.Host
   )
 where
 
-import Free.Agent.Agent (Agent, ioAgent)
-import Circuit.Post (Post (..), mkPost)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
+import Circuit.Post (Post (..), mkPost)
 import Data.ByteString.Char8 qualified as BC8
 import Data.ByteString.Lazy qualified as BL
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
+import Free.Agent.Agent (Agent, ioAgent)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, parseSessionId)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
@@ -85,7 +85,7 @@ bodyArgs BodyWhole = (: [])
 hostResponse :: Host -> Post Text Text -> IO [Post Text Text]
 hostResponse h p = do
   outs <- hostRun h (bodyArgs (hostBodyMode h) (body p))
-  pure [(mkPost (hostName h) [from p] o) {channel = channel p} | o <- outs]
+  pure [mkPost (hostName h) [from p] o | o <- outs]
 
 -- | Turn a host into an input-seeded agent. Commits collect posts
 -- independently; the first emit runs every 'hostResponse' and returns the

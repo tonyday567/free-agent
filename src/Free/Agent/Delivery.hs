@@ -29,7 +29,6 @@ module Free.Agent.Delivery
   )
 where
 
-import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (Stored)
 import Circuit.Post (Post (..))
 import Circuit.Shared (stamp)
@@ -45,7 +44,7 @@ import Control.Concurrent
     tryPutMVar,
     tryReadMVar,
   )
-import Control.Exception (Exception, IOException, SomeException, catch, displayException, throwIO, try)
+import Control.Exception (Exception, IOException, SomeException, catch, displayException, evaluate, throwIO, try)
 import Control.Monad (void)
 import Data.Char (isSpace)
 import Data.Foldable (traverse_)
@@ -54,10 +53,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import Free.Agent.Agent (Name)
 import Free.Agent.Bus (postLocal)
 import System.Directory (removeFile)
 import System.FilePath ((</>))
 import System.IO (stderr)
+import System.IO.Unsafe (unsafePerformIO)
 
 -- | One backend invocation and its cancellation request. Cancellation returns
 -- 'True' only when it wins against backend completion; the winning side owns
@@ -135,14 +136,22 @@ data Turn a = Turn
   }
 
 -- | Run an effect after settlement, never during turn construction or on cancellation.
+-- The mapped result has its own settlement cell, so repeated or concurrent awaits
+-- share one effect rather than running it again for each observer.
 mapTurnIO :: (a -> IO b) -> Turn a -> Turn b
-mapTurnIO f turn =
-  turn
-    { awaitTurn =
-        awaitTurn turn >>= \case
-          TurnResponse a -> TurnResponse <$> f a
-          TurnCancelled -> pure TurnCancelled
-    }
+mapTurnIO f turn = Turn await (cancelTurn turn) (turnMetrics turn)
+  where
+    settled = unsafePerformIO (evaluate turn >> newMVar Nothing)
+    {-# NOINLINE settled #-}
+    await = modifyMVar settled $ \cached -> case cached of
+      Just result -> pure (cached, result)
+      Nothing -> do
+        result <-
+          awaitTurn turn >>= \case
+            TurnResponse a -> TurnResponse <$> f a
+            TurnCancelled -> pure TurnCancelled
+        pure (Just result, result)
+{-# NOINLINE mapTurnIO #-}
 
 -- | Invoke a backend for one open-caused input. Publication is not part of
 -- delivery: a caller may settle quietly or explicitly use 'postTo' afterwards.

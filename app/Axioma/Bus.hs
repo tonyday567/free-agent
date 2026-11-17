@@ -8,13 +8,12 @@ module Axioma.Bus
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Free.Agent.Agent (PureAgent, cellToAgent, loop, tape)
 import Circuit.Parser.Framing (RowError (..), Stored, decodeRow)
 import Circuit.Post (Post (..), PostId, deliversTo, mkChannelPost, watch)
 import Circuit.Shared (Stamped (..), stamp, stamped)
-import Free.Agent.Mark (Mark (..), controlMark, isHalt, markGlyph)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (SomeException, bracket, evaluate, try)
+import Control.Monad (replicateM)
 import Data.Either (isLeft)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (mapMaybe)
@@ -23,12 +22,15 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, addUTCTime, defaultTimeLocale, getCurrentTime, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601Show)
+import Free.Agent.Agent (PureAgent, cellToAgent, loop, tape)
 import Free.Agent.Agent.Runner (runAgentLoop)
 import Free.Agent.Bus (decodeLogStrict, postLocal, readFileStrict)
-import Free.Agent.Bus.Cli (BusCommand (..), Depth (..), SeatCircle (..), addressConflict, applyPostFlags, busParser, checkThreadId, readyPosts, readyWarnings, runBusCommand, runStatus, seatCircle)
+import Free.Agent.Bus.Claim (claimTask, listClaims)
+import Free.Agent.Bus.Cli (BusCommand (..), Depth (..), SeatCircle (..), Since (..), addressConflict, applyPostFlags, busParser, checkThreadId, readyPosts, readyWarnings, runBusCommand, runStatus, seatCircle)
 import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, readTransaction, writeCursor, writeTransaction)
 import Free.Agent.Bus.Heartbeat (HbState (..), hbPath, parseHb, readHeartbeat, writeHeartbeat)
 import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, newDeliveryGrant, replyAct)
+import Free.Agent.Mark (Mark (..), controlMark, isHalt, markGlyph)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, info, renderFailure)
 import System.Directory (doesFileExist, removePathForcibly)
@@ -101,9 +103,31 @@ busTopic = do
     -- masquerading as an empty inbox (the B12 failure the probe showed).
     cliRoot <- tempRoot "free-agent-b12-cli"
     TIO.writeFile (cliRoot </> "log.jsonl") ("{\"id\":0,\"ts\":\"BROKEN\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"x\"}\n")
-    refused <- try @SomeException (runBusCommand (ReadCommand cliRoot ["b"] Nothing Nothing (Depth 2)))
+    refused <- try @SomeException (runBusCommand (ReadCommand cliRoot ["b"] (Just (SinceId 0)) Nothing (Depth 2)))
     assert "a malformed row makes bus read exit non-zero" (isLeft refused)
     removePathForcibly cliRoot
+
+  -------------------------------------------------------------------------
+  -- Claims: exclusive creation has one winner; foreign markers do not make
+  -- the listing partial (B25/B26).
+  -------------------------------------------------------------------------
+  putStrLn "bus claim atomics and malformed markers"
+  do
+    root <- tempRoot "free-agent-claims"
+    completions <- replicateM 32 newEmptyMVar
+    mapM_
+      (\(n, done) -> forkIO (claimTask root 7 ("seat-" <> T.pack (show n)) >>= putMVar done))
+      (zip [1 :: Int ..] completions)
+    winners <- mapM takeMVar completions
+    assert "B25 concurrent claimants produce exactly one winner" $
+      length (filter id winners) == 1
+    TIO.writeFile (root </> ".claim-foreign") "other"
+    claims <- listClaims root
+    assert "B26 a foreign marker is skipped while the valid claim remains visible" $
+      case claims of
+        [(n, holder)] -> n == 7 && not (T.null holder)
+        _ -> False
+    removePathForcibly root
 
   -------------------------------------------------------------------------
   -- Launch-root authority (B11/B13): a seat's delivery and publication must

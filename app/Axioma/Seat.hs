@@ -9,12 +9,12 @@ module Axioma.Seat
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Free.Agent.Agent (Agent, runAgent)
 import Circuit.Post (Post (..))
 import Control.Monad (when)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Free.Agent.Agent (Agent, runAgent)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliDeliverTo, parseSessionId)
 import Free.Agent.Delivery (TurnResult (..), awaitTurn)
 import Free.Agent.Host (BodyMode (..), Host (..), hostBody, mkHost, processHost)
@@ -33,13 +33,14 @@ seatTopic = do
     let h = mkHost "echo" (pure . map ("echo:" <>))
         sh :: Agent [Post Text Text]
         sh = hostBody h
-        p = mkPost "human" ["echo"] "hi there"
+        p = (mkPost "human" ["echo"] "hi there") {channel = Just "ops"}
     outs <- runAgent sh [p]
-    assert "host replies to sender" $
+    assert "host replies to sender without re-broadcasting the input channel" $
       map body outs == ["echo:hi", "echo:there"]
         && all (\x -> to x == ["human"]) outs
         && all (\x -> from x == "echo") outs
         && all (\x -> thread x == []) outs
+        && all (\x -> channel x == Nothing) outs
 
   do
     let h = mkHost "echo" (pure . map ("echo:" <>))

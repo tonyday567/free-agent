@@ -47,6 +47,7 @@
 -- selects the Org renderer for @fab-open-status@, not another projection.
 module Free.Agent.Bus.Cli
   ( BusCommand (..),
+    Since (..),
     Depth (..),
     SeatCircle (..),
     addressConflict,
@@ -64,7 +65,6 @@ module Free.Agent.Bus.Cli
 where
 
 import Bus.Flow (SliceMode (..), slicePosts)
-import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (Stored, encodeRow)
 import Circuit.Post (Post (..), PostId, deliversTo, mkPost, sortNub)
 import Circuit.Shared (stamp, stamped)
@@ -85,6 +85,7 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
+import Free.Agent.Agent (Name)
 import Free.Agent.Bus (postLocal, readLogStrict, readSince)
 import Free.Agent.Bus.File (Flow (Continue), Human (..), attachHuman, humanNames, readCursor, readCursorAll, readHuman, removeHuman, tailLog, writeCursor)
 import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbPath, hbText, readHeartbeat)

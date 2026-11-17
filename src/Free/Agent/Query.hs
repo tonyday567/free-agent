@@ -54,28 +54,29 @@ synthesisPosts who ins ids reply =
 
 -- | Opaque evaluate seat. Commits collect the independent input posts; the
 -- first emit runs the query once and returns its reply beside 'Done'.
-queryBody :: Text -> (Text -> IO Text) -> IO (Agent [Post Text Text])
-queryBody = queryBodyWith replyPosts
+queryBody :: Text -> [PostId] -> (Text -> IO Text) -> IO (Agent [Post Text Text])
+queryBody who = queryBodyWith replyPosts who
 
--- | Opaque synthesis seat: the reply cites every input's sender as ancestry.
-synthBody :: Text -> (Text -> IO Text) -> IO (Agent [Post Text Text])
-synthBody = queryBodyWith synthesisPosts
+-- | Opaque synthesis seat: the reply cites every supplied input id as ancestry.
+synthBody :: Text -> [PostId] -> (Text -> IO Text) -> IO (Agent [Post Text Text])
+synthBody who = queryBodyWith synthesisPosts who
 
 -- | 'queryBody' parameterised on the reply-to-posts builder. Bare posts do
--- not carry log stamps, so thread ids are supplied by the delivery runner.
+-- not carry log stamps, so the delivery runner supplies their ancestry.
 queryBodyWith ::
   (Text -> [Post Text Text] -> [PostId] -> Text -> [Post Text Text]) ->
   Text ->
+  [PostId] ->
   (Text -> IO Text) ->
   IO (Agent [Post Text Text])
-queryBodyWith posts who query =
+queryBodyWith posts who ids query =
   pure $ ioAgent $ \ins -> do
     if null ins
       then pure []
       else do
         reply <- query (sessionPrompt ins)
-        pure (posts who ins [] reply)
+        pure (posts who ins ids reply)
 
 -- | Mock seat: reply body is the session prompt.
-echoBody :: Text -> IO (Agent [Post Text Text])
-echoBody who = queryBody who pure
+echoBody :: Text -> [PostId] -> IO (Agent [Post Text Text])
+echoBody who ids = queryBody who ids pure
