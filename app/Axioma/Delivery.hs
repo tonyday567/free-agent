@@ -49,13 +49,6 @@ import System.Posix.Files (setFileMode)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 
--- | The exact note line the harness delivers for a stranded reply.
-noteLine :: (Show a) => a -> Text
-noteLine pid =
-  "🟡 your reply for delivery "
-    <> T.pack (show pid)
-    <> " published from its `@yang:` address onward only; the text above the address did not reach the bus."
-
 seatBinary :: IO FilePath
 seatBinary = do
   axiomaPath <- getExecutablePath
@@ -414,9 +407,8 @@ deliveryTopic = do
   removePathForcibly strandRoot
 
   -------------------------------------------------------------------------
-  -- Wired Kimi batch delivery: three posts cause one CLI invocation. The
-  -- addressed suffix publishes without inferred ancestry; local prose does
-  -- not publish. A later singleton run consumes the stranded-note warning.
+  -- Wired Kimi batch delivery: three posts cause one Backend invocation.
+  -- Reply output is content verbatim; audience and ancestry come from input.
   -------------------------------------------------------------------------
   putStrLn "wired Kimi batch publication"
   kimiRoot <- tempRoot "free-agent-kimi-batch"
@@ -468,9 +460,13 @@ deliveryTopic = do
   content <- TIO.readFile (kimiRoot </> "log.jsonl")
   let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
       replies = [stamped s | s <- parsed, from (stamped s) == "kimi1"]
-  assert "only the explicitly addressed batch response publishes, with no inferred ancestry" $
+  assert "the complete reply output publishes with explicit input ancestry" $
     case replies of
-      [r] -> to r == ["yang"] && body r == "kimi batch report" && channel r == Nothing && thread r == []
+      [r] ->
+        to r == ["yang"]
+          && body r == "local batch notes\n@yang: kimi batch report"
+          && channel r == Nothing
+          && thread r == [0, 1, 2]
       _ -> False
   firstCursor <- readCursor kimiRoot "kimi1"
   firstTransaction <- readTransaction kimiRoot "kimi1"
@@ -487,10 +483,9 @@ deliveryTopic = do
           `T.isInfixOf` call
       _ -> False
   let adapterWarnings = filter ("🟡 kimi1: @yang: begins at character offset " `T.isPrefixOf`) (T.lines (T.pack err))
-  assert "the local prefix above the explicit address earns one stranded-note warning" $
-    length adapterWarnings == 1
   stranded <- doesFileExist (strandNotePath kimiRoot "kimi1")
-  assert "the batch boundary retains the stranded note for the next turn" stranded
+  assert "response scraping warnings and strand state stay out of the live Backend path" $
+    null adapterWarnings && not stranded
   kimiTranscript <- TIO.readFile kimiTranscriptLog
   assert "the transcript retains the local prefix and explicit response" $
     "local batch notes" `T.isInfixOf` kimiTranscript
@@ -505,24 +500,28 @@ deliveryTopic = do
     checkCode == ExitSuccess
   kimiDossierAfter <- TIO.readFile kimiDossier
   let callsAfter = filter (not . T.null . T.strip) (T.splitOn "===CALL===" kimiDossierAfter)
-  assert "the next live batch is one singleton CLI call carrying the harness note" $
+  assert "the next live batch is one singleton Backend call without harness notes" $
     length callsAfter == 2
       && case callsAfter of
-        [_, checkCall] -> "[post 5] yang: CHECK-CASE" `T.isInfixOf` checkCall && noteLine (2 :: Int) `T.isInfixOf` checkCall
+        [_, checkCall] ->
+          "[post 5] yang: CHECK-CASE" `T.isInfixOf` checkCall
+            && not ("Harness notes:" `T.isInfixOf` checkCall)
         _ -> False
   checkContent <- TIO.readFile (kimiRoot </> "log.jsonl")
   let checkParsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines checkContent)
       checkReplies = [stamped s | s <- checkParsed, from (stamped s) == "kimi1"]
-  assert "unaddressed singleton prose stays local" $
-    length checkReplies == 1
+  assert "plain singleton output is also an explicit reply act" $
+    case checkReplies of
+      [_, r] -> to r == ["yang"] && body r == "checked" && thread r == [5]
+      _ -> False
   kimiStrandGone <- doesFileExist (strandNotePath kimiRoot "kimi1")
-  assert "the stranded note is cleared once delivered" $ not kimiStrandGone
+  assert "another Backend turn leaves no stranded note" $ not kimiStrandGone
   removePathForcibly kimiRoot
 
   -------------------------------------------------------------------------
-  -- Wired Hermes batch capture: the oneshot backend receives the whole mail
-  -- batch once. Its final addressed message publishes without inferred
-  -- ancestry; usage, transcript, and file evidence remain intact.
+  -- Wired Hermes batch capture: the Backend receives the whole mail batch
+  -- once. Reply text is content verbatim; audience and ancestry come from
+  -- the committed input. Usage, transcript, and file evidence remain intact.
   -------------------------------------------------------------------------
   putStrLn "wired Hermes batch capture"
   hermesRoot <- tempRoot "free-agent-hermes-batch"
@@ -582,9 +581,13 @@ deliveryTopic = do
   hermesContent <- TIO.readFile (hermesRoot </> "log.jsonl")
   let hermesParsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines hermesContent)
       hermesReplies = [stamped s | s <- hermesParsed, from (stamped s) == "hermes1"]
-  assert "the addressed Hermes batch response publishes without inferred ancestry" $
+  assert "the complete Hermes reply publishes with explicit input ancestry" $
     case hermesReplies of
-      [r] -> to r == ["yang"] && body r == "hermes batch report" && channel r == Nothing && thread r == []
+      [r] ->
+        to r == ["yang"]
+          && body r == "@yang: hermes batch report"
+          && channel r == Nothing
+          && thread r == [0, 1, 2]
       _ -> False
   hermesCursor <- readCursor hermesRoot "hermes1"
   hermesTransaction <- readTransaction hermesRoot "hermes1"
@@ -599,9 +602,8 @@ deliveryTopic = do
           `T.isInfixOf` call
       _ -> False
   hermesTranscript <- TIO.readFile hermesTranscriptLog
-  assert "the transcript keeps the final message and usage-file session id" $
+  assert "the transcript keeps the final message and raw usage report" $
     "@yang: hermes batch report" `T.isInfixOf` hermesTranscript
-      && "session_id:fake-hermes-integration" `T.isInfixOf` hermesTranscript
       && "\"session_id\":\"fake-hermes-integration\"" `T.isInfixOf` hermesTranscript
   hermesSid <- TIO.readFile hermesSessionFile
   assert "the usage-file id reaches the stored session file" $

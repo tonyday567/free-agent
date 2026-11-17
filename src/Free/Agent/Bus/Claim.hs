@@ -17,18 +17,21 @@ module Free.Agent.Bus.Claim
   )
 where
 
-import Control.Exception (IOException, throwIO, try)
+import Control.Exception (IOException, bracket, throwIO, try)
 import Control.Monad (forM, when)
+import Data.ByteString qualified as BS
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (readFileStrict)
 import System.Directory (doesFileExist, listDirectory, removeFile)
 import System.FilePath ((</>))
-import System.IO (hClose, stderr)
+import System.IO (stderr)
 import System.IO.Error (isAlreadyExistsError)
-import System.Posix.IO (OpenMode (WriteOnly), creat, defaultFileFlags, exclusive, fdToHandle, openFd)
+import System.Posix.IO (OpenMode (WriteOnly), closeFd, creat, defaultFileFlags, exclusive, openFd)
+import System.Posix.IO.ByteString (fdWrite)
 import Text.Read (readMaybe)
 
 -- | Path to the claim lock file for a task.
@@ -40,11 +43,20 @@ claimPath root n = root </> (".claim-" <> show n)
 claimTask :: FilePath -> Int -> Text -> IO Bool
 claimTask root n name = do
   let path = claimPath root n
-  created <- try @IOException $ do
-    fd <- openFd path WriteOnly defaultFileFlags {creat = Just 0o600, exclusive = True}
-    handle <- fdToHandle fd
-    TIO.hPutStr handle (name <> " 0")
-    hClose handle
+  created <-
+    try @IOException $
+      bracket
+        (openFd path WriteOnly defaultFileFlags {creat = Just 0o600, exclusive = True})
+        closeFd
+        ( \fd -> do
+            let bytes = TE.encodeUtf8 (name <> " 0")
+                writeAll remaining
+                  | BS.null remaining = pure ()
+                  | otherwise = do
+                      written <- fdWrite fd remaining
+                      writeAll (BS.drop (fromIntegral written) remaining)
+            writeAll bytes
+        )
   case created of
     Right () -> pure True
     Left err

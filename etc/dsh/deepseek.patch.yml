@@ -26,6 +26,10 @@
   config:
     provider: deepseek
     model: deepseek-v4-pro
+- id: acp
+  config:
+    provider: deepseek
+    model: deepseek-v4-pro
 - id: tool-web
   name: "@deepseek-ai/dsh-tool-web"
   disabled: true

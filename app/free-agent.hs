@@ -15,14 +15,10 @@
 --   free-agent status [ROOT] [--threshold SECS]
 module Main (main) where
 
-import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (Stored)
 import Circuit.Post (Post (..), mkPost)
 import Circuit.Shared (stamp, stamped)
-import Free.Agent.Mark (Mark (StandDown), markGlyph)
-import Control.Exception (finally)
 import Control.Monad (forM_, unless)
-import Data.Char (isAlphaNum)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -30,15 +26,16 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
 import Data.Version (showVersion)
-import Free.Agent.Acp (AcpConfig (..), acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, openAcp)
-import Free.Agent.Agent.Runner (runAgentLoop)
+import Free.Agent.Acp (AcpConfig (..), defaultAcpConfig)
+import Free.Agent.Agent (Name)
+import Free.Agent.Backend (acpBackend, commandBackend, directHttpBackend, dshAcpBackend, dshBackend, gatewayBackend, hermesBackend, kimiBackend)
 import Free.Agent.Bus.Cli (BusCommand, Depth (..), busParser, depthOpt, orgOpt, runBusCommand, runStatus)
 import Free.Agent.Bus.File (QuiesceConfig (..))
-import Free.Agent.Cli (cliDeliverTo, dshCli, kimiCli)
 import Free.Agent.Cli.Config
   ( AcpCliConfig (..),
     Backend (..),
     CommandConfig (..),
+    DshAcpConfig (..),
     DshConfig (..),
     GatewayCliConfig (..),
     HermesConfig (..),
@@ -46,29 +43,25 @@ import Free.Agent.Cli.Config
     LlmConfig (..),
     parseAcpConfig,
     parseCommandConfig,
+    parseDshAcpConfig,
     parseDshConfig,
     parseHermesConfig,
     parseLlmConfig,
     swallowedSeatOption,
   )
-import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, mapTurnIO, newDeliveryGrant, noteStrand, replyActIO, strandBlock, takeStrandNotes)
-import Free.Agent.Gateway
-  ( GatewayClient (..),
-    GatewayConfig (..),
-    defaultGatewayConfig,
-    gatewayHost,
-    openGateway,
-  )
-import Free.Agent.Host (BareConfig (..), BodyMode (..), Host (..), bareHost, defaultBareConfig, hermesCli, processHost)
+import Free.Agent.Gateway (GatewayConfig (..), defaultGatewayConfig)
+import Free.Agent.Host (BareConfig (..), defaultBareConfig)
+import Free.Agent.Mark (Mark (StandDown), markGlyph)
 import Free.Agent.Refresh (preserveForRefresh, refreshDue, refreshRequestPath, writeRefreshRequest)
 import Free.Agent.Usage (readHermesUsage, readUsageIdentity, renderUsageIdentity)
 import Options.Applicative
 import Paths_free_agent (version)
+import Seat.Runtime (Seat (..), runSeat)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory, makeAbsolute)
-import System.Environment (getExecutablePath, lookupEnv, setEnv)
+import System.Environment (getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure, exitWith)
 import System.FilePath (takeDirectory, (</>))
-import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
+import System.IO (hPutStrLn, stderr)
 import System.Process (spawnProcess, waitForProcess)
 
 -- ---------------------------------------------------------------------------
@@ -84,7 +77,6 @@ data Command
   | RefreshChildCmd Int Int (Maybe FilePath) HermesConfig
   deriving (Show)
 
--- | Existing session-file measurement or an explicit one-shot usage report.
 data HermesUsageSource
   = HermesSessionFile FilePath
   | HermesUsageFile FilePath
@@ -114,7 +106,6 @@ backendFlag =
     parseTag "gateway" = Right GatewayTag
     parseTag other = Left ("unknown backend: " ++ other)
 
--- | Convert a parsed Hermes-style config into a Kimi config by dropping yolo.
 toKimiConfig :: HermesConfig -> KimiConfig
 toKimiConfig h =
   KimiConfig
@@ -128,8 +119,6 @@ toKimiConfig h =
       kcPitboss = hcPitboss h
     }
 
--- | Convert a parsed Hermes-style config into a gateway config (api_server
--- defaults for base URL and key env var).
 toGatewayConfig :: HermesConfig -> GatewayCliConfig
 toGatewayConfig h =
   GatewayCliConfig
@@ -175,7 +164,6 @@ rebootNoteOpt =
         )
     )
 
--- | Parse the default agent command. Defaults to Hermes; --backend switches.
 defaultAgentParser :: Parser Command
 defaultAgentParser =
   AgentCmd
@@ -194,10 +182,11 @@ commandParser :: Parser Command
 commandParser =
   subparser
     ( command "bus" (info (BusCmd <$> busParser <**> helper) (progDesc "Bus subcommands"))
-        <> command "llm" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendLlm <$> parseLlmConfig) <**> helper) (progDesc "Direct API seat (old bus-bare)"))
+        <> command "llm" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendLlm <$> parseLlmConfig) <**> helper) (progDesc "Direct API seat"))
         <> command "cmd" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendCommand <$> parseCommandConfig) <**> helper) (progDesc "External-command seat"))
-        <> command "dsh" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendDsh <$> parseDshConfig) <**> helper) (progDesc "DSH / local ollama seat"))
-        <> command "acp" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendAcp <$> parseAcpConfig) <**> helper) (progDesc "ACP seat (kimi acp — persistent repl)"))
+        <> command "dsh" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendDsh <$> parseDshConfig) <**> helper) (progDesc "DSH seat"))
+        <> command "dsh-acp" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendDshAcp <$> parseDshAcpConfig) <**> helper) (progDesc "Persistent DSH ACP seat"))
+        <> command "acp" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendAcp <$> parseAcpConfig) <**> helper) (progDesc "ACP seat (persistent repl)"))
         <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <*> depthOpt (Depth 1) <*> orgOpt <**> helper) (progDesc "Unified bus seat census"))
         <> command
           "usage"
@@ -245,10 +234,9 @@ commandParser =
             <> help "Seconds before an unverifiable heartbeat reads as non-fab"
         )
       where
-        readSeconds s =
-          case reads s of
-            [(n, "")] -> Right (fromInteger n :: NominalDiffTime)
-            _ -> Left ("expected a whole number of seconds, got: " ++ s)
+        readSeconds s = case reads s of
+          [(n, "")] -> Right (fromInteger n :: NominalDiffTime)
+          _ -> Left ("expected a whole number of seconds, got: " ++ s)
 
 hermesUsageSourceParser :: Parser HermesUsageSource
 hermesUsageSourceParser =
@@ -270,9 +258,6 @@ opts =
         <> header "free-agent - bus, seats, and status"
     )
 
--- | The build witness. A verdict is worth what the tool that produced it can
--- name about itself, so @--version@ answers with the package version the
--- binary was linked from and exits 0 without touching a bus.
 versionOption :: Parser (a -> a)
 versionOption =
   infoOption
@@ -288,7 +273,6 @@ versionOption =
 
 main :: IO ()
 main = do
-  hSetBuffering stdout LineBuffering
   cmd <- execParser opts
   case cmd of
     AgentCmd budget backend -> runBackend budget backend
@@ -306,21 +290,18 @@ main = do
     RefreshCmd budget threshold cfg -> runRefreshSupervisor budget threshold cfg
     RefreshChildCmd budget threshold note cfg -> runHermesAuto (Just threshold) note budget cfg
 
--- ---------------------------------------------------------------------------
--- Backend dispatch
--- ---------------------------------------------------------------------------
-
 runBackend :: Int -> Backend -> IO ()
 runBackend budget (BackendHermes cfg) = runHermes budget cfg
 runBackend budget (BackendKimi cfg) = runKimi budget cfg
 runBackend budget (BackendDsh cfg) = runDsh budget cfg
+runBackend budget (BackendDshAcp cfg) = runDshAcp budget cfg
 runBackend budget (BackendAcp cfg) = runAcp budget cfg
 runBackend budget (BackendLlm cfg) = runLlm budget cfg
 runBackend budget (BackendCommand cfg) = runCommand budget cfg
 runBackend budget (BackendGateway cfg) = runGateway budget cfg
 
 -- ---------------------------------------------------------------------------
--- Hermes / Kimi helpers
+-- Shared seat configuration
 -- ---------------------------------------------------------------------------
 
 agentNameOf :: [Name] -> Text
@@ -341,8 +322,6 @@ buildQuiesce :: Maybe Int -> Maybe Name -> Maybe QuiesceConfig
 buildQuiesce Nothing _ = Nothing
 buildQuiesce (Just n) mp = Just (QuiesceConfig n (fromMaybe "pitboss" mp) 1000000)
 
--- | Decorate incoming mail with the ids available for deliberate citation and
--- its senders. A batch is rendered without dropping or reordering any post.
 decoratePost :: Stored -> Stored
 decoratePost stored =
   let p = stamped stored
@@ -351,82 +330,6 @@ decoratePost stored =
 
 renderMail :: [Stored] -> Text
 renderMail = T.intercalate "\n\n" . map (body . stamped . decoratePost)
-
-batchBoundary :: [Stored] -> Stored
-batchBoundary = last
-
-runSeat :: Int -> Text -> [Name] -> FilePath -> Maybe QuiesceConfig -> ([Stored] -> IO (Turn [Post Text Text])) -> IO ()
-runSeat budget agentName names root mQuiesce handle = do
-  -- The launch root is the single source for delivery, cursor, publish, and
-  -- heartbeat. Export it absolutely so every child process — the CLI backend
-  -- and any `free-agent bus` subprocess the model spawns — resolves its
-  -- default root to the launch root instead of its own cwd. Without this, a
-  -- turn's default-root post escapes to whatever bus sits in the child's cwd
-  -- (B11): the stale alternate root receives the DONE. `--root` stays a human
-  -- CLI tool; the seat's default root is authoritative.
-  absRoot <- makeAbsolute root
-  setEnv "FREE_AGENT_BUS_ROOT" absRoot
-  grant <- newDeliveryGrant budget
-  runAgentLoop agentName names root mQuiesce grant handle
-
--- | A host seat's turn: the publication rule the model handlers use, and the
--- same stranded-reply note. The note is a harness fact for the next delivery,
--- so a surface whose next turn cannot read prose (a script) still carries it
--- rather than needing a second rule about which seats are told.
--- | A turn that published nothing but carries an @name:@ somewhere that is
--- not a line start has lost its address rather than its intent: the parser
--- reads a non-leading address as an inline mention, so the reply is dropped
--- whole and silently. The hint is printed only when the turn published
--- nothing, which is the one case where a seat has no other signal and where a
--- warning cannot add noise to a productive turn.
-midLineAddress :: Text -> Maybe (Int, Text)
-midLineAddress t = go 0 t
-  where
-    go off s =
-      let (pre, rest) = T.breakOn "@" s
-       in if T.null rest
-            then Nothing
-            else
-              let after = T.drop 1 rest
-                  (nm, colon) = T.breakOn ":" after
-                  named =
-                    not (T.null nm)
-                      && T.length nm <= 32
-                      && T.all (\c -> isAlphaNum c || c == '-' || c == '_') nm
-               in if named && not (T.null colon) && not (T.null pre)
-                    then Just (off + T.length pre, nm)
-                    else go (off + T.length pre + 1) after
-
-hostTurn :: FilePath -> Host -> [Stored] -> IO (Turn [Post Text Text])
-hostTurn root host storedBatch = do
-  notes <- takeStrandNotes root (hostName host)
-  deliverTo
-    ( \_ input ->
-        pure
-          Invocation
-            { runInvocation = do
-                outputs <- hostRun host [input]
-                mapM_ (noteStrand root (hostName host) (batchBoundary storedBatch)) outputs
-                posts <- concat <$> mapM (replyActIO (hostName host)) outputs
-                case posts of
-                  [] -> case foldr (\o acc -> acc <|> midLineAddress o) Nothing outputs of
-                    Just (off, nm) ->
-                      TIO.hPutStrLn stderr $
-                        "⚠ "
-                          <> hostName host
-                          <> ": nothing published — @"
-                          <> nm
-                          <> ": appears at character offset "
-                          <> T.pack (show off)
-                          <> ", not at the start of a line, so it read as a mention. Put the address first, or on its own line."
-                    Nothing -> pure ()
-                  _ -> pure ()
-                pure (TurnResponse posts),
-              cancelInvocation = pure False
-            }
-    )
-    storedBatch
-    (strandBlock notes <> (if null notes then "" else "\n\n") <> renderMail storedBatch)
 
 runHermes :: Int -> HermesConfig -> IO ()
 runHermes = runHermesAuto Nothing Nothing
@@ -442,8 +345,7 @@ runHermesAuto threshold rebootFile budget cfg = do
       root = hcRoot cfg
       sessionFile = fromMaybe (defaultSessionFile root names) (hcSessionFile cfg)
       framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
-      transcriptPath = root </> ".transcripts" </> T.unpack agentName <> ".jsonl"
-      cli = hermesCli (hcModel cfg) (hcProvider cfg) (hcReasoning cfg) (hcYolo cfg) sessionFile
+      backend = hermesBackend (hcModel cfg) (hcProvider cfg) (hcReasoning cfg) (hcYolo cfg) sessionFile
       mQuiesce = buildQuiesce (hcQuiesce cfg) (hcPitboss cfg)
       automaticRefresh =
         case threshold of
@@ -458,35 +360,19 @@ runHermesAuto threshold rebootFile budget cfg = do
                 | otherwise -> do
                     writeRefreshRequest root agentName tokens
                     pure
-                      -- Control form: the glyph alone on the first line
-                      -- stands the seat down for the refresh; the reason
-                      -- rides on the line below it. A batch has no single
-                      -- sender or channel to inherit for this harness act.
                       [ mkPost
                           agentName
                           []
                           (markGlyph StandDown <> "\nautomatic refresh at " <> T.pack (show tokens) <> " prompt tokens")
                       ]
-      handle storedBatch = do
+      promptFor storedBatch = do
         isFirst <- readIORef firstDelivery
         writeIORef firstDelivery False
-        strandNotes <- takeStrandNotes root agentName
-        let boundary = batchBoundary storedBatch
-            note = if isFirst then rebootNote else ""
-            prompt = framedPrompt <> note <> strandBlock strandNotes <> "\n\nUser messages:\n" <> renderMail storedBatch
-        turn <- cliDeliverTo cli transcriptPath (snd (stamp boundary)) prompt
-        pure $
-          mapTurnIO
-            ( \response -> do
-                posts <- replyActIO agentName response
-                noteStrand root agentName boundary response
-                refreshPosts <- automaticRefresh
-                pure (posts <> refreshPosts)
-            )
-            turn
+        let note = if isFirst then rebootNote else ""
+        pure (framedPrompt <> note <> "\n\nUser messages:\n" <> renderMail storedBatch)
   createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
-  runSeat budget agentName names root mQuiesce handle
+  runSeat (Seat budget agentName names root mQuiesce backend promptFor automaticRefresh)
   requested <- doesFileExist (refreshRequestPath root agentName)
   if isJust threshold && requested then exitWith (ExitFailure 75) else pure ()
 
@@ -531,27 +417,12 @@ runKimi budget cfg = do
   let names = kcNames cfg
       agentName = agentNameOf names
       sessionFile = fromMaybe (defaultSessionFile (kcRoot cfg) names) (kcSessionFile cfg)
-      transcriptPath = kcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
-      cli = kimiCli (kcModel cfg) (kcProvider cfg) sessionFile
+      backend = kimiBackend (kcModel cfg) (kcProvider cfg) sessionFile
       mQuiesce = buildQuiesce (kcQuiesce cfg) (kcPitboss cfg)
-      handle storedBatch = do
-        strandNotes <- takeStrandNotes (kcRoot cfg) agentName
-        let boundary = batchBoundary storedBatch
-            prompt = systemPrompt <> strandBlock strandNotes <> "\n\nUser messages:\n" <> renderMail storedBatch
-        mapTurnIO
-          ( \response -> do
-              posts <- replyActIO agentName response
-              noteStrand (kcRoot cfg) agentName boundary response
-              pure posts
-          )
-          <$> cliDeliverTo cli transcriptPath (snd (stamp boundary)) prompt
+      promptFor = pure . ((systemPrompt <> "\n\nUser messages:\n") <>) . renderMail
   createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
-  runSeat budget agentName names (kcRoot cfg) mQuiesce handle
-
--- ---------------------------------------------------------------------------
--- DSH / local ollama seat
--- ---------------------------------------------------------------------------
+  runSeat (Seat budget agentName names (kcRoot cfg) mQuiesce backend promptFor (pure []))
 
 runDsh :: Int -> DshConfig -> IO ()
 runDsh budget cfg = do
@@ -559,34 +430,48 @@ runDsh budget cfg = do
   systemPrompt <- TIO.readFile (dcPromptFile cfg)
   let names = dcNames cfg
       agentName = agentNameOf names
-      transcriptPath = dcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".jsonl"
       sessionPath = dcRoot cfg </> ".transcripts" </> T.unpack agentName <> ".sid"
-      cli = dshCli (Just systemPrompt) (dcDshPatch cfg) (dcDshModelPatch cfg) sessionPath
+      backend = dshBackend (Just systemPrompt) (dcDshPatch cfg) (dcDshModelPatch cfg) sessionPath
       mQuiesce = buildQuiesce (dcQuiesce cfg) (dcPitboss cfg)
-      handle storedBatch = do
-        strandNotes <- takeStrandNotes (dcRoot cfg) agentName
-        let boundary = batchBoundary storedBatch
-            block = strandBlock strandNotes
-            message = renderMail storedBatch
-            prompt = if T.null block then message else block <> "\n\n" <> message
-        mapTurnIO
-          ( \response -> do
-              posts <- replyActIO agentName response
-              noteStrand (dcRoot cfg) agentName boundary response
-              pure posts
-          )
-          <$> cliDeliverTo cli transcriptPath (snd (stamp boundary)) prompt
-  createDirectoryIfMissing True (takeDirectory transcriptPath)
+  createDirectoryIfMissing True (takeDirectory sessionPath)
   TIO.putStrLn $ "   patch: " <> T.pack (dcDshPatch cfg)
-  forM_ (dcDshModelPatch cfg) $ \p ->
-    TIO.putStrLn $ "   model patch: " <> T.pack p
-  runSeat budget agentName names (dcRoot cfg) mQuiesce handle
+  forM_ (dcDshModelPatch cfg) $ \path ->
+    TIO.putStrLn $ "   model patch: " <> T.pack path
+  runSeat (Seat budget agentName names (dcRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
 
--- ---------------------------------------------------------------------------
--- ACP seat (persistent repl)
--- ---------------------------------------------------------------------------
+runDshAcp :: Int -> DshAcpConfig -> IO ()
+runDshAcp budget cfg = do
+  validatePrompt (dacPromptFile cfg)
+  systemPrompt <- TIO.readFile (dacPromptFile cfg)
+  root <- makeAbsolute (dacRoot cfg)
+  workspace <- makeAbsolute (dacWorkspace cfg)
+  dshHome <- makeAbsolute (dacDshHome cfg)
+  basePatch <- makeAbsolute (dacDshPatch cfg)
+  modelPatch <- traverse makeAbsolute (dacDshModelPatch cfg)
+  let names = dacNames cfg
+      agentName = agentNameOf names
+      sessionPath = defaultSessionFile root names
+      framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
+      backend =
+        dshAcpBackend
+          (Just framedPrompt)
+          basePatch
+          modelPatch
+          workspace
+          dshHome
+          sessionPath
+      mQuiesce = buildQuiesce (dacQuiesce cfg) (dacPitboss cfg)
+  createDirectoryIfMissing True workspace
+  createDirectoryIfMissing True dshHome
+  createDirectoryIfMissing True (takeDirectory sessionPath)
+  TIO.putStrLn "   protocol: dsh acp"
+  TIO.putStrLn $ "   workspace: " <> T.pack workspace
+  TIO.putStrLn $ "   DSH_HOME: " <> T.pack dshHome
+  TIO.putStrLn $ "   patch: " <> T.pack basePatch
+  forM_ modelPatch $ \path ->
+    TIO.putStrLn $ "   model patch: " <> T.pack path
+  runSeat (Seat budget agentName names root mQuiesce backend (pure . renderMail) (pure []))
 
--- | One prompt turn against a live ACP child.
 acpTurnMicros :: Int
 acpTurnMicros = 600_000_000
 
@@ -597,30 +482,14 @@ runAcp budget cfg = do
   let names = acNames cfg
       agentName = agentNameOf names
       framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
+      backend =
+        acpBackend
+          defaultAcpConfig {acpCommand = acAcpCommand cfg, acpWorkDir = acRoot cfg}
+          acpTurnMicros
+          framedPrompt
       mQuiesce = buildQuiesce (acQuiesce cfg) (acPitboss cfg)
-  client <-
-    openAcp
-      defaultAcpConfig
-        { acpCommand = acAcpCommand cfg,
-          acpWorkDir = acRoot cfg
-        }
-  flip finally (closeAcp client) $ do
-    _ <- acpInitialize client acpTurnMicros
-    (msid, _) <- acpNewSession client acpTurnMicros (acRoot cfg)
-    sid <- case msid of
-      Just s -> pure s
-      Nothing -> do
-        TIO.hPutStrLn stderr "🔴 acp: session/new returned no session id"
-        exitFailure
-    let host = acpHost agentName acpTurnMicros framedPrompt client sid
-        handle = hostTurn (acRoot cfg) host
-    TIO.putStrLn $ "   protocol: acp (" <> T.pack (acAcpCommand cfg) <> ")"
-    TIO.putStrLn $ "   session: " <> sid
-    runSeat budget agentName names (acRoot cfg) mQuiesce handle
-
--- ---------------------------------------------------------------------------
--- Direct API (llm)
--- ---------------------------------------------------------------------------
+  TIO.putStrLn $ "   protocol: acp (" <> T.pack (acAcpCommand cfg) <> ")"
+  runSeat (Seat budget agentName names (acRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
 
 runLlm :: Int -> LlmConfig -> IO ()
 runLlm budget cfg = do
@@ -641,15 +510,11 @@ runLlm budget cfg = do
                 model = fromMaybe (model defaultBareConfig) (lcModel cfg),
                 key = T.pack k
               }
-          host = bareHost bareCfg systemPrompt
+          backend = directHttpBackend bareCfg systemPrompt
           mQuiesce = buildQuiesce (lcQuiesce cfg) (lcPitboss cfg)
       TIO.putStrLn $ "   base: " <> baseUrl bareCfg
       TIO.putStrLn $ "   model: " <> model bareCfg
-      runSeat budget agentName names (lcRoot cfg) mQuiesce (hostTurn (lcRoot cfg) host)
-
--- ---------------------------------------------------------------------------
--- Gateway seat (hermes api_server)
--- ---------------------------------------------------------------------------
+      runSeat (Seat budget agentName names (lcRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
 
 runGateway :: Int -> GatewayCliConfig -> IO ()
 runGateway budget cfg = do
@@ -660,35 +525,25 @@ runGateway budget cfg = do
       agentName = agentNameOf names
       framedPrompt = "Your name on the free-agent bus is " <> agentName <> ".\n\n" <> systemPrompt
       gwCfg = defaultGatewayConfig {gwBaseUrl = gcwBaseUrl cfg, gwKeyEnv = gcwKeyEnv cfg, gwCwd = home </> "pit"}
-  client <- openGateway gwCfg
-  let host = gatewayHost agentName framedPrompt client
+      backend = gatewayBackend gwCfg framedPrompt
       mQuiesce = buildQuiesce (gcwQuiesce cfg) (gcwPitboss cfg)
-      handle = hostTurn (gcwRoot cfg) host
   TIO.putStrLn $ "   gateway: " <> gwBaseUrl gwCfg
-  TIO.putStrLn $ "   session: " <> gcSessionId client
-  runSeat budget agentName names (gcwRoot cfg) mQuiesce handle
-
--- ---------------------------------------------------------------------------
--- External command seat
--- ---------------------------------------------------------------------------
+  runSeat (Seat budget agentName names (gcwRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
 
 runCommand :: Int -> CommandConfig -> IO ()
 runCommand budget cfg = do
   let names = ccNames cfg
       agentName = agentNameOf names
-      host = (processHost agentName (ccCmd cfg) (ccArgs cfg)) {hostBodyMode = BodyWhole}
+      backend = commandBackend (ccCmd cfg) (ccArgs cfg)
       mQuiesce = buildQuiesce (ccQuiesce cfg) (ccPitboss cfg)
   TIO.putStrLn $ "   command: " <> T.pack (ccCmd cfg) <> " " <> T.intercalate " " (map T.pack (ccArgs cfg))
   case swallowedSeatOption (ccArgs cfg) of
     [] -> pure ()
     shadowed ->
-      -- the warning shares the banner's stream: a reader under `> out 2> err`
-      -- otherwise gets the explanation and not the line it explains
       TIO.putStrLn $
         "⚠ "
           <> T.intercalate ", " (map T.pack shadowed)
           <> " came after `--`, so it is the command's argv and the seat never saw "
           <> (if length shadowed == 1 then "it." else "them.")
           <> " Put the seat's own flags before --cmd: `--quiesce 2 --cmd /bin/sh -- -c ...`"
-
-  runSeat budget agentName names (ccRoot cfg) mQuiesce (hostTurn (ccRoot cfg) host)
+  runSeat (Seat budget agentName names (ccRoot cfg) mQuiesce backend (pure . renderMail) (pure []))

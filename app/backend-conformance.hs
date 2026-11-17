@@ -129,7 +129,7 @@ execute client root = do
   won <- cancelSession session
   (_, cancelOutcome) <- drainBackend session
   ended <- getCurrentTime
-  appendBackendTranscript transcript (snd (stamp cancelCause)) started ended cancelOutcome
+  appendBackendTranscript transcript (snd (stamp cancelCause)) started ended Nothing cancelOutcome
   require "cancel follows the declared cancellation capability" $
     if backendCancellation caps
       then won && isCancelled cancelOutcome
@@ -174,7 +174,7 @@ completedTurn root transcript session name cause request = do
       error ("send refused: " <> show err)
     Right (outputs, outcome) -> do
       ended <- getCurrentTime
-      appendBackendTranscript transcript (snd (stamp cause)) started ended outcome
+      appendBackendTranscript transcript (snd (stamp cause)) started ended Nothing outcome
       case outcome of
         Completed _ -> do
           let replies = replyActs name [cause] outputs

@@ -6,6 +6,7 @@ module Free.Agent.Cli.Config
     HermesConfig (..),
     KimiConfig (..),
     DshConfig (..),
+    DshAcpConfig (..),
     LlmConfig (..),
     CommandConfig (..),
     GatewayCliConfig (..),
@@ -13,6 +14,7 @@ module Free.Agent.Cli.Config
     defaultLlmConfig,
     parseHermesConfig,
     parseDshConfig,
+    parseDshAcpConfig,
     parseLlmConfig,
     parseCommandConfig,
     swallowedSeatOption,
@@ -29,9 +31,9 @@ module Free.Agent.Cli.Config
   )
 where
 
-import Free.Agent.Agent (Name)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Free.Agent.Agent (Name)
 import Options.Applicative
 
 -- ---------------------------------------------------------------------------
@@ -42,6 +44,7 @@ data Backend
   = BackendHermes HermesConfig
   | BackendKimi KimiConfig
   | BackendDsh DshConfig
+  | BackendDshAcp DshAcpConfig
   | BackendLlm LlmConfig
   | BackendCommand CommandConfig
   | BackendGateway GatewayCliConfig
@@ -86,6 +89,21 @@ data DshConfig = DshConfig
     dcDshModelPatch :: Maybe FilePath,
     dcQuiesce :: Maybe Int,
     dcPitboss :: Maybe Name
+  }
+  deriving (Show)
+
+-- | Persistent dsh ACP seat configuration. Bus root, execution workspace,
+-- and dsh session store are deliberately independent and explicit.
+data DshAcpConfig = DshAcpConfig
+  { dacRoot :: FilePath,
+    dacNames :: [Name],
+    dacPromptFile :: FilePath,
+    dacDshPatch :: FilePath,
+    dacDshModelPatch :: Maybe FilePath,
+    dacDshHome :: FilePath,
+    dacWorkspace :: FilePath,
+    dacQuiesce :: Maybe Int,
+    dacPitboss :: Maybe Name
   }
   deriving (Show)
 
@@ -294,6 +312,44 @@ parseDshConfig =
         ( long "dsh-model-patch"
             <> metavar "MODEL.yml"
             <> help "DSH model override patch file"
+        )
+
+parseDshAcpConfig :: Parser DshAcpConfig
+parseDshAcpConfig =
+  DshAcpConfig
+    <$> rootOpt
+    <*> namesOpt
+    <*> promptOpt
+    <*> dshPatchOpt
+    <*> optional dshModelPatchOpt
+    <*> dshHomeOpt
+    <*> workspaceOpt
+    <*> quiesceOpt
+    <*> pitbossOpt
+  where
+    dshPatchOpt =
+      strOption
+        ( long "dsh-patch"
+            <> metavar "PATCH.yml"
+            <> help "DSH base patch file"
+        )
+    dshModelPatchOpt =
+      strOption
+        ( long "dsh-model-patch"
+            <> metavar "MODEL.yml"
+            <> help "DSH model override patch file"
+        )
+    dshHomeOpt =
+      strOption
+        ( long "dsh-home"
+            <> metavar "DIR"
+            <> help "Isolated DSH_HOME for this seat"
+        )
+    workspaceOpt =
+      strOption
+        ( long "workspace"
+            <> metavar "DIR"
+            <> help "Execution workspace, separate from the bus root"
         )
 
 parseLlmConfig :: Parser LlmConfig

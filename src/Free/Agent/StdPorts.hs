@@ -67,8 +67,8 @@ import Circuit.Syntax (Syntax (Lift))
 import Circuit.Tensor (Const (..), unConst)
 import Circuit.Trace (FreeTrace)
 import Circuit.Traced (trace)
-import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Applicative ((<|>))
+import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.STM (atomically, newTBQueueIO, newTQueueIO, readTBQueue, readTQueue, tryReadTBQueue, writeTBQueue, writeTQueue)
 import Control.Exception (IOException, onException, try)
 import Control.Monad (forever, unless, void)
@@ -105,6 +105,8 @@ data ProcConfig = ProcConfig
   { procCommand :: String,
     procArgs :: [String],
     procWorkingDir :: FilePath,
+    -- | Full child environment; 'Nothing' inherits the launcher's environment.
+    procEnv :: Maybe [(String, String)],
     -- | Boundary grammar of the stdout stream.  Stderr is line-framed
     -- ('lineMarks'); stderr is diagnostics, not dialogue.
     procMarks :: ProcMarks,
@@ -223,6 +225,7 @@ openStdPorts encode decode cfg = trace (Lift (K step))
       let procSpec =
             (proc (procCommand cfg) (procArgs cfg))
               { cwd = Just (procWorkingDir cfg),
+                env = procEnv cfg,
                 std_in = CreatePipe
               }
       if procMergeStderr cfg

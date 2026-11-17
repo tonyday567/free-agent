@@ -20,8 +20,8 @@ import Free.Agent.Backend
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), parseSessionId)
 import Free.Agent.Gateway (GatewayConfig (..), defaultGatewayConfig)
 import Free.Agent.Host (BareConfig (..), defaultBareConfig, hermesCli)
-import System.Directory (doesFileExist, removePathForcibly)
-import System.Environment (setEnv)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, removePathForcibly)
+import System.Environment (getEnv, setEnv)
 import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
 import System.Process (createProcess, proc, terminateProcess, waitForProcess)
@@ -35,6 +35,7 @@ backendTopic = do
   commandWitness
   httpWitnesses
   acpWitness
+  dshAcpWitness
 
 recipeWitnesses :: IO ()
 recipeWitnesses = do
@@ -284,6 +285,18 @@ httpWitnesses = do
     unsupported <- sendSession gateway (BackendRequest "resume" (ResumeSession "other"))
     assert "B27c a newly opened server session does not claim resume" $ unsupported == Left SendUnsupportedSession
 
+    deltaOnly <- openBackend (gatewayBackend gatewayConfig "gateway system")
+    deltaEvents <- runRequest deltaOnly (defaultRequest "delta-only")
+    assert "B27e done assembles and emits a delta-only reply exactly once" $
+      case deltaEvents of
+        [ Output (BackendOutput DeltaOutput "hel"),
+          Output (BackendOutput DeltaOutput "lo"),
+          Output (BackendOutput ReplyOutput "hello"),
+          Settled (Completed _)
+          ] -> True
+        _ -> False
+    closeSession deltaOnly
+
     gatewayFailure <- openBackend (gatewayBackend gatewayConfig "gateway system")
     failedEvents <- runRequest gatewayFailure (defaultRequest "fail")
     assert "B27d run.failed is a protocol outcome after any earlier delta" $
@@ -305,9 +318,9 @@ httpWitnesses = do
     openBackend $
       directHttpBackend (defaultBareConfig {baseUrl = "http://127.0.0.1:1"}) "system"
   events <- runRequest unavailable (defaultRequest "unavailable")
-  assert "B28b a local connection failure is environment-unavailable" $
+  assert "B28b an HTTP request failure does not claim that no turn started" $
     case events of
-      [Settled (Unavailable _)] -> True
+      [Settled (Failed ProcessFailure _ _)] -> True
       _ -> False
   closeSession unavailable
 
@@ -327,10 +340,23 @@ acpWitness = do
           "    *'\"method\":\"session/new\"'*)",
           "      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"sessionId\":\"local-acp\"}}\\n' \"$id\" ;;",
           "    *'\"method\":\"session/prompt\"'*)",
-          "      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"local-acp\",\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"acp reply\"}}}}'",
-          "      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"local-acp\",\"sessionUpdate\":\"agent_thought_chunk\",\"content\":{\"type\":\"text\",\"text\":\"acp thought\"}}}}'",
-          "      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"stopReason\":\"end_turn\"}}\\n' \"$id\"",
-          "      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"local-acp\",\"sessionUpdate\":\"usage_update\",\"used\":7}}}' ;;",
+          "      case \"$line\" in",
+          "        *max_tokens*)",
+          "          printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"stopReason\":\"max_tokens\"}}\\n' \"$id\" ;;",
+          "        *empty-reply*)",
+          "          printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"stopReason\":\"end_turn\"}}\\n' \"$id\" ;;",
+          "        *reply-then-error*)",
+          "          printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"local-acp\",\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"partial acp reply\"}}}}'",
+          "          printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{\"code\":-32000,\"message\":\"local turn failure\"}}\\n' \"$id\" ;;",
+          "        *timeout-turn*)",
+          "          sleep 1",
+          "          printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"stopReason\":\"end_turn\"}}\\n' \"$id\" ;;",
+          "        *)",
+          "          printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"local-acp\",\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"acp reply\"}}}}'",
+          "          printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"local-acp\",\"sessionUpdate\":\"agent_thought_chunk\",\"content\":{\"type\":\"text\",\"text\":\"acp thought\"}}}}'",
+          "          printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"stopReason\":\"end_turn\"}}\\n' \"$id\"",
+          "          printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionId\":\"local-acp\",\"sessionUpdate\":\"usage_update\",\"used\":7}}}' ;;",
+          "      esac ;;",
           "  esac",
           "done"
         ]
@@ -357,10 +383,151 @@ acpWitness = do
             && "\"stopReason\":\"end_turn\"" `T.isInfixOf` evidenceRawOutput evidence
             && isJust (evidenceUsage evidence)
       _ -> False
+  exhausted <- runRequest session (defaultRequest "max_tokens")
+  empty <- runRequest session (defaultRequest "empty-reply")
+  replyThenError <- runRequest session (defaultRequest "reply-then-error")
+  assert "B29d ACP stop reasons and empty replies are typed outcomes, never silent completion" $
+    hasOutcome isExhausted exhausted
+      && case empty of
+        [Settled (Failed EmptyReply _ _)] -> True
+        _ -> False
+  assert "B29e ACP retains a partial reply beside a correlated error response" $
+    case replyThenError of
+      [Output (BackendOutput ReplyOutput "partial acp reply"), Settled (Failed ProtocolFailure why _)] ->
+        "local turn failure" `T.isInfixOf` why
+      _ -> False
   cancelled <- cancelSession session
   assert "B29c whole-session close is not misreported as per-turn cancellation" $ not cancelled
   closeSession session
+
+  timedOut <-
+    openBackend $
+      acpBackend
+        defaultAcpConfig {acpCommand = script, acpArgs = [], acpWorkDir = root}
+        500_000
+        "acp system"
+  timeoutEvents <- runRequest timedOut (defaultRequest "timeout-turn")
+  nextSend <- sendSession timedOut (defaultRequest "must-not-read-late-response")
+  assert "B29f ACP timeout closes the poisoned session instead of consuming a late response" $
+    case timeoutEvents of
+      [Settled (Failed TimeoutFailure _ _)] -> nextSend == Left SendClosed
+      _ -> False
+  closeSession timedOut
   removePathForcibly root
+
+dshAcpWitness :: IO ()
+dshAcpWitness = do
+  root <- tempRoot "free-agent-backend-dsh-acp"
+  let bin = root </> "bin"
+      fake = bin </> "dsh"
+      workspace = root </> "workspace"
+      dshHome = root </> "dsh-home"
+      sessionFile = root </> "session"
+      basePatch = root </> "base.yml"
+      modelPatch = root </> "model.yml"
+      wire = root </> "wire.jsonl"
+      cancelMark = root </> "cancel-started"
+      backend =
+        dshAcpBackend
+          (Just "CARD")
+          basePatch
+          (Just modelPatch)
+          workspace
+          dshHome
+          sessionFile
+  createDirectoryIfMissing True bin
+  TIO.writeFile basePatch "[]"
+  TIO.writeFile modelPatch "[]"
+  TIO.writeFile fake (dshFakeSource root wire cancelMark)
+  setFileMode fake 0o755
+  bracket (getEnv "PATH") (setEnv "PATH") $ \oldPath -> do
+    setEnv "PATH" (bin <> ":" <> oldPath)
+    session <- openBackend backend
+    assert "B30a dsh ACP declares its own resumable, cancellable collected-event backend" $
+      sessionCapabilities session == BackendCapabilities DshAcpBackend ServerSessions CollectedEvents True
+    first <- runRequest session (defaultRequest "first")
+    second <- runRequest session (defaultRequest "second")
+    assert "B30b fresh dsh prompts settle against the persisted session" $
+      all (completedWithSession "dsh-session") [first, second]
+    closeSession session
+
+    resumed <- openBackend backend
+    afterRestart <- runRequest resumed (defaultRequest "after-restart")
+    assert "B30c restart resumes the stored dsh session without echoing a new id" $
+      completedWithSession "dsh-session" afterRestart
+
+    accepted <- sendSession resumed (defaultRequest "cancel-turn")
+    assert "B30d dsh cancellation prompt starts" $ accepted == Right ()
+    waitForFile cancelMark
+    won <- cancelSession resumed
+    cancelled <- drainEvents resumed
+    assert "B30e session/cancel settles the active prompt as Cancelled" $
+      won && hasOutcome isCancelled cancelled
+    closeSession resumed
+
+    provenance <- TIO.readFile (root </> "provenance")
+    wireText <- TIO.readFile wire
+    stored <- TIO.readFile sessionFile
+    canonicalWorkspace <- canonicalizePath workspace
+    let dshHomeText = T.pack dshHome
+        workspaceText = T.pack canonicalWorkspace
+        baseText = T.pack basePatch
+        modelText = T.pack modelPatch
+    assert "B30f argv, absolute workspace, DSH_HOME, and session store are pinned independently" $
+      let firstLine = T.takeWhile (/= '\n') provenance
+       in (dshHomeText <> "|" <> workspaceText <> "|acp --patch " <> baseText <> " --patch " <> modelText) == firstLine
+            && T.strip stored == "dsh-session"
+    assert "B30g resume uses session/resume and the seat card is fresh-only" $
+      T.count "session/new" wireText == 1
+        && T.count "session/resume" wireText == 1
+        && T.count "CARD" wireText == 1
+  removePathForcibly root
+  where
+    completedWithSession sid events = case events of
+      [Output _, Settled (Completed evidence)] -> evidenceSessionId evidence == Just sid
+      _ -> False
+
+dshFakeSource :: FilePath -> FilePath -> FilePath -> Text
+dshFakeSource root wire cancelMark =
+  T.pack $
+    unlines
+      [ "#!/usr/bin/env python3",
+        "import json, os, pathlib, sys",
+        "root = " <> show root,
+        "wire = " <> show wire,
+        "cancel_mark = " <> show cancelMark,
+        "with open(root + '/provenance', 'a') as f:",
+        "  f.write(os.environ.get('DSH_HOME', '') + '|' + os.getcwd() + '|' + ' '.join(sys.argv[1:]) + '\\n')",
+        "def log(value):",
+        "  with open(wire, 'a') as f: f.write(json.dumps(value, separators=(',', ':')) + '\\n')",
+        "def send(value):",
+        "  log(value)",
+        "  print(json.dumps(value, separators=(',', ':')), flush=True)",
+        "def response(rid, result): send({'jsonrpc':'2.0','id':rid,'result':result})",
+        "for line in sys.stdin:",
+        "  value = json.loads(line)",
+        "  log(value)",
+        "  method = value.get('method')",
+        "  rid = value.get('id')",
+        "  if method == 'initialize':",
+        "    response(rid, {'protocolVersion':1,'capabilities':{},'agentInfo':{'name':'fake-dsh','version':'0'}})",
+        "  elif method == 'session/new':",
+        "    response(rid, {'sessionId':'dsh-session','configOptions':[]})",
+        "  elif method == 'session/resume':",
+        "    response(rid, {'configOptions':[]})",
+        "  elif method == 'session/prompt':",
+        "    if 'cancel-turn' in json.dumps(value):",
+        "      pathlib.Path(cancel_mark).touch()",
+        "      for cancel_line in sys.stdin:",
+        "        cancel = json.loads(cancel_line)",
+        "        log(cancel)",
+        "        if cancel.get('method') == 'session/cancel':",
+        "          response(rid, {'stopReason':'cancelled'})",
+        "          break",
+        "    else:",
+        "      send({'jsonrpc':'2.0','method':'session/update','params':{'update':{'sessionId':'dsh-session','sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'dsh acp reply'}}}})",
+        "      response(rid, {'stopReason':'end_turn'})"
+      ]
 
 runRequest :: Session -> BackendRequest -> IO [BackendEvent]
 runRequest session request = do
@@ -445,7 +612,9 @@ serverSource =
         "    body = self.rfile.read(int(self.headers.get('Content-Length', '0')))",
         "    with open(capture_file, 'ab') as f: f.write(body + b'\\n')",
         "    if self.path.endswith('/chat/stream'):",
-        "      if b'fail' in body:",
+        "      if b'delta-only' in body:",
+        "        payload = b'event: assistant.delta\\ndata: {\"delta\":\"hel\"}\\n\\nevent: assistant.delta\\ndata: {\"delta\":\"lo\"}\\n\\nevent: done\\ndata: {\"seq\":1}\\n\\n'",
+        "      elif b'fail' in body:",
         "        payload = b'event: assistant.delta\\ndata: {\"delta\":\"partial\"}\\n\\nevent: run.failed\\ndata: {\"error\":\"local failure\"}\\n\\nevent: done\\ndata: {\"seq\":2}\\n\\n'",
         "      else:",
         "        payload = b'event: assistant.delta\\ndata: {\"delta\":\"hel\"}\\n\\nevent: assistant.delta\\ndata: {\"delta\":\"lo\"}\\n\\nevent: assistant.completed\\ndata: {\"content\":\"hello\"}\\n\\nevent: done\\ndata: {\"seq\":1}\\n\\n'",

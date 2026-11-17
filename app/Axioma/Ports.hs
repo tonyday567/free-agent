@@ -147,6 +147,7 @@ shellConfig script =
     { procCommand = "sh",
       procArgs = ["-c", script],
       procWorkingDir = ".",
+      procEnv = Nothing,
       procMarks = lineMarks,
       procMergeStderr = False
     }

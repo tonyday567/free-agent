@@ -7,13 +7,10 @@ module Axioma.Acp
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Free.Agent.Agent (runAgent)
 import Circuit.Parser.Framing (decodeRow)
+import Circuit.Parser.Json (Json (..), decodeJson)
 import Circuit.Post (Post (..))
 import Circuit.Shared (stamped)
-import Free.Agent.Mark (Mark (..), markGlyph)
-import Free.Agent.StdPorts (DoubleStep (..), scriptedDouble)
-import Circuit.Parser.Json (Json (..), decodeJson)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (when)
 import Data.IORef (newIORef)
@@ -22,10 +19,13 @@ import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
 import Free.Agent.Acp (AcpClient (..), acpHost, acpInitialize, acpNewSession, defaultAcpConfig, jsonToInt)
+import Free.Agent.Agent (runAgent)
 import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.File (writeCursor)
 import Free.Agent.Host (hostBody)
-import System.Directory (findExecutable, removePathForcibly)
+import Free.Agent.Mark (Mark (..), markGlyph)
+import Free.Agent.StdPorts (DoubleStep (..), scriptedDouble)
+import System.Directory (doesFileExist, findExecutable, removePathForcibly)
 import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -95,12 +95,21 @@ acpTopic = do
     TIO.writeFile script (T.pack peer)
     setFileMode script 0o755
     writeCursor root "acp1" 0
-    myPath <- takeDirectory <$> getExecutablePath
-    pathBin <- findExecutable "free-agent"
-    let bin =
-          fromMaybe
-            (myPath </> ".." </> ".." </> ".." </> "free-agent" </> "build" </> "free-agent" </> "free-agent")
-            pathBin
+    axiomaPath <- getExecutablePath
+    let built =
+          takeDirectory axiomaPath
+            </> ".."
+            </> ".."
+            </> ".."
+            </> "free-agent"
+            </> "build"
+            </> "free-agent"
+            </> "free-agent"
+    builtExists <- doesFileExist built
+    bin <-
+      if builtExists
+        then pure built
+        else fromMaybe (takeDirectory axiomaPath </> "free-agent") <$> findExecutable "free-agent"
     done <- newEmptyMVar
     _ <-
       forkIO $ do
@@ -117,9 +126,9 @@ acpTopic = do
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "acp1"]
-    assert "R2a the wired acp seat answers the bus through a real pipe" $
+    assert "R2a the wired acp seat publishes explicit content with input audience and ancestry" $
       code == ExitSuccess
         && case replies of
-          [r] -> to r == ["acp1"] && body r == "acp ack: ok" && thread r == []
+          [r] -> to r == ["human"] && body r == "@acp1: acp ack: ok" && thread r == [0]
           _ -> False
     removePathForcibly root

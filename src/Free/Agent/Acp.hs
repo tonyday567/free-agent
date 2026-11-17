@@ -47,8 +47,11 @@ module Free.Agent.Acp
     acpRequest,
     acpInitialize,
     acpNewSession,
+    acpResumeSession,
     acpSetConfigOption,
     acpPrompt,
+    acpPromptWithResponse,
+    acpPromptWithResponseOnSend,
     PromptResult (..),
 
     -- * Seat
@@ -56,13 +59,6 @@ module Free.Agent.Acp
   )
 where
 
-import Free.Agent.StdPorts
-  ( ProcConfig (..),
-    StdPorts (..),
-    lineMarks,
-    openStdPorts,
-  )
-import Free.Agent.StdPorts qualified as Ports
 import Circuit.Category (K (..))
 import Circuit.Machine (Poles (..))
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
@@ -79,7 +75,15 @@ import Data.Text.IO qualified as TIO
 import Data.Time (diffUTCTime, getCurrentTime)
 import Data.Vector qualified as V
 import Free.Agent.Host (BodyMode (..), Host (..))
+import Free.Agent.StdPorts
+  ( ProcConfig (..),
+    StdPorts (..),
+    lineMarks,
+    openStdPorts,
+  )
+import Free.Agent.StdPorts qualified as Ports
 import System.Directory (createDirectoryIfMissing)
+import System.Environment (getEnvironment)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
 import Prelude hiding (read)
@@ -97,6 +101,9 @@ data AcpConfig = AcpConfig
     -- | The child's working directory.  The ACP session cwd is pinned
     -- separately via @session/new@.
     acpWorkDir :: FilePath,
+    -- | Environment overrides for the child, merged over the inherited
+    -- environment so PATH and credentials remain available.
+    acpEnv :: [(String, String)],
     -- | Optional raw-frame transcript (NDJSON, one @{ts,dir,raw}@ per line,
     -- @dir@ ∈ send\/recv), mirroring the python probe's transcript.
     acpTranscript :: Maybe FilePath
@@ -110,6 +117,7 @@ defaultAcpConfig =
     { acpCommand = "kimi",
       acpArgs = ["acp"],
       acpWorkDir = "/tmp/free-agent-acp",
+      acpEnv = [],
       acpTranscript = Nothing
     }
 
@@ -132,11 +140,18 @@ openAcp :: AcpConfig -> IO AcpClient
 openAcp cfg = do
   let wd = acpWorkDir cfg
   createDirectoryIfMissing True wd
-  let replCfg =
+  inherited <- getEnvironment
+  let overridden = map fst (acpEnv cfg)
+      childEnv =
+        if null (acpEnv cfg)
+          then Nothing
+          else Just (acpEnv cfg <> filter ((`notElem` overridden) . fst) inherited)
+      replCfg =
         ProcConfig
           { procCommand = acpCommand cfg,
             procArgs = acpArgs cfg,
             procWorkingDir = wd,
+            procEnv = childEnv,
             procMarks = lineMarks,
             procMergeStderr = False
           }
@@ -364,7 +379,13 @@ acpAnswer c rid method params = case method of
 -- 'acpAnswer'); every frame seen (including the response) is returned in
 -- arrival order alongside the response.
 acpRequest :: AcpClient -> Int -> Text -> Json -> IO (Maybe Json, [Json])
-acpRequest c micros method params = do
+acpRequest = acpRequestOnSend (pure ())
+
+-- | Send one request, run @onSend@ after its correlated id is on the wire,
+-- then read until that response arrives or the timeout expires. The hook is
+-- where a caller installs cancellation without a pre-prompt race.
+acpRequestOnSend :: IO () -> AcpClient -> Int -> Text -> Json -> IO (Maybe Json, [Json])
+acpRequestOnSend onSend c micros method params = do
   rid <- atomicModifyIORef' (acpNextId c) (\i -> (i + 1, i))
   acpSendValue
     c
@@ -375,6 +396,7 @@ acpRequest c micros method params = do
           ("params", params)
         ]
     )
+  onSend
   start <- getCurrentTime
   loop rid [] start
   where
@@ -430,6 +452,17 @@ acpNewSession c micros cwd = do
       (JObject [("cwd", JString (T.pack cwd)), ("mcpServers", JArray V.empty)])
   pure (mresp >>= resultOf >>= textAt "sessionId", msgs)
 
+-- | @session/resume@ for a persisted session at the same absolute cwd.
+-- dsh returns configOptions rather than echoing the session id, so the raw
+-- response is retained and the caller keeps the requested id as evidence.
+acpResumeSession :: AcpClient -> Int -> Text -> FilePath -> IO (Maybe Json, [Json])
+acpResumeSession c micros sid cwd =
+  acpRequest
+    c
+    micros
+    "session/resume"
+    (JObject [("sessionId", JString sid), ("cwd", JString (T.pack cwd))])
+
 -- | @session/set_config_option@ — returns the full configOptions array.
 acpSetConfigOption ::
   AcpClient -> Int -> Text -> Text -> Text -> IO (Maybe Json, [Json])
@@ -460,13 +493,25 @@ data PromptResult = PromptResult
   }
   deriving (Show)
 
--- | @session/prompt@ with a single text block.  Streams are collected
--- until the prompt response, then drained briefly for trailing
--- notifications (@usage_update@ arrives after the response).
+-- | @session/prompt@ with a single text block. Streams are collected until
+-- the prompt response, then drained briefly for trailing notifications
+-- (@usage_update@ arrives after the response).
 acpPrompt :: AcpClient -> Int -> Text -> Text -> IO PromptResult
-acpPrompt c micros sid promptText = do
+acpPrompt client micros sid promptText = snd <$> acpPromptWithResponse client micros sid promptText
+
+-- | Prompt with the exact correlated response exposed beside collected
+-- updates. A timed-out request is not drained: its late response must stay
+-- distinguishable from the next turn's response.
+acpPromptWithResponse :: AcpClient -> Int -> Text -> Text -> IO (Maybe Json, PromptResult)
+acpPromptWithResponse = acpPromptWithResponseOnSend (pure ())
+
+-- | Prompt with an action run after the request is on the wire. This keeps
+-- cancellation installation ordered after prompt submission.
+acpPromptWithResponseOnSend :: IO () -> AcpClient -> Int -> Text -> Text -> IO (Maybe Json, PromptResult)
+acpPromptWithResponseOnSend onSend c micros sid promptText = do
   (mresp, msgs) <-
-    acpRequest
+    acpRequestOnSend
+      onSend
       c
       micros
       "session/prompt"
@@ -477,7 +522,7 @@ acpPrompt c micros sid promptText = do
             )
           ]
       )
-  trailing <- drain
+  trailing <- maybe (pure []) (const drain) mresp
   let allMsgs = msgs <> trailing
       updates =
         [ u
@@ -488,26 +533,37 @@ acpPrompt c micros sid promptText = do
       thoughts = T.concat [t | AgentThoughtChunk t <- updates]
       stop = mresp >>= resultOf >>= textAt "stopReason"
   pure
-    PromptResult
-      { prReply = reply,
-        prThoughts = thoughts,
-        prStopReason = stop,
-        prUpdates = updates,
-        prMessages = allMsgs
-      }
+    ( mresp,
+      PromptResult
+        { prReply = reply,
+          prThoughts = thoughts,
+          prStopReason = stop,
+          prUpdates = updates,
+          prMessages = allMsgs
+        }
+    )
   where
-    -- Read until 500ms idle, answering any late reverse-RPCs.
-    drain = go []
+    -- Drain trailing notifications for at most 500ms in total. Resetting an
+    -- idle timeout on every frame would let a chatty peer postpone settlement
+    -- forever after its prompt response has already arrived.
+    drain = do
+      started <- getCurrentTime
+      go started []
       where
-        go acc = do
-          mv <- acpReadFrame c 500000
-          case mv of
-            Nothing -> pure (reverse acc)
-            Just v -> do
-              case classifyFrame v of
-                Just (AgentRequest i m p) -> acpAnswer c i m p
-                _ -> pure ()
-              go (v : acc)
+        go started acc = do
+          now <- getCurrentTime
+          let left = 500000 - round (realToFrac (diffUTCTime now started) * 1e6 :: Double)
+          if left <= 0
+            then pure (reverse acc)
+            else do
+              mv <- acpReadFrame c left
+              case mv of
+                Nothing -> pure (reverse acc)
+                Just v -> do
+                  case classifyFrame v of
+                    Just (AgentRequest i m p) -> acpAnswer c i m p
+                    _ -> pure ()
+                  go started (v : acc)
 
 -- ---------------------------------------------------------------------------
 -- Seat

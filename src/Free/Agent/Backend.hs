@@ -20,6 +20,7 @@ module Free.Agent.Backend
     SendError (..),
     Session,
     sessionCapabilities,
+    sessionStartupFailure,
     BackendEvent (..),
     BackendOutput (..),
     OutputChannel (..),
@@ -29,6 +30,7 @@ module Free.Agent.Backend
     hermesBackend,
     kimiBackend,
     dshBackend,
+    dshAcpBackend,
     commandBackend,
     processBackend,
     directHttpBackend,
@@ -60,7 +62,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Vector qualified as V
-import Free.Agent.Acp (AcpClient, AcpConfig (..), Frame (..), Update (..), acpInitialize, acpNewSession, acpPrompt, classifyFrame, closeAcp, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates)
+import Free.Agent.Acp (AcpClient, AcpConfig (..), Frame (..), Update (..), acpInitialize, acpNewSession, acpPromptWithResponseOnSend, acpResumeSession, acpSendValue, classifyFrame, closeAcp, defaultAcpConfig, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliCeiling, cliExhausted, cliInterrupted, cliScrub, cliStale, dshCli, kimiCli)
 import Free.Agent.Gateway (GatewayClient (..), GatewayConfig (..), openGateway, parseSseFrame)
 import Free.Agent.Host (BareConfig (..), hermesCli)
@@ -68,7 +70,7 @@ import Free.Agent.StdPorts (frameAgent, sseMarks)
 import Network.HTTP.Client hiding (defaultRequest)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
-import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist, makeAbsolute, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory)
 import System.IO (hClose, hPutStr)
@@ -85,6 +87,7 @@ data BackendKind
   | DirectHttpBackend
   | GatewayBackend
   | AcpBackend
+  | DshAcpBackend
   deriving (Eq, Show)
 
 -- | Session continuity actually supported by the backend.
@@ -191,6 +194,7 @@ data Backend
   | DirectHttp BareConfig Text
   | Gateway GatewayConfig Text
   | Acp AcpConfig Int Text
+  | DshAcp AcpConfig Int Text FilePath
 
 hermesBackend :: Maybe Text -> Maybe Text -> Maybe Text -> Bool -> FilePath -> Backend
 hermesBackend model provider reasoning yolo sessionFile =
@@ -203,6 +207,23 @@ kimiBackend model provider sessionFile =
 dshBackend :: Maybe Text -> FilePath -> Maybe FilePath -> FilePath -> Backend
 dshBackend card basePatch modelPatch sessionFile =
   ProcessBackend DshBackend (dshCli card basePatch modelPatch sessionFile)
+
+-- | Persistent dsh through ACP, with its workspace, session store, and patch
+-- route pinned independently of the bus root and launcher's environment.
+-- The card is presented on a newly created session, not replayed on resume.
+dshAcpBackend :: Maybe Text -> FilePath -> Maybe FilePath -> FilePath -> FilePath -> FilePath -> Backend
+dshAcpBackend card basePatch modelPatch workspace dshHome sessionFile =
+  DshAcp config 600_000_000 (fromMaybe "" card) sessionFile
+  where
+    config =
+      defaultAcpConfig
+        { acpCommand = "dsh",
+          acpArgs =
+            ["acp", "--patch", basePatch]
+              <> maybe [] (\path -> ["--patch", path]) modelPatch,
+          acpWorkDir = workspace,
+          acpEnv = [("DSH_HOME", dshHome)]
+        }
 
 -- | A generic process recipe, kept separate from the named backend constructors.
 processBackend :: Cli -> Backend
@@ -238,6 +259,7 @@ acpBackend = Acp
 -- | An open backend session. Use 'sendSession' and 'nextEvent' for its two legs.
 data Session = Session
   { sessionCapabilities :: BackendCapabilities,
+    sessionStartupFailure :: Maybe BackendOutcome,
     sessionSend :: BackendRequest -> IO (Either SendError ()),
     sessionNext :: IO BackendEvent,
     sessionCancel :: IO Bool,
@@ -247,6 +269,7 @@ data Session = Session
 data Active = Active
   { activeCancelled :: IORef Bool,
     activeProcess :: IORef (Maybe ProcessHandle),
+    activeCancel :: IORef (IO ()),
     activeDone :: MVar (),
     activeOutcome :: MVar BackendOutcome
   }
@@ -277,7 +300,7 @@ closeSession :: Session -> IO ()
 closeSession = sessionClose
 
 newActive :: IO Active
-newActive = Active <$> newIORef False <*> newIORef Nothing <*> newEmptyMVar <*> newEmptyMVar
+newActive = Active <$> newIORef False <*> newIORef Nothing <*> newIORef (pure ()) <*> newEmptyMVar <*> newEmptyMVar
 
 emptyEvidence :: BackendEvidence
 emptyEvidence = BackendEvidence Nothing Nothing "" Nothing Nothing
@@ -294,6 +317,7 @@ capabilitiesFor backend = case backend of
   DirectHttp {} -> BackendCapabilities DirectHttpBackend NoSessions OneShot False
   Gateway {} -> BackendCapabilities GatewayBackend ServerSessions IncrementalEvents False
   Acp {} -> BackendCapabilities AcpBackend ServerSessions CollectedEvents False
+  DshAcp {} -> BackendCapabilities DshAcpBackend ServerSessions CollectedEvents True
 
 -- | Open configured resources. Open failures become a closed session with one
 -- terminal event, so environment failure is observable through the same leg.
@@ -316,21 +340,50 @@ openBackend backend = case backend of
       Left err -> failedSession (capabilitiesFor backend) (Unavailable err)
       Right client ->
         newSession (capabilitiesFor backend) (pure ()) (runGateway systemPrompt client)
-  Acp cfg micros systemPrompt -> do
-    opened <- trySync (openAcp cfg)
-    case opened of
-      Left err -> failedSession (capabilitiesFor backend) (Unavailable err)
-      Right client -> do
-        initial <- trySync (openAcpSession client micros (acpWorkDir cfg))
-        case initial of
-          Left err -> do
-            closeAcp client
-            failedSession (capabilitiesFor backend) (Failed ProtocolFailure err emptyEvidence)
-          Right (Left outcome) -> do
-            closeAcp client
-            failedSession (capabilitiesFor backend) outcome
-          Right (Right sid) ->
-            newSession (capabilitiesFor backend) (closeAcp client) (runAcp micros systemPrompt client sid)
+  Acp cfg micros systemPrompt ->
+    openAcpBackend backend cfg micros systemPrompt Nothing False
+  DshAcp cfg micros systemPrompt sessionFile ->
+    openAcpBackend backend cfg micros systemPrompt (Just sessionFile) True
+
+openAcpBackend :: Backend -> AcpConfig -> Int -> Text -> Maybe FilePath -> Bool -> IO Session
+openAcpBackend backend cfg micros systemPrompt sessionFile cancellable = do
+  workspace <- makeAbsolute (acpWorkDir cfg)
+  let config = cfg {acpWorkDir = workspace}
+  stored <- maybe (pure Nothing) readStoredSession sessionFile
+  opened <- trySync (openAcp config)
+  case opened of
+    Left err -> failedSession (capabilitiesFor backend) (Unavailable err)
+    Right client -> do
+      initial <-
+        trySync $
+          case stored of
+            Just sid -> fmap (,False) <$> resumeAcpSession client micros workspace sid
+            Nothing -> fmap (,True) <$> openAcpSession client micros workspace
+      case initial of
+        Left err -> do
+          closeAcp client
+          failedSession (capabilitiesFor backend) (Failed ProtocolFailure err emptyEvidence)
+        Right (Left outcome) -> do
+          closeAcp client
+          failedSession (capabilitiesFor backend) outcome
+        Right (Right (sid, fresh)) -> do
+          persisted <-
+            case sessionFile of
+              Just path -> trySync (writeStoredSession path sid)
+              Nothing -> pure (Right ())
+          case persisted of
+            Left err -> do
+              closeAcp client
+              failedSession (capabilitiesFor backend) (Unavailable err)
+            Right () -> do
+              cardState <-
+                if cancellable
+                  then Just <$> newIORef fresh
+                  else pure Nothing
+              newSession
+                (capabilitiesFor backend)
+                (closeAcp client)
+                (runAcp micros systemPrompt client sid cancellable cardState)
 
 failedSession :: BackendCapabilities -> BackendOutcome -> IO Session
 failedSession caps outcome = do
@@ -340,6 +393,7 @@ failedSession caps outcome = do
   pure
     Session
       { sessionCapabilities = caps,
+        sessionStartupFailure = Just outcome,
         sessionSend = \_ -> pure (Left SendClosed),
         sessionNext = readChan events,
         sessionCancel = pure False,
@@ -381,6 +435,8 @@ newSession caps closeResource run = do
                 process <- readIORef (activeProcess turn)
                 forM_ process $ \handle ->
                   catch (terminateProcess handle) (\(_ :: IOException) -> pure ())
+                cancelAction <- readIORef (activeCancel turn)
+                catch cancelAction (\(_ :: IOException) -> pure ())
                 readMVar (activeDone turn)
                 outcome <- readMVar (activeOutcome turn)
                 pure (case outcome of Cancelled _ -> True; _ -> False)
@@ -388,7 +444,7 @@ newSession caps closeResource run = do
         writeIORef closed True
         when (backendCancellation caps) (void cancel)
         stateCloseResource state
-  pure (Session caps send (readChan events) cancel close)
+  pure (Session caps Nothing send (readChan events) cancel close)
 
 worker :: SessionState -> Active -> BackendRequest -> IO ()
 worker state turn request = do
@@ -469,7 +525,10 @@ runProcess cli state turn request = do
             errVar <- newEmptyMVar
             _ <- forkIO (BS.hGetContents stdoutH >>= putMVar outVar)
             _ <- forkIO (BS.hGetContents stderrH >>= putMVar errVar)
-            _ <- forkIO $ catch (hPutStr stdinH (cliStdin cli (requestText request)) >> hClose stdinH) (\(_ :: IOException) -> pure ())
+            let input = cliStdin cli (requestText request)
+            if null input
+              then hClose stdinH
+              else void $ forkIO $ catch (hPutStr stdinH input >> hClose stdinH) (\(_ :: IOException) -> pure ())
             code <- waitForProcess handle
             out <- TE.decodeUtf8 <$> readMVar outVar
             err <- TE.decodeUtf8 <$> readMVar errVar
@@ -573,7 +632,7 @@ runHttp cfg systemPrompt manager initial state _ request = do
           }
   response <- try @HttpException (httpLbs httpRequest manager)
   case response of
-    Left err -> pure (Unavailable (T.pack (displayException err)))
+    Left err -> pure (Failed ProcessFailure (T.pack (displayException err)) emptyEvidence)
     Right value -> do
       let status = statusCode (responseStatus value)
           raw = TE.decodeUtf8 (BL.toStrict (responseBody value))
@@ -623,7 +682,7 @@ runGateway systemPrompt client state _ request = do
     Right httpRequest -> do
       response <- try @HttpException (withResponse httpRequest (gcManager client) (consumeGateway state))
       pure $ case response of
-        Left err -> Unavailable (T.pack (displayException err))
+        Left err -> Failed ProcessFailure (T.pack (displayException err)) emptyEvidence
         Right outcome -> outcome
 
 consumeGateway :: SessionState -> Response BodyReader -> IO BackendOutcome
@@ -657,7 +716,9 @@ consumeGateway state response = do
                       evidence = gatewayEvidence reply rawEvents'
                    in if T.null (T.strip reply)
                         then pure (Failed EmptyReply "empty reply stream" evidence)
-                        else pure (Completed evidence)
+                        else do
+                          unless (isJust completed') (emitText state ReplyOutput reply)
+                          pure (Completed evidence)
               | otherwise -> loop body nextState deltas' completed' rawEvents'
 
 stepGateway :: SessionState -> (Text, Maybe Text, [Text], Maybe BackendOutcome) -> (Text, Json) -> IO (Text, Maybe Text, [Text], Maybe BackendOutcome)
@@ -715,27 +776,92 @@ openAcpSession client micros cwd = do
     isResponse (Just (Response _ _)) = True
     isResponse _ = False
 
-runAcp :: Int -> Text -> AcpClient -> Text -> SessionState -> Active -> BackendRequest -> IO BackendOutcome
-runAcp micros systemPrompt client sid state _ request = do
-  result <- try @IOException (acpPrompt client micros sid (systemPrompt <> "\n\nUser messages:\n" <> requestText request))
-  case result of
-    Left err -> pure (Failed ProcessFailure (T.pack (displayException err)) emptyEvidence {evidenceSessionId = Just sid})
-    Right promptResult -> do
-      let messages = prMessages promptResult
-          reply = prReply promptResult
-          thoughts = prThoughts promptResult
-          stop = prStopReason promptResult
-          usage = [json | UsageUpdate json <- prUpdates promptResult]
-          evidence = acpEvidence (Just sid) messages stop usage
-          response = listToMaybe [value | Just (Response _ value) <- map classifyFrame messages]
-      emitText state ReplyOutput reply
-      emitText state ThoughtOutput thoughts
-      forM_ usage $ \json -> emitText state UsageOutput (TE.decodeUtf8 (encodeJson json))
-      pure $ case response of
-        Nothing -> Failed TimeoutFailure "ACP prompt timed out" evidence
-        Just value
-          | Just err <- jsonField "error" value -> Failed ProtocolFailure (TE.decodeUtf8 (encodeJson err)) evidence
-          | otherwise -> Completed evidence
+resumeAcpSession :: AcpClient -> Int -> FilePath -> Text -> IO (Either BackendOutcome Text)
+resumeAcpSession client micros cwd sid = do
+  (response, messages) <- acpInitialize client micros
+  case response of
+    Nothing -> pure (Left (Failed TimeoutFailure "ACP initialize timed out" (acpEvidence Nothing messages Nothing [])))
+    Just value
+      | Just err <- jsonField "error" value ->
+          pure (Left (Failed ProtocolFailure (TE.decodeUtf8 (encodeJson err)) (acpEvidence Nothing messages Nothing [])))
+      | otherwise -> do
+          (resumed, resumeMessages) <- acpResumeSession client micros sid cwd
+          let allMessages = messages <> resumeMessages
+              evidence = acpEvidence (Just sid) allMessages Nothing []
+          pure $ case resumed of
+            Nothing -> Left (Failed TimeoutFailure "ACP session/resume timed out" evidence)
+            Just value'
+              | Just err <- jsonField "error" value' ->
+                  Left (Failed ProtocolFailure (TE.decodeUtf8 (encodeJson err)) evidence)
+              | otherwise -> Right sid
+
+runAcp :: Int -> Text -> AcpClient -> Text -> Bool -> Maybe (IORef Bool) -> SessionState -> Active -> BackendRequest -> IO BackendOutcome
+runAcp micros systemPrompt client sid cancellable cardState state turn request = do
+  cancelled <- readIORef (activeCancelled turn)
+  if cancelled
+    then pure (Cancelled emptyEvidence {evidenceSessionId = Just sid})
+    else do
+      includeCard <- maybe (pure True) readIORef cardState
+      let prompt =
+            (if includeCard && not (T.null systemPrompt) then systemPrompt <> "\n\n" else "")
+              <> "User messages:\n"
+              <> requestText request
+          cancelPrompt =
+            acpSendValue
+              client
+              ( JObject
+                  [ ("jsonrpc", JString "2.0"),
+                    ("method", JString "session/cancel"),
+                    ("params", JObject [("sessionId", JString sid)])
+                  ]
+              )
+          installCancel =
+            when cancellable $ do
+              writeIORef (activeCancel turn) cancelPrompt
+              cancelledNow <- readIORef (activeCancelled turn)
+              when cancelledNow cancelPrompt
+      result <- try @IOException (acpPromptWithResponseOnSend installCancel client micros sid prompt)
+      writeIORef (activeCancel turn) (pure ())
+      forM_ cardState $ \fresh -> writeIORef fresh False
+      case result of
+        Left err -> do
+          writeIORef (stateClosed state) True
+          catch (closeAcp client) (\(_ :: IOException) -> pure ())
+          pure (Failed ProcessFailure (T.pack (displayException err)) emptyEvidence {evidenceSessionId = Just sid})
+        Right (response, promptResult) -> do
+          let messages = prMessages promptResult
+              reply = prReply promptResult
+              thoughts = prThoughts promptResult
+              stop = prStopReason promptResult
+              usage = [json | UsageUpdate json <- prUpdates promptResult]
+              evidence = acpEvidence (Just sid) messages stop usage
+          emitText state ReplyOutput reply
+          emitText state ThoughtOutput thoughts
+          forM_ usage $ \json -> emitText state UsageOutput (TE.decodeUtf8 (encodeJson json))
+          wasCancelled <- readIORef (activeCancelled turn)
+          let outcome = case response of
+                Nothing -> Failed TimeoutFailure "ACP prompt timed out; session closed against late responses" evidence
+                Just value
+                  | Just err <- jsonField "error" value -> Failed ProtocolFailure (TE.decodeUtf8 (encodeJson err)) evidence
+                  | wasCancelled -> Cancelled evidence
+                  | otherwise -> case stop of
+                      Just "cancelled" -> Cancelled evidence
+                      Just "max_tokens" -> Exhausted "ACP stop reason max_tokens" evidence
+                      Just "max_turn_requests" -> Ceiling "ACP stop reason max_turn_requests" evidence
+                      Just "end_turn"
+                        | T.null (T.strip reply) -> Failed EmptyReply "ACP end_turn with an empty reply" evidence
+                        | otherwise -> Completed evidence
+                      Nothing -> Failed ProtocolFailure "ACP prompt response has no stopReason" evidence
+                      Just other -> Failed ProtocolFailure ("unsupported ACP stop reason: " <> other) evidence
+          case outcome of
+            Failed TimeoutFailure _ _ -> do
+              -- A timed-out request may still be running remotely. Do not let a
+              -- later turn consume its response or reuse its in-flight session.
+              writeIORef (stateClosed state) True
+              when cancellable (catch cancelPrompt (\(_ :: IOException) -> pure ()))
+              catch (closeAcp client) (\(_ :: IOException) -> pure ())
+            _ -> pure ()
+          pure outcome
 
 acpEvidence :: Maybe Text -> [Json] -> Maybe Text -> [Json] -> BackendEvidence
 acpEvidence sid messages stop usage =

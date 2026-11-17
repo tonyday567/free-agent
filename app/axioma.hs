@@ -10,6 +10,7 @@ import Axioma.Acp (acpTopic)
 import Axioma.Backend (backendTopic)
 import Axioma.Bus (busTopic)
 import Axioma.Delivery (deliveryTopic)
+import Axioma.DshAcp (dshAcpTopic)
 import Axioma.Halt (haltTopic)
 import Axioma.Interrupt (interruptTopic)
 import Axioma.Lifecycle (lifecycleTopic)
@@ -19,16 +20,21 @@ import Axioma.Quiesce (quiesceTopic)
 import Axioma.Recovery (recoveryTopic)
 import Axioma.Refresh (refreshTopic)
 import Axioma.Resume (resumeTopic)
+import Axioma.Runtime (runtimeTopic)
 import Axioma.Seat (seatTopic)
 import Axioma.Transcript (transcriptTopic)
 import Axioma.Usage (usageTopic)
+import Control.Exception (SomeException, displayException, try)
+import Control.Monad (unless)
 import Options.Applicative
+import System.Exit (exitFailure)
 
 data Topic
   = All
   | Seat
   | Transcript
   | Delivery
+  | DshAcp
   | Meeting
   | Ports
   | Bus
@@ -38,6 +44,7 @@ data Topic
   | Refresh
   | Recovery
   | Resume
+  | Runtime
   | Acp
   | Backend
   | Lifecycle
@@ -49,6 +56,7 @@ topicName All = "all"
 topicName Seat = "seat"
 topicName Transcript = "transcript"
 topicName Delivery = "delivery"
+topicName DshAcp = "dsh-acp"
 topicName Meeting = "meeting"
 topicName Ports = "ports"
 topicName Bus = "bus"
@@ -58,6 +66,7 @@ topicName Quiesce = "quiesce"
 topicName Refresh = "refresh"
 topicName Recovery = "recovery"
 topicName Resume = "resume"
+topicName Runtime = "runtime"
 topicName Acp = "acp"
 topicName Backend = "backend"
 topicName Lifecycle = "lifecycle"
@@ -68,6 +77,7 @@ topicDesc All = "run all topics"
 topicDesc Seat = "host shard round-trips: echo/process/CLI host sketches, BodyLines split, session resume"
 topicDesc Transcript = "transcript oracle (B1): JSONL records, scrub agreement, silent failure"
 topicDesc Delivery = "delivery settlement: quiet response, exactly-once await, explicit root and reply posts"
+topicDesc DshAcp = "persistent dsh ACP configuration, resume, cancellation, terminal outcomes, and wired CLI"
 topicDesc Meeting = "meeting skeletons, panel meeting, replay, derivations as 2-cells"
 topicDesc Ports = "process framing, death-as-content, merged stdio, and honest doubles (S1-S6)"
 topicDesc Bus = "file-log kernel, CLI projections, and runtime witnesses"
@@ -77,6 +87,7 @@ topicDesc Quiesce = "tailLog draining + the quiescence Moore (Q1-Q5)"
 topicDesc Refresh = "automatic same-name session refresh and durable handoff"
 topicDesc Recovery = "B16 recovery classes: a resume failure is not a turn failure, and what a skip records"
 topicDesc Resume = "CLI resume, retry, and transcript witnesses"
+topicDesc Runtime = "live Backend-seat publication, failure, interruption, and crash-recovery witnesses"
 topicDesc Acp = "ACP seat (R2a): scripted double + wired-binary integration"
 topicDesc Backend = "Backend recipes, independent Session legs, typed outcomes, cancellation, and local protocol peers"
 topicDesc Lifecycle = "file-log lock stress and same-process handle exclusion"
@@ -108,10 +119,21 @@ opts =
     )
 
 runTopic :: Topic -> IO ()
-runTopic All = mapM_ runTopic (filter (/= All) [minBound .. maxBound])
+runTopic All = do
+  results <- mapM runOne (filter (/= All) [minBound .. maxBound])
+  unless (and results) exitFailure
+  where
+    runOne topic = do
+      result <- try (runTopic topic) :: IO (Either SomeException ())
+      case result of
+        Right () -> pure True
+        Left err -> do
+          putStrLn ("  FAIL " <> topicName topic <> ": " <> displayException err)
+          pure False
 runTopic Seat = seatTopic
 runTopic Transcript = transcriptTopic
 runTopic Delivery = deliveryTopic
+runTopic DshAcp = dshAcpTopic
 runTopic Meeting = meetingTopic
 runTopic Ports = portsTopic
 runTopic Bus = busTopic
@@ -121,6 +143,7 @@ runTopic Quiesce = quiesceTopic
 runTopic Refresh = refreshTopic
 runTopic Recovery = recoveryTopic
 runTopic Resume = resumeTopic
+runTopic Runtime = runtimeTopic
 runTopic Acp = acpTopic
 runTopic Backend = backendTopic
 runTopic Lifecycle = lifecycleTopic
