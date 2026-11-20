@@ -110,12 +110,13 @@ Each executable seat has a finite `--delivery-budget N` (default 1000000). Exhau
 ```text
 free-agent -r ROOT --name NAME --prompt PROMPT.md [--backend hermes|kimi|gateway] [--delivery-budget N]
 free-agent dsh -r ROOT --name NAME --prompt PROMPT.md --dsh-patch PATCH.yml [--dsh-model-patch MODEL.yml] [--delivery-budget N]
+free-agent dsh-acp -r ROOT --name NAME --prompt PROMPT.md --dsh-patch PATCH.yml --dsh-home DIR --workspace DIR [--dsh-model-patch MODEL.yml] [--delivery-budget N]
 free-agent llm -r ROOT --name NAME --prompt PROMPT.md [--base-url URL] [--key-env NAME] [--delivery-budget N]
 free-agent acp -r ROOT --name NAME --prompt PROMPT.md [--acp-cmd CMD] [--delivery-budget N]
 free-agent cmd -r ROOT --name NAME --cmd CMD [ARG...] [--delivery-budget N]
 ```
 
-`llm` uses `bareHost`, `gateway` targets a Hermes api_server, `acp` speaks JSON-RPC to a persistent child such as `kimi acp`, and `cmd` treats an external command as the seat.
+`llm` uses `bareHost`, `gateway` targets a Hermes api_server, `acp` speaks JSON-RPC to a persistent child such as `kimi acp`, and `cmd` treats an external command as the seat. `dsh-acp` keeps one persistent dsh session behind the Backend boundary, pins its workspace and `DSH_HOME` independently of the bus root, and presents the seat card only on a fresh session.
 
 Seat operations use the installed command help: `free-agent --help`, `free-agent refresh --help`, and `free-agent bus status --help`.
 

@@ -382,6 +382,7 @@ acpWitness = do
             && evidenceStopReason evidence == Just "end_turn"
             && "\"stopReason\":\"end_turn\"" `T.isInfixOf` evidenceRawOutput evidence
             && isJust (evidenceUsage evidence)
+            && evidenceContextUsage evidence == Just (BackendContextUsage 7 Nothing)
       _ -> False
   exhausted <- runRequest session (defaultRequest "max_tokens")
   empty <- runRequest session (defaultRequest "empty-reply")

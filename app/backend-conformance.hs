@@ -21,7 +21,7 @@ import Free.Agent.Bus.File (readCursor, readTransaction, writeCursor, writeTrans
 import Free.Agent.Protocol (ResultKind (..), defaultProtocol, resultWord)
 import Options.Applicative
 import Seat.Backend (appendBackendTranscript, drainBackend, replyActs, runBackendTurn)
-import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 import System.Environment (getEnv, setEnv)
 import System.Exit (exitFailure)
 import System.FilePath (takeDirectory, (</>))
@@ -68,11 +68,13 @@ clientName Hermes = "hermes"
 clientName Dsh = "dsh"
 clientName Both = "both"
 
+-- | Retain conformance evidence in a visible repository workspace. In
+-- particular, do not inherit the host's hidden provider/private TMPDIR.
 scratchBase :: IO FilePath
 scratchBase = do
-  home <- getHomeDirectory
+  cwd <- getCurrentDirectory
   pid <- getProcessID
-  let root = home </> ".hermes" </> "cache" </> "scratch" </> ("free-agent-backend-conformance-" <> show pid)
+  let root = cwd </> "captures" </> "backend-conformance" </> show pid
   createDirectoryIfMissing True root
   pure root
 

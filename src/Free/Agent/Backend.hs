@@ -27,6 +27,7 @@ module Free.Agent.Backend
     BackendOutcome (..),
     FailureKind (..),
     BackendEvidence (..),
+    BackendContextUsage (..),
     hermesBackend,
     kimiBackend,
     dshBackend,
@@ -62,7 +63,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Vector qualified as V
-import Free.Agent.Acp (AcpClient, AcpConfig (..), Frame (..), Update (..), acpInitialize, acpNewSession, acpPromptWithResponseOnSend, acpResumeSession, acpSendValue, classifyFrame, closeAcp, defaultAcpConfig, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates)
+import Free.Agent.Acp (AcpClient, AcpConfig (..), Frame (..), Update (..), acpInitialize, acpNewSession, acpPromptWithResponseOnSend, acpResumeSession, acpSendValue, classifyFrame, closeAcp, defaultAcpConfig, jsonToInt, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliCeiling, cliExhausted, cliInterrupted, cliScrub, cliStale, dshCli, kimiCli)
 import Free.Agent.Gateway (GatewayClient (..), GatewayConfig (..), openGateway, parseSseFrame)
 import Free.Agent.Host (BareConfig (..), hermesCli)
@@ -149,13 +150,23 @@ data OutputChannel
   | RawOutput
   deriving (Eq, Show)
 
+-- | Latest context occupancy supplied by an ACP @usage_update@. This is a
+-- refresh/compaction signal, not a C/F/O cost identity; dsh's session events
+-- retain the per-request token split when the ACP wire supplies only occupancy.
+data BackendContextUsage = BackendContextUsage
+  { contextUsedTokens :: Int,
+    contextSizeTokens :: Maybe Int
+  }
+  deriving (Eq, Show)
+
 -- | Evidence retained at settlement. Fields not supplied by a backend stay empty.
 data BackendEvidence = BackendEvidence
   { evidenceExitCode :: Maybe Int,
     evidenceSessionId :: Maybe Text,
     evidenceRawOutput :: Text,
     evidenceStopReason :: Maybe Text,
-    evidenceUsage :: Maybe Text
+    evidenceUsage :: Maybe Text,
+    evidenceContextUsage :: Maybe BackendContextUsage
   }
   deriving (Eq, Show)
 
@@ -303,7 +314,7 @@ newActive :: IO Active
 newActive = Active <$> newIORef False <*> newIORef Nothing <*> newIORef (pure ()) <*> newEmptyMVar <*> newEmptyMVar
 
 emptyEvidence :: BackendEvidence
-emptyEvidence = BackendEvidence Nothing Nothing "" Nothing Nothing
+emptyEvidence = BackendEvidence Nothing Nothing "" Nothing Nothing Nothing
 
 capabilitiesFor :: Backend -> BackendCapabilities
 capabilitiesFor backend = case backend of
@@ -549,7 +560,7 @@ runProcess cli state turn request = do
                 reply = cliScrub cli (out <> routed)
                 sid = (report >>= reportSession) <|> cliSessionId cli raw
                 exit = case code of ExitSuccess -> 0; ExitFailure n -> n
-                evidence = BackendEvidence (Just exit) sid raw (report >>= reportExitReason) reportRaw
+                evidence = BackendEvidence (Just exit) sid raw (report >>= reportExitReason) reportRaw Nothing
                 ceilingByReport = code == ExitFailure 2 && maybe False reportPartial report
                 interruptedByReport = maybe False reportInterrupted report
                 outcome
@@ -870,5 +881,11 @@ acpEvidence sid messages stop usage =
       evidenceSessionId = sid,
       evidenceRawOutput = T.unlines (map (TE.decodeUtf8 . encodeJson) messages),
       evidenceStopReason = stop,
-      evidenceUsage = if null usage then Nothing else Just (T.unlines (map (TE.decodeUtf8 . encodeJson) usage))
+      evidenceUsage = if null usage then Nothing else Just (T.unlines (map (TE.decodeUtf8 . encodeJson) usage)),
+      evidenceContextUsage = listToMaybe (reverse (mapMaybe contextUsage usage))
     }
+  where
+    contextUsage json = do
+      used <- jsonField "used" json >>= jsonToInt
+      let size = jsonField "size" json >>= jsonToInt
+      pure (BackendContextUsage used size)
