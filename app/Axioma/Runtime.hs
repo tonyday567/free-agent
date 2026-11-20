@@ -8,11 +8,11 @@ module Axioma.Runtime
 where
 
 import Axioma.Common (assert, mkPost, tempRoot)
-import Circuit.Post (Post (..), deliversTo)
+import Circuit.Post (Post (..), PostId, deliversTo)
 import Circuit.Shared (stamp, stamped)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Monad (forM, forM_, unless)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -25,9 +25,10 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable
 import System.Environment (getEnv, getExecutablePath, setEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
+import System.IO (IOMode (WriteMode), hClose, openFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Signals (sigKILL, signalProcess)
-import System.Process (getPid, readProcessWithExitCode, spawnProcess, terminateProcess, waitForProcess)
+import System.Process (ProcessHandle, StdStream (UseHandle), createProcess, getPid, proc, readProcessWithExitCode, spawnProcess, std_err, std_out, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
 seatBinary :: IO FilePath
@@ -109,6 +110,138 @@ successSource root label =
     <> "printf 'To resume this session: kimi -r runtime-session\\n"
     <> label
     <> "\\n'\n"
+
+data B17Trial = B17Trial
+  { b17Root :: FilePath,
+    b17Calls :: Int,
+    b17Rows :: Int,
+    b17Replies :: Int,
+    b17Notices :: Int,
+    b17Exits :: [Int],
+    b17Transaction :: Maybe PostId,
+    b17Cursor :: PostId,
+    b17Active :: Bool
+  }
+
+waitForText :: FilePath -> Text -> IO ()
+waitForText path needle = go (400 :: Int)
+  where
+    go 0 = error ("timed out waiting for " <> path <> " to contain " <> T.unpack needle)
+    go n = do
+      exists <- doesFileExist path
+      content <- if exists then TIO.readFile path else pure ""
+      if needle `T.isInfixOf` content then pure () else threadDelay 20_000 >> go (n - 1)
+
+spawnLogged :: FilePath -> [String] -> FilePath -> IO ProcessHandle
+spawnLogged bin args stem = do
+  out <- openFile (stem <> ".out") WriteMode
+  err <- openFile (stem <> ".err") WriteMode
+  (_, _, _, handle) <- createProcess (proc bin args) {std_out = UseHandle out, std_err = UseHandle err}
+  hClose out
+  hClose err
+  pure handle
+
+exitNumber :: ExitCode -> Int
+exitNumber ExitSuccess = 0
+exitNumber (ExitFailure n) = n
+
+runB17Trial :: FilePath -> Int -> IO B17Trial
+runB17Trial bin trial = do
+  root <- tempRoot ("free-agent-b17-trial-" <> show trial)
+  let participant = root </> "participant.sh"
+      calls = root </> "calls"
+      transcript = root </> ".transcripts" </> "seat.jsonl"
+  TIO.writeFile (root </> "log.jsonl") ""
+  TIO.writeFile (root </> "prompt.md") "B17 synchronized same-name witness."
+  TIO.writeFile participant $
+    "#!/bin/sh\nprintf 'call\\n' >> '"
+      <> T.pack calls
+      <> "'\nsleep 0.15\nprintf 'B17-REPLY\\n'\n"
+  setFileMode participant 0o755
+  writeCursor root "seat" 0
+  let args =
+        [ "cmd",
+          "--root",
+          root,
+          "--name",
+          "seat",
+          "--cmd",
+          participant,
+          "--quiesce",
+          "8"
+        ]
+  handles <- forM [1, 2 :: Int] $ \n -> spawnLogged bin args (root </> ("seat-" <> show n))
+  forM_ [1, 2 :: Int] $ \n -> waitForText (root </> ("seat-" <> show n <> ".out")) "cursor:"
+  _ <- postLocal root (mkPost "runner" ["seat"] "TASK synchronized B17 witness")
+  let settled = do
+        content <- TIO.readFile (root </> "log.jsonl")
+        pure ("B17-REPLY" `T.isInfixOf` content || "ambiguous recovery" `T.isInfixOf` content)
+      waitSettlement 0 = pure ()
+      waitSettlement n = settled >>= \ok -> if ok then pure () else threadDelay 20_000 >> waitSettlement (n - 1)
+  waitSettlement (400 :: Int)
+  threadDelay 200_000
+  _ <- postLocal root (mkPost "runner" ["seat"] (markGlyph Landed))
+  exits <- forM handles $ \handle -> do
+    exited <- timeout 10_000_000 (waitForProcess handle)
+    case exited of
+      Nothing -> do
+        terminateProcess handle
+        _ <- waitForProcess handle
+        pure 124
+      Just code -> pure (exitNumber code)
+  callText <- callLog root
+  transcriptExists <- doesFileExist transcript
+  transcriptText <- if transcriptExists then TIO.readFile transcript else pure ""
+  posts <- logPosts root
+  cursor <- readCursor root "seat"
+  transaction <- readTransaction root "seat"
+  active <- doesFileExist (root </> ".active-seat")
+  pure
+    B17Trial
+      { b17Root = root,
+        b17Calls = length (T.lines callText),
+        b17Rows = length (filter (not . T.null) (T.lines transcriptText)),
+        b17Replies = length [() | p <- posts, from p == "seat", body p == "B17-REPLY"],
+        b17Notices = length [() | p <- posts, from p == "seat", "ambiguous recovery" `T.isInfixOf` body p],
+        b17Exits = exits,
+        b17Transaction = transaction,
+        b17Cursor = cursor,
+        b17Active = active
+      }
+
+renderB17Trial :: Int -> B17Trial -> String
+renderB17Trial trial result =
+  "B17 trial="
+    <> show trial
+    <> " calls="
+    <> show (b17Calls result)
+    <> " rows="
+    <> show (b17Rows result)
+    <> " replies="
+    <> show (b17Replies result)
+    <> " notices="
+    <> show (b17Notices result)
+    <> " exits="
+    <> show (b17Exits result)
+    <> " transaction="
+    <> show (b17Transaction result)
+    <> " cursor="
+    <> show (b17Cursor result)
+    <> " active="
+    <> show (b17Active result)
+    <> " root="
+    <> b17Root result
+
+b17TrialClosed :: B17Trial -> Bool
+b17TrialClosed result =
+  b17Calls result == 1
+    && b17Rows result == 1
+    && b17Replies result == 1
+    && b17Notices result == 1
+    && b17Exits result == [0, 0]
+    && b17Transaction result == Just 1
+    && b17Cursor result == 3
+    && not (b17Active result)
 
 runtimeTopic :: IO ()
 runtimeTopic = do
@@ -458,3 +591,19 @@ runtimeTopic = do
             && "STDERR-TAIL-MARKER" `T.isInfixOf` transcript
         _ -> False
     removePathForcibly root
+
+  -- Two already-ready processes with one name race the same input. A trial
+  -- fails on duplicate compute even if publication deduplication leaves one
+  -- reply; twenty bounded trials retain every per-trial root and measurement.
+  do
+    bin <- seatBinary
+    oracle <- getExecutablePath
+    putStrLn ("B17 oracle CLI: " <> bin)
+    putStrLn ("B17 oracle axioma: " <> oracle)
+    results <-
+      forM [1 .. 20 :: Int] $ \trial -> do
+        result <- runB17Trial bin trial
+        putStrLn (renderB17Trial trial result)
+        pure result
+    assert "B17 synchronized same-name trials allow one invocation, row, reply, and settlement" $
+      all b17TrialClosed results

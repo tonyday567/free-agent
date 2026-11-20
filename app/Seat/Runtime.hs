@@ -12,7 +12,7 @@ where
 import Circuit.Parser.Framing (Stored)
 import Circuit.Post (Post (..), PostId, mkPost)
 import Circuit.Shared (stamp, stamped)
-import Control.Exception (bracket, onException)
+import Control.Exception (IOException, bracket, onException, throwIO, try)
 import Control.Monad (forM_)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (nub)
@@ -42,6 +42,8 @@ import System.Directory (doesFileExist, makeAbsolute, removeFile)
 import System.Environment (setEnv)
 import System.FilePath ((</>))
 import System.IO (BufferMode (LineBuffering), hSetBuffering, stderr, stdout)
+import System.IO.Error (isAlreadyExistsError)
+import System.Posix.IO (OpenMode (WriteOnly), closeFd, creat, defaultFileFlags, exclusive, openFd)
 import System.Posix.Process (getProcessID)
 import Text.Read (readMaybe)
 
@@ -130,10 +132,7 @@ runSeat seat = do
           deliverBatch storedBatch nextCursor = do
             prior <- readBatchFootprint root agentName (map (snd . stamp) storedBatch)
             if footprintAmbiguous prior
-              then do
-                TIO.putStrLn $ "🟡 " <> agentName <> " ambiguous recovery on posts " <> ids <> "; client not re-invoked"
-                _ <- notice $ markGlyph Escalate <> " ambiguous recovery on posts " <> ids <> "; prior output or turn evidence exists, so automatic replay is refused; reconcile the batch explicitly"
-                pure Halt
+              then ambiguousBatch
               else attempt 1 AutomaticSession
             where
               batchIds = map (snd . stamp) storedBatch
@@ -153,6 +152,11 @@ runSeat seat = do
                       <> renderFootprint footprint
                       <> "; unaddressed on purpose — answering this would spend a turn on it"
 
+              ambiguousBatch = do
+                TIO.putStrLn $ "🟡 " <> agentName <> " ambiguous recovery on posts " <> ids <> "; client not re-invoked"
+                _ <- notice $ markGlyph Escalate <> " ambiguous recovery on posts " <> ids <> "; prior output or turn evidence exists, so automatic replay is refused; reconcile the batch explicitly"
+                pure Halt
+
               attempt n sessionChoice = do
                 remaining <- readIORef budget
                 if remaining <= 0
@@ -163,38 +167,41 @@ runSeat seat = do
                     writeIORef budget (remaining - 1)
                     prompt <- seatPrompt seat storedBatch
                     started <- getCurrentTime
-                    TIO.writeFile (activeBatchPath root agentName) (T.pack (show batchIds))
-                    result <- runBackendTurn session (BackendRequest prompt sessionChoice)
-                    case result of
-                      Left err -> clearActive >> environmentFailed ("send refused: " <> T.pack (show err))
-                      Right (_, Unavailable why) -> clearActive >> environmentFailed why
-                      Right (outputs, outcome) -> do
-                        ended <- getCurrentTime
-                        recordTranscript n outcome started ended
-                        case outcome of
-                          Ceiling {} -> pure ()
-                          Exhausted {} -> pure ()
-                          _ -> clearActive
-                        let replies = replyActs agentName storedBatch outputs
-                        publish replies
-                        case outcome of
-                          Completed _ -> do
-                            extra <- seatAfterCompleted seat
-                            publish extra
-                            writeTransaction root agentName nextCursor
-                            writeCursor root agentName nextCursor
-                            writeIORef skips 0
-                            pure $ if any ((== Just StandDown) . controlMark) (replies <> extra) then Halt else Continue
-                          Cancelled _ -> pure Halt
-                          Stale why _
-                            | sessionChoice == AutomaticSession -> do
-                                TIO.putStrLn $ "🟡 " <> agentName <> " stale session on posts " <> ids <> "; one explicit fresh attempt: " <> T.take 200 why
-                                attempt (n + 1) FreshSession
-                            | otherwise -> failedBatch ("stale fresh session: " <> why)
-                          Failed kind why _ -> failedBatch (outcomeDetail kind why)
-                          Ceiling why _ -> terminalBatch "tool-iteration ceiling" why
-                          Exhausted why _ -> terminalBatch "context exhaustion" why
-                          Interrupted why _ -> interruptedBatch why
+                    claimed <- claimActiveBatch root agentName batchIds
+                    if not claimed
+                      then ambiguousBatch
+                      else do
+                        result <- runBackendTurn session (BackendRequest prompt sessionChoice)
+                        case result of
+                          Left err -> clearActive >> environmentFailed ("send refused: " <> T.pack (show err))
+                          Right (_, Unavailable why) -> clearActive >> environmentFailed why
+                          Right (outputs, outcome) -> do
+                            ended <- getCurrentTime
+                            recordTranscript n outcome started ended
+                            case outcome of
+                              Ceiling {} -> pure ()
+                              Exhausted {} -> pure ()
+                              _ -> clearActive
+                            let replies = replyActs agentName storedBatch outputs
+                            publish replies
+                            case outcome of
+                              Completed _ -> do
+                                extra <- seatAfterCompleted seat
+                                publish extra
+                                writeTransaction root agentName nextCursor
+                                writeCursor root agentName nextCursor
+                                writeIORef skips 0
+                                pure $ if any ((== Just StandDown) . controlMark) (replies <> extra) then Halt else Continue
+                              Cancelled _ -> pure Halt
+                              Stale why _
+                                | sessionChoice == AutomaticSession -> do
+                                    TIO.putStrLn $ "🟡 " <> agentName <> " stale session on posts " <> ids <> "; one explicit fresh attempt: " <> T.take 200 why
+                                    attempt (n + 1) FreshSession
+                                | otherwise -> failedBatch ("stale fresh session: " <> why)
+                              Failed kind why _ -> failedBatch (outcomeDetail kind why)
+                              Ceiling why _ -> terminalBatch "tool-iteration ceiling" why
+                              Exhausted why _ -> terminalBatch "context exhaustion" why
+                              Interrupted why _ -> interruptedBatch why
 
               clearActive = removeFile (activeBatchPath root agentName)
 
@@ -282,6 +289,26 @@ renderFootprint footprint =
           <> " rows ("
           <> T.intercalate "," [T.pack (show pid) <> ":" <> outcome | (pid, outcome) <- values]
           <> ")"
+
+-- | Claim one same-name active batch atomically. A competing process that
+-- loses exclusive creation must take the ambiguity path; it never waits for
+-- the winner to clear the marker and then invokes the input itself.
+claimActiveBatch :: FilePath -> Name -> [PostId] -> IO Bool
+claimActiveBatch root agentName batchIds = do
+  let path = activeBatchPath root agentName
+  created <-
+    try
+      ( bracket
+          (openFd path WriteOnly defaultFileFlags {creat = Just 0o600, exclusive = True})
+          closeFd
+          (\_ -> pure ())
+      ) ::
+      IO (Either IOException ())
+  case created of
+    Right () -> TIO.writeFile path (T.pack (show batchIds)) >> pure True
+    Left err
+      | isAlreadyExistsError err -> pure False
+      | otherwise -> throwIO err
 
 activeBatchPath :: FilePath -> Name -> FilePath
 activeBatchPath root agentName = root </> (".active-" <> T.unpack agentName)
