@@ -28,6 +28,7 @@ module Free.Agent.Bus.File
     QuiesceConfig (..),
     Flow (..),
     tailLog,
+    tailLogWithReview,
 
     -- * Quiescence machine
     QEvent (..),
@@ -39,8 +40,8 @@ where
 import Circuit.Machine (Body (..), Moore)
 import Circuit.Parser.Framing (Stored)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
-import Circuit.Post (Post, PostId)
-import Circuit.Shared (stamp, stamped)
+import Circuit.Post (PostId)
+import Circuit.Shared (stamp)
 import Circuit.Tensor (Const (Const), unConst)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM
@@ -61,7 +62,7 @@ import Control.Exception (onException)
 import Control.Monad (unless, when)
 import Data.ByteString qualified as BS
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.List (isPrefixOf, sort)
+import Data.List (isPrefixOf, nubBy, sort, sortOn)
 import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -366,12 +367,28 @@ tailLog ::
   -- | Callback for one drained batch; return 'Halt' to stop.
   ([Stored] -> IO Flow) ->
   IO ()
-tailLog path names startCursor mQuiesce cb = do
+tailLog path names startCursor mQuiesce = tailLogWithReview path names startCursor mQuiesce (pure [])
+
+-- | 'tailLog' plus a review source for previously quarantined posts that have
+-- since been admitted. Reviewed posts join the same serialized, oldest-first
+-- batch as new log rows. A reviewed id is presented at most once per process;
+-- an unsettled admission remains on disk for an explicit restart, not an
+-- in-process retry loop.
+tailLogWithReview ::
+  FilePath ->
+  [Name] ->
+  PostId ->
+  Maybe (QuiesceConfig, Decision -> IO ()) ->
+  IO [Stored] ->
+  ([Stored] -> IO Flow) ->
+  IO ()
+tailLogWithReview path names startCursor mQuiesce review cb = do
   exists <- doesFileExist path
   unless exists $ do
     -- Touch an empty log so the scribe has a file to append to.
     touchLog path
-  (off0, halted0, _, _) <- drainFrom 0 startCursor (\_ -> pure ())
+  attemptedRef <- newIORef []
+  (off0, halted0, _, _) <- drainFrom 0 attemptedRef startCursor (\_ -> pure ())
   offRef <- newIORef off0
   halted <- newTVarIO halted0
   lock <- newMVar ()
@@ -383,22 +400,22 @@ tailLog path names startCursor mQuiesce cb = do
     -- a wake; only deliveries reset the quiescence count.
     delivered <- newTVarIO 0 :: IO (TVar Int)
     _ <- watchDir mgr dir (\ev -> takeFileName (eventPath ev) == logName) $ \_ev -> do
-      (_, _, nDeliv) <- drainLocked lock offRef halted 0
+      (_, _, nDeliv) <- drainLocked lock offRef attemptedRef halted 0
       atomically $ do
         modifyTVar' delivered (+ nDeliv)
         _ <- tryPutTMVar signal ()
         pure ()
     -- Registration gap: a post appended before the watch was registered
     -- fired no event; read it by offset.
-    _ <- drainLocked lock offRef halted 0
+    _ <- drainLocked lock offRef attemptedRef halted 0
     case mQuiesce of
-      Nothing -> pollLoop lock offRef signal halted
-      Just (qc, onQuiesce) -> quiescePump qc signal delivered halted lock offRef onQuiesce
+      Nothing -> pollLoop lock offRef attemptedRef signal halted
+      Just (qc, onQuiesce) -> quiescePump qc signal delivered halted lock offRef attemptedRef onQuiesce
   where
     -- \| No-quiesce poll loop: wait on fsnotify with a 1 s timeout, then
     -- manually re-drain.  FSEvents on macOS does not reliably fire on
     -- append, so the timeout fallback ensures delivery within ~1 s.
-    pollLoop lock offRef signal halted = do
+    pollLoop lock offRef attemptedRef signal halted = do
       h <- readTVarIO halted
       if h
         then pure ()
@@ -406,8 +423,8 @@ tailLog path names startCursor mQuiesce cb = do
           -- An event or the poll fallback: both are one drain. A decided
           -- halt is written by the drain that decided it, under the lock.
           _ <- timeout 1_000_000 (atomically (takeTMVar signal))
-          _ <- drainLocked lock offRef halted 0
-          pollLoop lock offRef signal halted
+          _ <- drainLocked lock offRef attemptedRef halted 0
+          pollLoop lock offRef attemptedRef signal halted
     -- Deliveries are serialized: the offset is read, the log drained,
     -- and the offset advanced under one lock, so the fsnotify watcher
     -- and the poll fallback cannot both deliver a post when a callback
@@ -427,23 +444,30 @@ tailLog path names startCursor mQuiesce cb = do
     -- notice may wake the watcher, but cannot make it present the same input
     -- again; the separate settlement cursor stays unmoved for explicit retry.
     -- A decode failure happens before either commit and keeps its suffix.
-    drainLocked lock offRef halted filt = withMVar lock $ \_ -> do
+    drainLocked lock offRef attemptedRef halted filt = withMVar lock $ \_ -> do
       haltedNow <- readTVarIO halted
       if haltedNow
         then pure (True, 0, 0)
         else do
           off <- readIORef offRef
-          (off', h, nAll, nDeliv) <- drainFrom off filt (writeIORef offRef)
+          (_, h, nAll, nDeliv) <- drainFrom off attemptedRef filt (writeIORef offRef)
           when h (atomically (writeTVar halted True))
           pure (h, nAll, nDeliv)
-    drainFrom off since commitOffset = do
+    drainFrom off attemptedRef since commitOffset = do
       (ls, off') <- readCompleteLines off
       posts <-
         either
           (ioError . userError . malformedSuffix off)
           pure
           (decodeLogStrict (T.unlines ls))
-      (nDeliv, halted) <- deliver (readSince posts names since) `onException` commitOffset off'
+      reviewed <- review
+      attempted <- readIORef attemptedRef
+      let freshReview = filter ((`notElem` attempted) . snd . stamp) reviewed
+          fresh = readSince posts names since
+          batch = sortOn (snd . stamp) (nubBy sameId (freshReview <> fresh))
+          sameId a b = snd (stamp a) == snd (stamp b)
+      writeIORef attemptedRef (attempted <> map (snd . stamp) freshReview)
+      (nDeliv, halted) <- deliver batch `onException` commitOffset off'
       commitOffset off'
       pure (off', halted, length ls, nDeliv)
 
@@ -489,7 +513,7 @@ tailLog path names startCursor mQuiesce cb = do
     -- 'Activity' before the tick, and a wake that delivered nothing
     -- addressed feeds one 'Tick'. The verdict runs the action once and
     -- the pump exits.
-    quiescePump qc signal delivered halted lock offRef onQuiesce = go 0
+    quiescePump qc signal delivered halted lock offRef attemptedRef onQuiesce = go 0
       where
         sys = quiesceAgent (qcCycles qc)
         go count = do
@@ -501,7 +525,7 @@ tailLog path names startCursor mQuiesce cb = do
               case m of
                 Just True -> pure ()
                 _ -> do
-                  (h', nAll, nDelivLocal) <- drainLocked lock offRef halted 0
+                  (h', nAll, nDelivLocal) <- drainLocked lock offRef attemptedRef halted 0
                   if h'
                     then pure ()
                     else do

@@ -11,6 +11,8 @@
 --   read [ROOT] [NAME...] [--since ID | --cursor NAME] [--thread ID] [--depth 0|1|2]
 --   org [ROOT] --thread ID
 --   inbox [ROOT] NAME [--mark-read] [--depth 0|1|2]
+--   quarantined [ROOT] NAME
+--   admit [ROOT] NAME ID...
 --   attach [ROOT] NAME
 --   detach [ROOT] NAME
 --   ready [ROOT] [--depth 0|1|2]
@@ -91,6 +93,7 @@ import Free.Agent.Bus.File (Flow (Continue), Human (..), attachHuman, humanNames
 import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbPath, hbText, readHeartbeat)
 import Free.Agent.Cli.Config (rootOpt)
 import Free.Agent.Protocol (BlockLink (..), PostKind (..), Protocol, hasPostKind, kindWord, parseBlockLink, parsePostKind)
+import Free.Agent.Wake (admitPosts, quarantinedPosts)
 import Options.Applicative
 import System.Directory (doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
@@ -114,6 +117,8 @@ data BusCommand
   | ReadCommand FilePath [Text] (Maybe Since) (Maybe PostId) Depth
   | OrgCommand FilePath (Maybe PostId)
   | InboxCommand FilePath Text Bool Depth
+  | QuarantinedCommand FilePath Text
+  | AdmitCommand FilePath Text [PostId]
   | AttachCommand FilePath Text
   | DetachCommand FilePath Text
   | RetireCommand FilePath Text
@@ -299,6 +304,14 @@ inboxCmd = do
   depth <- depthOpt (Depth 2)
   pure (InboxCommand root name markRead depth)
 
+quarantinedCmd :: Parser BusCommand
+quarantinedCmd = QuarantinedCommand <$> rootOpt <*> nameArg
+
+admitCmd :: Parser BusCommand
+admitCmd = AdmitCommand <$> rootOpt <*> nameArg <*> some idArg
+  where
+    idArg = argument auto (metavar "ID..." <> help "Currently quarantined post id to admit")
+
 attachCmd :: Parser BusCommand
 attachCmd = AttachCommand <$> rootOpt <*> nameArg
 
@@ -382,6 +395,8 @@ busParser protocol =
         <> command "read" (info (readCmd <**> helper) (progDesc "Read posts addressed to NAMEs, or a thread by id"))
         <> command "org" (info (orgCmd <**> helper) (progDesc "Render a thread as an Org-mode conversation: * [#ID] with channel when present, ** sender LABEL per post"))
         <> command "inbox" (info (inboxCmd <**> helper) (progDesc "Print unread posts addressed to NAME; --mark-read advances .cursor-NAME to the last printed id"))
+        <> command "quarantined" (info (quarantinedCmd <**> helper) (progDesc "Print stored posts currently refused a wake for NAME"))
+        <> command "admit" (info (admitCmd <**> helper) (progDesc "Admit currently quarantined post IDs for one delivery to NAME"))
         <> command "attach" (info (attachCmd <**> helper) (progDesc "Record NAME as the human attached to this root (evidence only; changes no delivery or READY path)"))
         <> command "detach" (info (detachCmd <**> helper) (progDesc "Remove NAME's attached-human marker (the cursor and unread mail are untouched)"))
         <> command "retire" (info (retireCmd <**> helper) (progDesc "Write the dead marker to NAME's heartbeat: the seat joins the retired circle, its cursor, log and transcripts stay as evidence; no process is signalled"))
@@ -401,6 +416,8 @@ runBusCommand _ (WatchCommand root names) = runWatch root names
 runBusCommand _ (ReadCommand root names since thr depth) = runRead root names since thr depth
 runBusCommand _ (OrgCommand root thr) = runOrg root thr
 runBusCommand _ (InboxCommand root name markRead depth) = runInbox root name markRead depth
+runBusCommand _ (QuarantinedCommand root name) = runQuarantined root name
+runBusCommand _ (AdmitCommand root name ids) = runAdmit root name ids
 runBusCommand _ (AttachCommand root name) = runAttach root name
 runBusCommand _ (DetachCommand root name) = runDetach root name
 runBusCommand _ (RetireCommand root name) = runRetire root name
@@ -575,6 +592,27 @@ runInbox root name markRead depth = do
   traverse_ (TIO.putStrLn . renderStored depth) shown
   when (markRead && not (null shown)) $
     writeCursor root' name (highestId shown + 1)
+
+-- | Inspect only the receiver's currently quarantined mail. These posts are
+-- stored, but are neither current backend work nor delivery-cursor evidence.
+runQuarantined :: FilePath -> Text -> IO ()
+runQuarantined root name = do
+  root' <- resolveRoot root
+  requireBus root'
+  posts <- quarantinedPosts root' name
+  traverse_ (TIO.putStrLn . renderStored (Depth 2)) posts
+
+-- | Move currently quarantined ids into the receiver's admitted set. This
+-- writes no bus post and changes no cursor; the live watcher reviews the set.
+runAdmit :: FilePath -> Text -> [PostId] -> IO ()
+runAdmit root name ids = do
+  root' <- resolveRoot root
+  requireBus root'
+  result <- admitPosts root' name ids
+  case result of
+    Left why -> TIO.hPutStrLn stderr ("🔴 admit: " <> why) >> exitFailure
+    Right admitted ->
+      TIO.putStrLn ("✓ admitted for " <> name <> ": " <> T.intercalate "," (map (T.pack . show) admitted))
 
 -- | The highest id in a non-empty set of stored posts.
 highestId :: [Stored] -> PostId

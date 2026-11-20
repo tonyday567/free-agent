@@ -19,8 +19,9 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus (postLocal, readLogStrict)
 import Free.Agent.Bus.File (readCursor, readTransaction, writeCursor)
-import Free.Agent.Bus.Heartbeat (HbState (Dead), readHeartbeat)
+import Free.Agent.Bus.Heartbeat (HbState (..), readHeartbeat)
 import Free.Agent.Mark (Mark (..), markGlyph)
+import Free.Agent.Wake (quarantinePath, quarantinedPosts)
 import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable, removeDirectory, removePathForcibly)
 import System.Environment (getEnv, getExecutablePath, setEnv)
 import System.Exit (ExitCode (..))
@@ -76,11 +77,18 @@ writeSeat root name source = do
   writeCursor root name 0
 
 runKimi :: FilePath -> Text -> IO (ExitCode, String, String)
-runKimi root name = do
+runKimi = runKimiWith []
+
+runKimiWith :: [String] -> FilePath -> Text -> IO (ExitCode, String, String)
+runKimiWith extra root name = do
   bin <- seatBinary
   bracket (getEnv "PATH") (setEnv "PATH") $ \oldPath -> do
     setEnv "PATH" (root </> "bin" <> ":" <> oldPath)
-    readProcessWithExitCode bin (kimiArgs root name) ""
+    readProcessWithExitCode bin (kimiArgs root name <> extra) ""
+
+runBus :: FilePath -> FilePath -> String -> [String] -> IO (ExitCode, String, String)
+runBus bin root command args =
+  readProcessWithExitCode bin (["bus", command, "--root", root] <> args) ""
 
 callLog :: FilePath -> IO Text
 callLog root = do
@@ -95,6 +103,14 @@ waitForPath path = go (100 :: Int)
     go n = do
       exists <- doesFileExist path
       unless exists (threadDelay 20_000 >> go (n - 1))
+
+waitForCursor :: FilePath -> Text -> PostId -> IO ()
+waitForCursor root name target = go (400 :: Int)
+  where
+    go 0 = error ("timed out waiting for cursor " <> show target)
+    go n = do
+      current <- readCursor root name
+      unless (current == target) (threadDelay 20_000 >> go (n - 1))
 
 scriptPreamble :: FilePath -> String
 scriptPreamble root =
@@ -246,6 +262,129 @@ b17TrialClosed result =
 runtimeTopic :: IO ()
 runtimeTopic = do
   putStrLn "live Backend-seat settlement"
+
+  -- Default allow remains compatible: no wake restriction flag, one ordinary
+  -- sender, one backend invocation.
+  do
+    root <- tempRoot "free-agent-runtime-wake-default"
+    writeSeat root "seat" (successSource root "default-local")
+    _ <- postLocal root (mkPost "ordinary" ["seat"] "default allow")
+    _ <- postLocal root (mkPost "runner" ["seat"] (markGlyph Landed))
+    (code, _, err) <- runKimi root "seat"
+    calls <- T.lines <$> callLog root
+    cursor <- readCursor root "seat"
+    assert ("default wake policy exits cleanly" <> if code == ExitSuccess then "" else ": " <> err) $
+      code == ExitSuccess && length calls == 1 && cursor == 2
+    removePathForcibly root
+
+  -- A restricted receiver quarantines a disallowed sender without invoking or
+  -- claiming work. Polls stay quiet; an allowed post settles normally; explicit
+  -- admission then delivers the old post once without moving the cursor back.
+  do
+    root <- tempRoot "free-agent-runtime-wake-admit"
+    writeSeat root "seat" (successSource root "wake-local")
+    bin <- seatBinary
+    let transcript = root </> ".transcripts" </> "seat.jsonl"
+        active = root </> ".active-seat"
+        start =
+          bracket (getEnv "PATH") (setEnv "PATH") $ \oldPath -> do
+            setEnv "PATH" (root </> "bin" <> ":" <> oldPath)
+            spawnLogged bin (kimiArgs root "seat" <> ["--wake-from", "allowed"]) (root </> "wake-seat")
+        stop handle = terminateProcess handle >> waitForProcess handle >> pure ()
+    bracket start stop $ \_ -> do
+      waitForPath (root </> ".hb-seat")
+      denied <- postLocal root (mkPost "blocked" ["seat"] "denied wake")
+      waitForPath (quarantinePath root "seat")
+      (inspectCode, inspectOut, inspectErr) <- runBus bin root "quarantined" ["seat"]
+      calls <- callLog root
+      posts <- logPosts root
+      cursor <- readCursor root "seat"
+      transaction <- readTransaction root "seat"
+      transcriptExists <- doesFileExist transcript
+      activeExists <- doesFileExist active
+      heartbeat <- readHeartbeat root "seat"
+      assert "denied wake is stored and inspectably quarantined without backend or settlement evidence" $
+        inspectCode == ExitSuccess
+          && "denied wake" `T.isInfixOf` T.pack inspectOut
+          && T.null calls
+          && length posts == 1
+          && cursor == 0
+          && transaction == Nothing
+          && not transcriptExists
+          && not activeExists
+          && fmap (\(state, _, _) -> state) heartbeat == Just Wake
+          && T.null (T.pack inspectErr)
+      threadDelay 1_200_000
+      quietCalls <- callLog root
+      quietCursor <- readCursor root "seat"
+      quietTranscript <- doesFileExist transcript
+      quietActive <- doesFileExist active
+      assert "repeated watcher scans leave denied mail quiet and unsettled" $
+        T.null quietCalls && quietCursor == 0 && not quietTranscript && not quietActive
+
+      _ <- postLocal root (mkPost "allowed" ["seat"] "allowed wake")
+      waitForCursor root "seat" 2
+      allowedCalls <- T.lines <$> callLog root
+      stillQuarantined <- quarantinedPosts root "seat"
+      assert "an allowed post delivers while denied mail stays quarantined" $
+        length allowedCalls == 1 && map (snd . stamp) stillQuarantined == [snd (stamp denied)]
+
+      (admitCode, _, admitErr) <- runBus bin root "admit" ["seat", show (snd (stamp denied))]
+      waitForText transcript "\"post_id\":0"
+      threadDelay 200_000
+      admittedCalls <- T.lines <$> callLog root
+      admittedCursor <- readCursor root "seat"
+      admittedTransaction <- readTransaction root "seat"
+      admittedTranscript <- TIO.readFile transcript
+      admittedActive <- doesFileExist active
+      admittedPosts <- logPosts root
+      emptyQuarantine <- runBus bin root "quarantined" ["seat"]
+      assert "explicit admission delivers the stored post once without cursor regression or raw publication" $
+        admitCode == ExitSuccess
+          && length admittedCalls == 2
+          && admittedCursor == 2
+          && admittedTransaction == Just 2
+          && length (filter (not . T.null) (T.lines admittedTranscript)) == 2
+          && not admittedActive
+          && length admittedPosts == 2
+          && emptyQuarantine == (ExitSuccess, "", "")
+          && T.null (T.pack admitErr)
+
+      (repeatCode, _, _) <- runBus bin root "admit" ["seat", show (snd (stamp denied))]
+      threadDelay 1_200_000
+      finalCalls <- T.lines <$> callLog root
+      finalCursor <- readCursor root "seat"
+      assert "already delivered mail cannot be admitted or delivered again" $
+        repeatCode /= ExitSuccess && length finalCalls == 2 && finalCursor == 2
+    removePathForcibly root
+
+  -- One startup drain mixes denied and allowed mail. Only the allowed post is
+  -- presented to the backend; the denied row remains quarantined beside it.
+  do
+    root <- tempRoot "free-agent-runtime-wake-mixed"
+    writeSeat root "seat" (successSource root "mixed-local")
+    _ <- postLocal root (mkPost "blocked" ["seat"] "mixed-denied")
+    _ <- postLocal root (mkPost "allowed" ["seat"] "mixed-allowed")
+    _ <- postLocal root (mkPost "allowed" ["seat"] (markGlyph Landed))
+    (code, _, err) <- runKimiWith ["--wake-from", "allowed"] root "seat"
+    calls <- T.lines <$> callLog root
+    quarantined <- quarantinedPosts root "seat"
+    cursor <- readCursor root "seat"
+    transcript <- TIO.readFile (root </> ".transcripts" </> "seat.jsonl")
+    active <- doesFileExist (root </> ".active-seat")
+    assert ("mixed wake batch exits cleanly" <> if code == ExitSuccess then "" else ": " <> err) $
+      code == ExitSuccess
+        && ( case calls of
+               [call] ->
+                 "mixed-allowed" `T.isInfixOf` call
+                   && not ("mixed-denied" `T.isInfixOf` call)
+               _ -> False
+           )
+        && map (snd . stamp) quarantined == [0]
+        && cursor == 3
+        && length (filter (not . T.null) (T.lines transcript)) == 1
+        && not active
+    removePathForcibly root
 
   -- Channel and multi-sender input supplies no implicit audience or ancestry.
   -- A deliberate bus-post act chooses both; raw final prose remains local.

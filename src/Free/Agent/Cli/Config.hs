@@ -28,6 +28,7 @@ module Free.Agent.Cli.Config
     reasoningOpt,
     quiesceOpt,
     pitbossOpt,
+    wakeFromOpt,
   )
 where
 
@@ -270,6 +271,20 @@ pitbossOpt =
           <> help "Recipient for the quiescence marker (default: pitboss)"
       )
 
+-- | Restrict wake permission to posts from these senders. Absent means allow
+-- every sender, preserving the existing seat behaviour. Admission of a
+-- quarantined post is a separate explicit act through @bus admit@.
+wakeFromOpt :: Parser (Maybe [Name])
+wakeFromOpt =
+  optional $
+    some $
+      option
+        (T.pack <$> str)
+        ( long "wake-from"
+            <> metavar "NAME"
+            <> help "Allow wakes from NAME (repeatable; default: all senders)"
+        )
+
 -- ---------------------------------------------------------------------------
 -- Backend-specific parsers
 -- ---------------------------------------------------------------------------
@@ -414,6 +429,8 @@ parseCommandConfig =
 --
 -- >>> swallowedSeatOption ["ack", "--quiesce", "2"]
 -- ["--quiesce"]
+-- >>> swallowedSeatOption ["--wake-from", "runner"]
+-- ["--wake-from"]
 -- >>> swallowedSeatOption ["-c", "echo hi"]
 -- []
 -- >>> swallowedSeatOption ("--root" : [])
@@ -429,7 +446,8 @@ swallowedSeatOption = filter (`elem` seatFlags)
         "--cmd",
         "--delivery-budget",
         "--quiesce",
-        "--pitboss"
+        "--pitboss",
+        "--wake-from"
       ]
 
 parseAcpConfig :: Parser AcpCliConfig

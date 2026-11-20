@@ -15,7 +15,7 @@ import Circuit.Shared (stamp, stamped)
 import Control.Exception (IOException, bracket, onException, throwIO, try)
 import Control.Monad (forM_)
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.List (nub)
+import Data.List (nub, partition)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -31,13 +31,14 @@ import Free.Agent.Bus.File
     cursorPath,
     readCursor,
     recoverTransaction,
-    tailLog,
+    tailLogWithReview,
     writeCursor,
     writeTransaction,
   )
 import Free.Agent.Bus.Heartbeat (HbState (..), writeHeartbeat)
 import Free.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph)
 import Free.Agent.Protocol (defaultProtocol, isSuppressedReply)
+import Free.Agent.Wake (clearAdmitted, quarantinePosts, readAdmitted, reviewAdmitted)
 import Seat.Backend (appendBackendTranscript, runBackendTurn)
 import System.Directory (doesFileExist, makeAbsolute, removeFile)
 import System.Environment (setEnv)
@@ -52,6 +53,8 @@ data Seat = Seat
   { seatBudget :: Int,
     seatName :: Name,
     seatNames :: [Name],
+    -- | Sender allowlist; 'Nothing' preserves the default allow behaviour.
+    seatWakeFrom :: Maybe [Name],
     seatRoot :: FilePath,
     seatQuiesce :: Maybe QuiesceConfig,
     seatBackend :: Backend,
@@ -113,7 +116,9 @@ runSeat seat = do
                       _ <- postLocal root relay
                       pure ()
               _ -> pure ()
-            writeCursor root agentName (snd (stamp stored) + 1)
+            current <- readCursor root agentName
+            clearAdmitted root agentName [snd (stamp stored)]
+            writeCursor root agentName (max current (snd (stamp stored) + 1))
             pure Halt
 
           runBatch [] = pure Continue
@@ -122,9 +127,14 @@ runSeat seat = do
             | otherwise = do
                 let (ordinary, remaining) = break stopping (stored : rest)
                     addressed = filter ((/= agentName) . from . stamped) ordinary
-                    nextCursor = snd (stamp (last ordinary)) + 1
+                    batchCursor = snd (stamp (last ordinary)) + 1
+                current <- readCursor root agentName
+                let nextCursor = max current batchCursor
                 if null addressed
-                  then writeCursor root agentName nextCursor >> runBatch remaining
+                  then do
+                    clearAdmitted root agentName (map (snd . stamp) ordinary)
+                    writeCursor root agentName nextCursor
+                    runBatch remaining
                   else
                     deliverBatch addressed nextCursor >>= \case
                       Continue -> runBatch remaining
@@ -189,6 +199,7 @@ runSeat seat = do
                               Completed _ -> do
                                 extra <- seatAfterCompleted seat
                                 publish extra
+                                clearAdmitted root agentName batchIds
                                 writeTransaction root agentName nextCursor
                                 writeCursor root agentName nextCursor
                                 writeIORef skips 0
@@ -237,6 +248,7 @@ runSeat seat = do
                 commitSkip
 
               commitSkip = do
+                clearAdmitted root agentName batchIds
                 writeTransaction root agentName nextCursor
                 writeCursor root agentName nextCursor
                 clearActive
@@ -249,11 +261,20 @@ runSeat seat = do
       TIO.putStrLn $ "   cursor: " <> T.pack (cursorPath root agentName) <> " @ " <> T.pack (show cursor)
       writeHeartbeat root agentName Wake
       let follow =
-            tailLog path names cursor (fmap (\qc -> (qc, onQuiesce)) (seatQuiesce seat)) $ \storedBatch -> do
-              writeHeartbeat root agentName Working
-              result <- runBatch storedBatch
-              writeHeartbeat root agentName Idle
-              pure result
+            tailLogWithReview path names cursor (fmap (\qc -> (qc, onQuiesce)) (seatQuiesce seat)) (reviewAdmitted root agentName) $ \storedBatch -> do
+              admitted <- readAdmitted root agentName
+              let permitted stored =
+                    snd (stamp stored) `elem` admitted
+                      || maybe True (from (stamped stored) `elem`) (seatWakeFrom seat)
+                  (allowed, denied) = partition permitted storedBatch
+              quarantinePosts root agentName (map (snd . stamp) denied)
+              if null allowed
+                then pure Continue
+                else do
+                  writeHeartbeat root agentName Working
+                  result <- runBatch allowed
+                  writeHeartbeat root agentName Idle
+                  pure result
       follow `onException` writeHeartbeat root agentName Dead
       writeHeartbeat root agentName Dead
 

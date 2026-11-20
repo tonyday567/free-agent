@@ -65,11 +65,12 @@ library
     Free.Agent.Lineage
     Free.Agent.Mark
     Free.Agent.Meeting
+    Free.Agent.Protocol
     Free.Agent.Query
     Free.Agent.Refresh
-    Free.Agent.Protocol
     Free.Agent.StdPorts
     Free.Agent.Usage
+    Free.Agent.Wake
 
   build-depends:
     aeson >=2.2 && <3,
@@ -151,6 +152,7 @@ executable free-agent
     Paths_free_agent
     Seat.Backend
     Seat.Runtime
+
   autogen-modules: Paths_free_agent
   build-depends:
     base >=4.20 && <5,

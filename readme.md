@@ -74,6 +74,8 @@ free-agent bus post [-r|--root ROOT] [--from NAME] [--to NAME] [--body TEXT] [--
 free-agent bus watch [-r|--root ROOT] NAME...
 free-agent bus read [-r|--root ROOT] [NAME...] [--since ID | --cursor NAME] [--thread ID] [--depth 0|1|2]
 free-agent bus inbox [-r|--root ROOT] NAME [--mark-read] [--depth 0|1|2]
+free-agent bus quarantined [-r|--root ROOT] NAME
+free-agent bus admit [-r|--root ROOT] NAME ID...
 free-agent bus attach [-r|--root ROOT] NAME
 free-agent bus detach [-r|--root ROOT] NAME
 free-agent bus retire [-r|--root ROOT] NAME
@@ -92,6 +94,7 @@ Useful entry points:
 - `post` submits flag posts as roots; JSON posts may carry thread ancestry; its body comes from `--body` or is piped on stdin.
 - `read` prints posts addressed to the named seats, a thread, or everything at and after a cursor.
 - `inbox` prints unread posts addressed to NAME; `--mark-read` advances `.cursor-NAME` to the last printed id.
+- `quarantined` prints stored posts whose sender is not currently permitted to wake NAME. `admit NAME ID...` explicitly makes those posts eligible for one delivery; delivered or otherwise unquarantined ids are refused.
 - `ready` lists unclaimed open TASK offers with no unresolved blocker. Directed TASKs are assigned at creation; first CLAIM owns an open offer, and only the owner's DONE completes it.
 - `watch` follows addressed posts as they arrive.
 - `attach` / `detach` record or remove NAME's attached-human marker — evidence only; no delivery or READY path changes.
@@ -106,6 +109,8 @@ Useful entry points:
 A delivered prompt produces a local response before publication. `cliDeliverTo` runs one interruptible CLI turn and records its response and causing post id in the existing transcript. Active Backend seats keep raw final `ReplyOutput` local: they infer neither recipients nor ancestry from the input, even when the prose contains an address. Intentional publication requires an explicit send act through `free-agent bus post`; that act chooses its own audience and any `--thread` ancestry.
 
 The older `replyAct` adapter retains its explicit `@name:` response convention (`src/Free/Agent/Delivery.hs`): unaddressed prose and a first line of `LOCAL` stay local, while an addressed response publishes without inferred cause, channel or ancestry. An address on a later line publishes only its addressed suffix and warns with the address's character offset. This adapter is not the active Backend-seat publication path.
+
+Wake permission is independent of storage and publication. Seats default to allowing every sender; repeatable `--wake-from NAME` restricts wakes to named senders. Other addressed posts remain in `log.jsonl` and are listed by `bus quarantined`; they cause no backend call, active-batch claim, transcript row, or delivery-cursor settlement. `bus admit` moves a currently quarantined id into `.admitted-NAME`, where the watcher presents it once through the ordinary delivery path. `.quarantine-NAME` and `.admitted-NAME` are receiver state, not additional bus messages or cursors.
 
 Each executable seat has a finite `--delivery-budget N` (default 1000000). Exhaustion stands the loop down without invoking the backend or advancing the causing cursor.
 

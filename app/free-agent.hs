@@ -48,6 +48,7 @@ import Free.Agent.Cli.Config
     parseHermesConfig,
     parseLlmConfig,
     swallowedSeatOption,
+    wakeFromOpt,
   )
 import Free.Agent.Gateway (GatewayConfig (..), defaultGatewayConfig)
 import Free.Agent.Host (BareConfig (..), defaultBareConfig)
@@ -70,12 +71,12 @@ import System.Process (spawnProcess, waitForProcess)
 -- ---------------------------------------------------------------------------
 
 data Command
-  = AgentCmd Int Backend
+  = AgentCmd Int (Maybe [Name]) Backend
   | BusCmd BusCommand
   | StatusCmd FilePath (Maybe NominalDiffTime) Depth Bool
   | UsageCmd HermesUsageSource
-  | RefreshCmd Int Int HermesConfig
-  | RefreshChildCmd Int Int (Maybe FilePath) HermesConfig
+  | RefreshCmd Int Int (Maybe [Name]) HermesConfig
+  | RefreshChildCmd Int Int (Maybe FilePath) (Maybe [Name]) HermesConfig
   deriving (Show)
 
 data HermesUsageSource
@@ -169,6 +170,7 @@ defaultAgentParser :: Parser Command
 defaultAgentParser =
   AgentCmd
     <$> deliveryBudgetOpt
+    <*> wakeFromOpt
     <*> ((\tag cfg -> mkBackend tag cfg) <$> backendFlag <*> parseHermesConfig)
   where
     mkBackend HermesTag cfg = BackendHermes cfg
@@ -183,11 +185,11 @@ commandParser :: Parser Command
 commandParser =
   subparser
     ( command "bus" (info (BusCmd <$> busParser defaultProtocol <**> helper) (progDesc "Bus subcommands"))
-        <> command "llm" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendLlm <$> parseLlmConfig) <**> helper) (progDesc "Direct API seat"))
-        <> command "cmd" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendCommand <$> parseCommandConfig) <**> helper) (progDesc "External-command seat"))
-        <> command "dsh" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendDsh <$> parseDshConfig) <**> helper) (progDesc "DSH seat"))
-        <> command "dsh-acp" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendDshAcp <$> parseDshAcpConfig) <**> helper) (progDesc "Persistent DSH ACP seat"))
-        <> command "acp" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendAcp <$> parseAcpConfig) <**> helper) (progDesc "ACP seat (persistent repl)"))
+        <> command "llm" (info (AgentCmd <$> deliveryBudgetOpt <*> wakeFromOpt <*> (BackendLlm <$> parseLlmConfig) <**> helper) (progDesc "Direct API seat"))
+        <> command "cmd" (info (AgentCmd <$> deliveryBudgetOpt <*> wakeFromOpt <*> (BackendCommand <$> parseCommandConfig) <**> helper) (progDesc "External-command seat"))
+        <> command "dsh" (info (AgentCmd <$> deliveryBudgetOpt <*> wakeFromOpt <*> (BackendDsh <$> parseDshConfig) <**> helper) (progDesc "DSH seat"))
+        <> command "dsh-acp" (info (AgentCmd <$> deliveryBudgetOpt <*> wakeFromOpt <*> (BackendDshAcp <$> parseDshAcpConfig) <**> helper) (progDesc "Persistent DSH ACP seat"))
+        <> command "acp" (info (AgentCmd <$> deliveryBudgetOpt <*> wakeFromOpt <*> (BackendAcp <$> parseAcpConfig) <**> helper) (progDesc "ACP seat (persistent repl)"))
         <> command "status" (info (StatusCmd <$> rootOpt <*> optional thresholdOpt <*> depthOpt (Depth 1) <*> orgOpt <**> helper) (progDesc "Unified bus seat census"))
         <> command
           "usage"
@@ -204,13 +206,13 @@ commandParser =
         <> command
           "refresh"
           ( info
-              (RefreshCmd <$> deliveryBudgetOpt <*> refreshTokensOpt <*> parseHermesConfig <**> helper)
+              (RefreshCmd <$> deliveryBudgetOpt <*> refreshTokensOpt <*> wakeFromOpt <*> parseHermesConfig <**> helper)
               (progDesc "Supervise a Hermes seat with automatic same-name session refresh")
           )
         <> command
           "refresh-child"
           ( info
-              (RefreshChildCmd <$> deliveryBudgetOpt <*> refreshTokensOpt <*> rebootNoteOpt <*> parseHermesConfig <**> helper)
+              (RefreshChildCmd <$> deliveryBudgetOpt <*> refreshTokensOpt <*> rebootNoteOpt <*> wakeFromOpt <*> parseHermesConfig <**> helper)
               (progDesc "Internal refresh-supervised Hermes child")
           )
     )
@@ -277,7 +279,7 @@ main :: IO ()
 main = do
   cmd <- execParser opts
   case cmd of
-    AgentCmd budget backend -> runBackend budget backend
+    AgentCmd budget wakeFrom backend -> runBackend budget wakeFrom backend
     BusCmd busCmd -> runBusCommand defaultProtocol busCmd
     StatusCmd root mthreshold depth org -> runStatus root (fromMaybe 900 mthreshold) depth org
     UsageCmd source -> case source of
@@ -289,18 +291,18 @@ main = do
         readUsageIdentity usageFile >>= \case
           Left err -> TIO.putStrLn ("🔴 " <> err) >> exitFailure
           Right identity -> TIO.putStr (renderUsageIdentity identity)
-    RefreshCmd budget threshold cfg -> runRefreshSupervisor budget threshold cfg
-    RefreshChildCmd budget threshold note cfg -> runHermesAuto (Just threshold) note budget cfg
+    RefreshCmd budget threshold wakeFrom cfg -> runRefreshSupervisor budget threshold wakeFrom cfg
+    RefreshChildCmd budget threshold note wakeFrom cfg -> runHermesAuto (Just threshold) note budget wakeFrom cfg
 
-runBackend :: Int -> Backend -> IO ()
-runBackend budget (BackendHermes cfg) = runHermes budget cfg
-runBackend budget (BackendKimi cfg) = runKimi budget cfg
-runBackend budget (BackendDsh cfg) = runDsh budget cfg
-runBackend budget (BackendDshAcp cfg) = runDshAcp budget cfg
-runBackend budget (BackendAcp cfg) = runAcp budget cfg
-runBackend budget (BackendLlm cfg) = runLlm budget cfg
-runBackend budget (BackendCommand cfg) = runCommand budget cfg
-runBackend budget (BackendGateway cfg) = runGateway budget cfg
+runBackend :: Int -> Maybe [Name] -> Backend -> IO ()
+runBackend budget wakeFrom (BackendHermes cfg) = runHermes budget wakeFrom cfg
+runBackend budget wakeFrom (BackendKimi cfg) = runKimi budget wakeFrom cfg
+runBackend budget wakeFrom (BackendDsh cfg) = runDsh budget wakeFrom cfg
+runBackend budget wakeFrom (BackendDshAcp cfg) = runDshAcp budget wakeFrom cfg
+runBackend budget wakeFrom (BackendAcp cfg) = runAcp budget wakeFrom cfg
+runBackend budget wakeFrom (BackendLlm cfg) = runLlm budget wakeFrom cfg
+runBackend budget wakeFrom (BackendCommand cfg) = runCommand budget wakeFrom cfg
+runBackend budget wakeFrom (BackendGateway cfg) = runGateway budget wakeFrom cfg
 
 -- ---------------------------------------------------------------------------
 -- Shared seat configuration
@@ -333,11 +335,11 @@ decoratePost stored =
 renderMail :: [Stored] -> Text
 renderMail = T.intercalate "\n\n" . map (body . stamped . decoratePost)
 
-runHermes :: Int -> HermesConfig -> IO ()
+runHermes :: Int -> Maybe [Name] -> HermesConfig -> IO ()
 runHermes = runHermesAuto Nothing Nothing
 
-runHermesAuto :: Maybe Int -> Maybe FilePath -> Int -> HermesConfig -> IO ()
-runHermesAuto threshold rebootFile budget cfg = do
+runHermesAuto :: Maybe Int -> Maybe FilePath -> Int -> Maybe [Name] -> HermesConfig -> IO ()
+runHermesAuto threshold rebootFile budget wakeFrom cfg = do
   validatePrompt (hcPromptFile cfg)
   systemPrompt <- TIO.readFile (hcPromptFile cfg)
   rebootNote <- maybe (pure "") TIO.readFile rebootFile
@@ -374,12 +376,12 @@ runHermesAuto threshold rebootFile budget cfg = do
         pure (framedPrompt <> note <> "\n\nUser messages:\n" <> renderMail storedBatch)
   createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
-  runSeat (Seat budget agentName names root mQuiesce backend promptFor automaticRefresh)
+  runSeat (Seat budget agentName names wakeFrom root mQuiesce backend promptFor automaticRefresh)
   requested <- doesFileExist (refreshRequestPath root agentName)
   if isJust threshold && requested then exitWith (ExitFailure 75) else pure ()
 
-runRefreshSupervisor :: Int -> Int -> HermesConfig -> IO ()
-runRefreshSupervisor budget threshold cfg = supervise Nothing []
+runRefreshSupervisor :: Int -> Int -> Maybe [Name] -> HermesConfig -> IO ()
+runRefreshSupervisor budget threshold wakeFrom cfg = supervise Nothing []
   where
     names = hcNames cfg
     agentName = agentNameOf names
@@ -390,6 +392,7 @@ runRefreshSupervisor budget threshold cfg = supervise Nothing []
         <> ["--root", hcRoot cfg]
         <> concatMap (\name -> ["--name", T.unpack name]) names
         <> ["--prompt", hcPromptFile cfg]
+        <> concatMap (\sender -> ["--wake-from", T.unpack sender]) (fromMaybe [] wakeFrom)
         <> maybe [] (\path -> ["--session", path]) (hcSessionFile cfg)
         <> maybe [] (\model -> ["--model", T.unpack model]) (hcModel cfg)
         <> maybe [] (\provider -> ["--provider", T.unpack provider]) (hcProvider cfg)
@@ -412,8 +415,8 @@ runRefreshSupervisor budget threshold cfg = supervise Nothing []
         ExitSuccess -> pure ()
         ExitFailure _ -> exitWith code
 
-runKimi :: Int -> KimiConfig -> IO ()
-runKimi budget cfg = do
+runKimi :: Int -> Maybe [Name] -> KimiConfig -> IO ()
+runKimi budget wakeFrom cfg = do
   validatePrompt (kcPromptFile cfg)
   systemPrompt <- TIO.readFile (kcPromptFile cfg)
   let names = kcNames cfg
@@ -424,10 +427,10 @@ runKimi budget cfg = do
       promptFor = pure . ((systemPrompt <> "\n\nUser messages:\n") <>) . renderMail
   createDirectoryIfMissing True (takeDirectory sessionFile)
   TIO.putStrLn $ "   session: " <> T.pack sessionFile
-  runSeat (Seat budget agentName names (kcRoot cfg) mQuiesce backend promptFor (pure []))
+  runSeat (Seat budget agentName names wakeFrom (kcRoot cfg) mQuiesce backend promptFor (pure []))
 
-runDsh :: Int -> DshConfig -> IO ()
-runDsh budget cfg = do
+runDsh :: Int -> Maybe [Name] -> DshConfig -> IO ()
+runDsh budget wakeFrom cfg = do
   validatePrompt (dcPromptFile cfg)
   systemPrompt <- TIO.readFile (dcPromptFile cfg)
   let names = dcNames cfg
@@ -439,10 +442,10 @@ runDsh budget cfg = do
   TIO.putStrLn $ "   patch: " <> T.pack (dcDshPatch cfg)
   forM_ (dcDshModelPatch cfg) $ \path ->
     TIO.putStrLn $ "   model patch: " <> T.pack path
-  runSeat (Seat budget agentName names (dcRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
+  runSeat (Seat budget agentName names wakeFrom (dcRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
 
-runDshAcp :: Int -> DshAcpConfig -> IO ()
-runDshAcp budget cfg = do
+runDshAcp :: Int -> Maybe [Name] -> DshAcpConfig -> IO ()
+runDshAcp budget wakeFrom cfg = do
   validatePrompt (dacPromptFile cfg)
   systemPrompt <- TIO.readFile (dacPromptFile cfg)
   root <- makeAbsolute (dacRoot cfg)
@@ -472,13 +475,13 @@ runDshAcp budget cfg = do
   TIO.putStrLn $ "   patch: " <> T.pack basePatch
   forM_ modelPatch $ \path ->
     TIO.putStrLn $ "   model patch: " <> T.pack path
-  runSeat (Seat budget agentName names root mQuiesce backend (pure . renderMail) (pure []))
+  runSeat (Seat budget agentName names wakeFrom root mQuiesce backend (pure . renderMail) (pure []))
 
 acpTurnMicros :: Int
 acpTurnMicros = 600_000_000
 
-runAcp :: Int -> AcpCliConfig -> IO ()
-runAcp budget cfg = do
+runAcp :: Int -> Maybe [Name] -> AcpCliConfig -> IO ()
+runAcp budget wakeFrom cfg = do
   validatePrompt (acPromptFile cfg)
   systemPrompt <- TIO.readFile (acPromptFile cfg)
   let names = acNames cfg
@@ -491,10 +494,10 @@ runAcp budget cfg = do
           framedPrompt
       mQuiesce = buildQuiesce (acQuiesce cfg) (acPitboss cfg)
   TIO.putStrLn $ "   protocol: acp (" <> T.pack (acAcpCommand cfg) <> ")"
-  runSeat (Seat budget agentName names (acRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
+  runSeat (Seat budget agentName names wakeFrom (acRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
 
-runLlm :: Int -> LlmConfig -> IO ()
-runLlm budget cfg = do
+runLlm :: Int -> Maybe [Name] -> LlmConfig -> IO ()
+runLlm budget wakeFrom cfg = do
   validatePrompt (lcPromptFile cfg)
   systemPrompt <- TIO.readFile (lcPromptFile cfg)
   key <- lookupEnv (lcKeyEnv cfg)
@@ -516,10 +519,10 @@ runLlm budget cfg = do
           mQuiesce = buildQuiesce (lcQuiesce cfg) (lcPitboss cfg)
       TIO.putStrLn $ "   base: " <> baseUrl bareCfg
       TIO.putStrLn $ "   model: " <> model bareCfg
-      runSeat (Seat budget agentName names (lcRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
+      runSeat (Seat budget agentName names wakeFrom (lcRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
 
-runGateway :: Int -> GatewayCliConfig -> IO ()
-runGateway budget cfg = do
+runGateway :: Int -> Maybe [Name] -> GatewayCliConfig -> IO ()
+runGateway budget wakeFrom cfg = do
   validatePrompt (gcwPromptFile cfg)
   systemPrompt <- TIO.readFile (gcwPromptFile cfg)
   home <- getHomeDirectory
@@ -530,10 +533,10 @@ runGateway budget cfg = do
       backend = gatewayBackend gwCfg framedPrompt
       mQuiesce = buildQuiesce (gcwQuiesce cfg) (gcwPitboss cfg)
   TIO.putStrLn $ "   gateway: " <> gwBaseUrl gwCfg
-  runSeat (Seat budget agentName names (gcwRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
+  runSeat (Seat budget agentName names wakeFrom (gcwRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
 
-runCommand :: Int -> CommandConfig -> IO ()
-runCommand budget cfg = do
+runCommand :: Int -> Maybe [Name] -> CommandConfig -> IO ()
+runCommand budget wakeFrom cfg = do
   let names = ccNames cfg
       agentName = agentNameOf names
       backend = commandBackend (ccCmd cfg) (ccArgs cfg)
@@ -548,4 +551,4 @@ runCommand budget cfg = do
           <> " came after `--`, so it is the command's argv and the seat never saw "
           <> (if length shadowed == 1 then "it." else "them.")
           <> " Put the seat's own flags before --cmd: `--quiesce 2 --cmd /bin/sh -- -c ...`"
-  runSeat (Seat budget agentName names (ccRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
+  runSeat (Seat budget agentName names wakeFrom (ccRoot cfg) mQuiesce backend (pure . renderMail) (pure []))
