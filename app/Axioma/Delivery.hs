@@ -18,7 +18,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Free.Agent.Bus.File (readCursor, readTransaction, writeCursor)
-import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliDeliverTo, parseSessionId)
+import Free.Agent.Cli (Cli (..), StderrPolicy (..), cleanCliOut, cliDeliverTo, kimiTextWith, parseSessionId)
 import Free.Agent.Delivery
   ( DeliveryRefusal (..),
     Invocation (..),
@@ -41,6 +41,7 @@ import Free.Agent.Delivery
     turnMetrics,
   )
 import Free.Agent.Mark (Mark (..), markGlyph)
+import Free.Agent.Protocol (Protocol (..), defaultProtocol, isSuppressedReply, protocolSummary)
 import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable, removePathForcibly)
 import System.Environment (getEnv, getExecutablePath, setEnv)
 import System.Exit (ExitCode (..))
@@ -288,51 +289,51 @@ deliveryTopic = do
   -------------------------------------------------------------------------
   putStrLn "intentional reply-act publication"
   assert "unaddressed direct prose stays local" $
-    null (replyAct "kimi1" "ordinary direct answer")
-      && replyWarning "kimi1" "ordinary direct answer" == Nothing
+    null (replyAct defaultProtocol "kimi1" "ordinary direct answer")
+      && replyWarning defaultProtocol "kimi1" "ordinary direct answer" == Nothing
   assert "LOCAL, public-looking, self, and empty prose stay local" $
-    null (replyAct "kimi1" "  LOCAL\nordinary local prose")
-      && null (replyAct "kimi1" "public prose")
-      && null (replyAct "kimi1" "self prose")
-      && null (replyAct "kimi1" " \n")
+    null (replyAct defaultProtocol "kimi1" "  LOCAL\nordinary local prose")
+      && null (replyAct defaultProtocol "kimi1" "public prose")
+      && null (replyAct defaultProtocol "kimi1" "self prose")
+      && null (replyAct defaultProtocol "kimi1" " \n")
   assert "a prefix-first address publishes without a warning" $
-    replyWarning "kimi1" "@yang: explicit report" == Nothing
+    replyWarning defaultProtocol "kimi1" "@yang: explicit report" == Nothing
   assert "a later line-leading address publishes its suffix and warns about the dropped prefix" $
-    case replyAct "kimi1" "progress\n@yang: DONE\nsecond line" of
+    case replyAct defaultProtocol "kimi1" "progress\n@yang: DONE\nsecond line" of
       [r] ->
         body r == "DONE\nsecond line"
           && to r == ["yang"]
           && channel r == Nothing
           && thread r == []
-          && replyWarning "kimi1" "progress\n@yang: DONE\nsecond line"
+          && replyWarning defaultProtocol "kimi1" "progress\n@yang: DONE\nsecond line"
             == Just "🟡 kimi1: @yang: begins at character offset 9, not 0; publishing addressed suffix"
       _ -> False
   assert "a bar-prefixed diff above the address publishes only the reply" $
-    case replyAct "kimi1" "│ +;; first\n│ +;; second\n@yang: DONE" of
+    case replyAct defaultProtocol "kimi1" "│ +;; first\n│ +;; second\n@yang: DONE" of
       [r] -> to r == ["yang"] && body r == "DONE"
       _ -> False
   assert "an address in a raw diff body does not displace the final reply" $
-    case replyAct "kimi1" "@@ -0,0 +1 @@\n@alice: diff body\n@bob: reply" of
+    case replyAct defaultProtocol "kimi1" "@@ -0,0 +1 @@\n@alice: diff body\n@bob: reply" of
       [r] -> to r == ["bob"] && body r == "reply"
       _ -> False
   assert "a later self-address is not a publication target" $
-    case replyAct "kimi1" "tool\n@bob: reply\n@kimi1: self" of
+    case replyAct defaultProtocol "kimi1" "tool\n@bob: reply\n@kimi1: self" of
       [r] -> to r == ["bob"] && body r == "reply\n@kimi1: self"
       _ -> False
   assert "a Markdown blockquote address stays local with its prose" $
-    null (replyAct "kimi1" "> @alice: quoted\nordinary direct prose")
+    null (replyAct defaultProtocol "kimi1" "> @alice: quoted\nordinary direct prose")
   assert "a fenced address is ignored in favour of the real reply" $
-    case replyAct "kimi1" "```text\n@alice: hi\n```\n@bob: reply" of
+    case replyAct defaultProtocol "kimi1" "```text\n@alice: hi\n```\n@bob: reply" of
       [r] -> to r == ["bob"] && body r == "reply"
       _ -> False
   assert "a real address is not displaced by a later fenced quote" $
-    case replyAct "kimi1" "@bob: reply\n```text\n@carol: quoted\n```" of
+    case replyAct defaultProtocol "kimi1" "@bob: reply\n```text\n@carol: quoted\n```" of
       [r] ->
         to r == ["bob"]
           && body r == "reply\n```text\n@carol: quoted\n```"
       _ -> False
   assert "replyAct leaves channel and ancestry to deliberate citation" $
-    case replyAct "kimi1" "@yang: explicit report" of
+    case replyAct defaultProtocol "kimi1" "@yang: explicit report" of
       [r] ->
         body r == "explicit report"
           && to r == ["yang"]
@@ -340,30 +341,56 @@ deliveryTopic = do
           && thread r == []
       _ -> False
   assert "an inline address does not manufacture a recipient" $
-    null (replyAct "kimi1" "• working\n\n• @yang: DONE not-earned")
+    null (replyAct defaultProtocol "kimi1" "• working\n\n• @yang: DONE not-earned")
   assert "an address behind leading whitespace is an explicit recipient" $
-    case replyAct "kimi1" "  @yang: front-line report" of
+    case replyAct defaultProtocol "kimi1" "  @yang: front-line report" of
       [r] ->
         to r == ["yang"]
           && body r == "front-line report"
           && thread r == []
-          && replyWarning "kimi1" "  @yang: front-line report" == Nothing
+          && replyWarning defaultProtocol "kimi1" "  @yang: front-line report" == Nothing
       _ -> False
   assert "a blank leading line before the address is prefix-first, not a recovery" $
-    case replyAct "kimi1" "\n@yang: after a blank line" of
+    case replyAct defaultProtocol "kimi1" "\n@yang: after a blank line" of
       [r] ->
         to r == ["yang"]
           && body r == "after a blank line"
-          && replyWarning "kimi1" "\n@yang: after a blank line" == Nothing
+          && replyWarning defaultProtocol "kimi1" "\n@yang: after a blank line" == Nothing
       _ -> False
   assert "an indented address on a later line recovers its suffix with the offset" $
-    case replyAct "kimi1" "notes\n  @yang: recovered report" of
+    case replyAct defaultProtocol "kimi1" "notes\n  @yang: recovered report" of
       [r] ->
         to r == ["yang"]
           && body r == "recovered report"
-          && replyWarning "kimi1" "notes\n  @yang: recovered report"
+          && replyWarning defaultProtocol "kimi1" "notes\n  @yang: recovered report"
             == Just "🟡 kimi1: @yang: begins at character offset 8, not 0; publishing addressed suffix"
       _ -> False
+
+  putStrLn "configurable reply and presentation protocol"
+  let custom =
+        defaultProtocol
+          { protocolAddressPrefix = "%",
+            protocolAddressTerminator = "=",
+            protocolPresentationBullet = "* ",
+            protocolEmptyReply = "EMPTY"
+          }
+  assert "a supplied address grammar drives publication and warnings" $
+    case replyAct custom "kimi1" "notes\n  %yang= custom report" of
+      [r] ->
+        to r == ["yang"]
+          && body r == "custom report"
+          && replyWarning custom "kimi1" "notes\n  %yang= custom report"
+            == Just "🟡 kimi1: %yang= begins at character offset 8, not 0; publishing addressed suffix"
+      _ -> False
+  assert "neither protocol implicitly reads the other's address" $
+    null (replyAct custom "kimi1" "@yang: legacy")
+      && null (replyAct defaultProtocol "kimi1" "%yang= custom")
+  assert "the Kimi presentation scrub uses the same custom address prefix" $
+    kimiTextWith custom "* %yang= custom report" == "%yang= custom report"
+  assert "empty-reply suppression is configured, not a private runner literal" $
+    isSuppressedReply custom "  EMPTY\n" && not (isSuppressedReply defaultProtocol "EMPTY")
+  assert "help derives the address convention from the supplied protocol" $
+    "%name=" `T.isInfixOf` protocolSummary custom
 
   -------------------------------------------------------------------------
   -- Stranded-reply notes: a reply published only from its later-line address
@@ -374,7 +401,7 @@ deliveryTopic = do
   strandRoot <- tempRoot "free-agent-strand-note"
   strandCause <- postTo strandRoot (mkPost "yang" ["kimi1"] "STRAND")
   assert "a stranded reply renders one note naming delivery, recipient, and loss" $
-    case strandedNote "kimi1" strandCause "notes\n@yang: stranded report" of
+    case strandedNote defaultProtocol "kimi1" strandCause "notes\n@yang: stranded report" of
       Just n ->
         ("🟡 your reply for delivery " <> T.pack (show (snd (stamp strandCause)))) `T.isPrefixOf` n
           && "`@yang:`" `T.isInfixOf` n
@@ -383,12 +410,12 @@ deliveryTopic = do
   assert "notes are silent for clean, prefix-first, and self-addressed replies" $
     all
       (== Nothing)
-      [ strandedNote "kimi1" strandCause "ordinary direct answer",
-        strandedNote "kimi1" strandCause "@yang: prefix-first report",
-        strandedNote "kimi1" strandCause "  LOCAL\nthinking",
-        strandedNote "kimi1" strandCause "tool\n@kimi1: self only"
+      [ strandedNote defaultProtocol "kimi1" strandCause "ordinary direct answer",
+        strandedNote defaultProtocol "kimi1" strandCause "@yang: prefix-first report",
+        strandedNote defaultProtocol "kimi1" strandCause "  LOCAL\nthinking",
+        strandedNote defaultProtocol "kimi1" strandCause "tool\n@kimi1: self only"
       ]
-  noteStrand strandRoot "kimi1" strandCause "notes\n@yang: stranded report"
+  noteStrand defaultProtocol strandRoot "kimi1" strandCause "notes\n@yang: stranded report"
   strandFile <- doesFileExist (strandNotePath strandRoot "kimi1")
   assert "the note lands under .strand-<seat>" strandFile
   notesRead <- takeStrandNotes strandRoot "kimi1"
@@ -401,7 +428,7 @@ deliveryTopic = do
   strandGone <- doesFileExist (strandNotePath strandRoot "kimi1")
   secondRead <- takeStrandNotes strandRoot "kimi1"
   assert "reading the notes clears them" $ not strandGone && null secondRead
-  noteStrand strandRoot "kimi1" strandCause "ordinary direct answer"
+  noteStrand defaultProtocol strandRoot "kimi1" strandCause "ordinary direct answer"
   quietRead <- takeStrandNotes strandRoot "kimi1"
   assert "a clean reply leaves no note" (null quietRead)
   removePathForcibly strandRoot

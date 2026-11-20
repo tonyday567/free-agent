@@ -90,6 +90,7 @@ import Free.Agent.Bus (postLocal, readLogStrict, readSince)
 import Free.Agent.Bus.File (Flow (Continue), Human (..), attachHuman, humanNames, readCursor, readCursorAll, readHuman, removeHuman, tailLog, writeCursor)
 import Free.Agent.Bus.Heartbeat (HbState (..), Heartbeat, hbPath, hbText, readHeartbeat)
 import Free.Agent.Cli.Config (rootOpt)
+import Free.Agent.Protocol (BlockLink (..), PostKind (..), Protocol, hasPostKind, kindWord, parseBlockLink, parsePostKind)
 import Options.Applicative
 import System.Directory (doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
@@ -99,7 +100,6 @@ import System.IO (hIsTerminalDevice, stderr, stdin)
 import System.IO.Error (isDoesNotExistError, isPermissionError)
 import System.Posix.Signals (nullSignal, signalProcess)
 import System.Posix.Types (CPid)
-import Text.Read (readMaybe)
 
 -- | Cascade depth: 0 is a census, 1 adds rows, 2 adds verbatim evidence.
 newtype Depth = Depth Int
@@ -374,8 +374,8 @@ statusCmd = StatusCommand <$> rootOpt <*> thresholdOpt <*> depthOpt (Depth 1) <*
 orgOpt :: Parser Bool
 orgOpt = switch (long "org" <> help "Org status output for fab-open-status")
 
-busParser :: Parser BusCommand
-busParser =
+busParser :: Protocol -> Parser BusCommand
+busParser protocol =
   subparser
     ( command "post" (info (postCmd <**> helper) (progDesc "Post flags or JSON; --thread carries reply ancestry, --channel names the channel; the body is --body or piped on stdin"))
         <> command "watch" (info (watchCmd <**> helper) (progDesc "Watch the log for posts addressed to NAMEs"))
@@ -385,7 +385,7 @@ busParser =
         <> command "attach" (info (attachCmd <**> helper) (progDesc "Record NAME as the human attached to this root (evidence only; changes no delivery or READY path)"))
         <> command "detach" (info (detachCmd <**> helper) (progDesc "Remove NAME's attached-human marker (the cursor and unread mail are untouched)"))
         <> command "retire" (info (retireCmd <**> helper) (progDesc "Write the dead marker to NAME's heartbeat: the seat joins the retired circle, its cursor, log and transcripts stay as evidence; no process is signalled"))
-        <> command "ready" (info (readyCmd <**> helper) (progDesc "List unclaimed open TASKs with no unresolved blocker"))
+        <> command "ready" (info (readyCmd <**> helper) (progDesc (T.unpack ("List unclaimed open " <> kindWord protocol Task <> "s with no unresolved blocker"))))
         <> command "cursor" (info (cursorCmd <**> helper) (progDesc "Read or write agent cursor"))
         <> command "status" (info (statusCmd <**> helper) (progDesc "Unified seat census: circle counts, directed unread, and last-post anchors"))
     )
@@ -394,20 +394,20 @@ busParser =
 -- Main dispatch
 -- ---------------------------------------------------------------------------
 
-runBusCommand :: BusCommand -> IO ()
-runBusCommand (PostCommand root mfrom mto mbody mthr mchan) =
+runBusCommand :: Protocol -> BusCommand -> IO ()
+runBusCommand _ (PostCommand root mfrom mto mbody mthr mchan) =
   runPost root mfrom mto mbody mthr mchan
-runBusCommand (WatchCommand root names) = runWatch root names
-runBusCommand (ReadCommand root names since thr depth) = runRead root names since thr depth
-runBusCommand (OrgCommand root thr) = runOrg root thr
-runBusCommand (InboxCommand root name markRead depth) = runInbox root name markRead depth
-runBusCommand (AttachCommand root name) = runAttach root name
-runBusCommand (DetachCommand root name) = runDetach root name
-runBusCommand (RetireCommand root name) = runRetire root name
-runBusCommand (ReadyCommand root depth) = runReady root depth
-runBusCommand (CursorGetCommand root name) = runCursorGet root name
-runBusCommand (CursorSetCommand root name pid) = runCursorSet root name pid
-runBusCommand (StatusCommand root threshold depth org) = runStatus root threshold depth org
+runBusCommand _ (WatchCommand root names) = runWatch root names
+runBusCommand _ (ReadCommand root names since thr depth) = runRead root names since thr depth
+runBusCommand _ (OrgCommand root thr) = runOrg root thr
+runBusCommand _ (InboxCommand root name markRead depth) = runInbox root name markRead depth
+runBusCommand _ (AttachCommand root name) = runAttach root name
+runBusCommand _ (DetachCommand root name) = runDetach root name
+runBusCommand _ (RetireCommand root name) = runRetire root name
+runBusCommand protocol (ReadyCommand root depth) = runReady protocol root depth
+runBusCommand _ (CursorGetCommand root name) = runCursorGet root name
+runBusCommand _ (CursorSetCommand root name pid) = runCursorSet root name pid
+runBusCommand _ (StatusCommand root threshold depth org) = runStatus root threshold depth org
 
 -- ---------------------------------------------------------------------------
 -- act: post
@@ -656,14 +656,14 @@ runRetire root name = do
 -- like every other command requires, and a view that dies partway names
 -- its death on stderr and exits non-zero rather than trailing off like
 -- an empty queue.
-runReady :: FilePath -> Depth -> IO ()
-runReady root depth = do
+runReady :: Protocol -> FilePath -> Depth -> IO ()
+runReady protocol root depth = do
   root' <- resolveRoot root
   requireBus root'
   view <- try @SomeException $ do
     posts <- loadPosts (root' </> "log.jsonl")
-    traverse_ (TIO.putStrLn . renderStored depth) (readyPosts posts)
-    traverse_ (TIO.hPutStrLn stderr) (readyWarnings posts)
+    traverse_ (TIO.putStrLn . renderStored depth) (readyPosts protocol posts)
+    traverse_ (TIO.hPutStrLn stderr) (readyWarnings protocol posts)
   case view of
     Right () -> pure ()
     Left e -> do
@@ -677,13 +677,13 @@ runReady root depth = do
 
 -- | Open TASK offers that have no claim, owner DONE, or unresolved blocker.
 -- A directed TASK is assigned at creation and is therefore not an open offer.
-readyPosts :: [Stored] -> [Stored]
-readyPosts posts = filter isReady [task | task <- posts, isRootTask task, null (to (stamped task))]
+readyPosts :: Protocol -> [Stored] -> [Stored]
+readyPosts protocol posts = filter isReady [task | task <- posts, isRootTask protocol task, null (to (stamped task))]
   where
     index = componentIndex posts
     -- Target id to the blockers that cite it, built once: scanning the
     -- whole log for a @LINK@ per task is the quadratic this hoist removes.
-    blockersByTarget = Map.fromListWith (++) [(target, [blocker]) | stored <- posts, Just (blocker, target) <- [parseBlockLink (body (stamped stored))]]
+    blockersByTarget = Map.fromListWith (++) [(linkTarget link, [linkBlocker link]) | stored <- posts, Just link <- [parseBlockLink protocol (body (stamped stored))]]
 
     -- Root-TASK ids whose owner has posted a DONE in the task's own
     -- component: a blocker id is resolved exactly when it names such a
@@ -694,17 +694,17 @@ readyPosts posts = filter isReady [task | task <- posts, isRootTask task, null (
       Set.fromList
         [ snd (stamp task)
         | task <- posts,
-          isRootTask task,
+          isRootTask protocol task,
           let component = componentOf index task,
-          taskComplete (taskOwner task component) component
+          taskComplete protocol (taskOwner protocol task component) component
         ]
 
     isReady task =
       let component = componentOf index task
-          owner = taskOwner task component
+          owner = taskOwner protocol task component
           blockers = blockersFor (snd (stamp task))
        in owner == Nothing
-            && not (taskComplete owner component)
+            && not (taskComplete protocol owner component)
             && all blockerResolved blockers
 
     blockersFor taskId = Map.findWithDefault [] taskId blockersByTarget
@@ -713,15 +713,16 @@ readyPosts posts = filter isReady [task | task <- posts, isRootTask task, null (
 
 -- | Diagnose CLAIM and DONE posts that cannot settle any incomplete public
 -- offer because they lie outside every such offer's thread component.
-readyWarnings :: [Stored] -> [Text]
-readyWarnings posts =
+readyWarnings :: Protocol -> [Stored] -> [Text]
+readyWarnings protocol posts =
   [ warning stray offer
   | stray <- posts,
-    hasKind "CLAIM" stray || hasKind "DONE" stray,
+    hasKind Claim stray || hasKind Done stray,
     outside stray,
     Just offer <- [resemblingOffer stray offers]
   ]
   where
+    hasKind kind stored = hasPostKind protocol kind (body (stamped stored))
     -- Shared across strays: recomputing the components and the offer set
     -- per stray turned a page of lint into minutes on a long log. The
     -- component index is built once here and reused for every offer lookup.
@@ -732,13 +733,13 @@ readyWarnings posts =
     offerComponentIds = Set.fromList [snd (stamp p) | comp <- offerComponents, p <- comp]
     offers = openOffers posts
 
-    taskOffers = filter (\task -> isRootTask task && null (to (stamped task)))
+    taskOffers = filter (\task -> isRootTask protocol task && null (to (stamped task)))
 
     openOffers =
       filter
         ( \task ->
             let component = componentOf index task
-             in not (taskComplete (taskOwner task component) component)
+             in not (taskComplete protocol (taskOwner protocol task component) component)
         )
         . taskOffers
 
@@ -747,7 +748,7 @@ readyWarnings posts =
     warning stray offer =
       let strayId = T.pack (show (snd (stamp stray)))
           offerId = T.pack (show (snd (stamp offer)))
-          kind = postKind stray
+          kind = maybe "" (kindWord protocol) (parsePostKind protocol (body (stamped stray)))
        in "🟡 post "
             <> strayId
             <> " "
@@ -811,43 +812,19 @@ componentIndex :: [Stored] -> Map.Map PostId [Stored]
 componentIndex posts =
   Map.fromList [(snd (stamp p), vs) | (_, vs) <- slicePosts ByThread posts, p <- vs]
 
-taskOwner :: Stored -> [Stored] -> Maybe Name
-taskOwner task component =
+taskOwner :: Protocol -> Stored -> [Stored] -> Maybe Name
+taskOwner protocol task component =
   case to (stamped task) of
     [assignee] -> Just assignee
-    [] -> listToMaybe [from (stamped reply) | reply <- component, hasKind "CLAIM" reply]
+    [] -> listToMaybe [from (stamped reply) | reply <- component, hasPostKind protocol Claim (body (stamped reply))]
     _ -> Nothing
 
-taskComplete :: Maybe Name -> [Stored] -> Bool
-taskComplete owner component =
-  maybe False (\name -> any (\reply -> hasKind "DONE" reply && from (stamped reply) == name) component) owner
+taskComplete :: Protocol -> Maybe Name -> [Stored] -> Bool
+taskComplete protocol owner component =
+  maybe False (\name -> any (\reply -> hasPostKind protocol Done (body (stamped reply)) && from (stamped reply) == name) component) owner
 
-isRootTask :: Stored -> Bool
-isRootTask stored = null (thread (stamped stored)) && hasKind "TASK" stored
-
--- | The post's kind is its first meaningful word. A leading @@@name:@@@
--- announcement address is stripped first: seats habitually write
--- @\@fox: CLAIM · task 2@, and the kind is still the second word. Counted as
--- a kind, the addressed claim would be invisible to 'taskOwner' and to the
--- READY lint, which is the silence this strips away.
-postKind :: Stored -> Text
-postKind stored = case T.words (dropAddress (body (stamped stored))) of
-  (w : _) -> w
-  [] -> ""
-  where
-    dropAddress t = case T.words t of
-      (w : rest) | isAddress w -> T.unwords rest
-      _ -> t
-    isAddress w = "@" `T.isPrefixOf` w && ":" `T.isSuffixOf` w && T.length w > 2
-
-hasKind :: Text -> Stored -> Bool
-hasKind kind stored = postKind stored == kind
-
-parseBlockLink :: Text -> Maybe (PostId, PostId)
-parseBlockLink text = case T.words text of
-  ("LINK" : "·" : blocker : "blocks" : target : _) ->
-    (,) <$> readMaybe (T.unpack blocker) <*> readMaybe (T.unpack target)
-  _ -> Nothing
+isRootTask :: Protocol -> Stored -> Bool
+isRootTask protocol stored = null (thread (stamped stored)) && hasPostKind protocol Task (body (stamped stored))
 
 -- | The thread view: the connected component of the given id under the
 -- schema's @thread@ field. Roots carry @thread = []@, replies cite their

@@ -26,6 +26,8 @@ import Axioma.Transcript (transcriptTopic)
 import Axioma.Usage (usageTopic)
 import Control.Exception (SomeException, displayException, try)
 import Control.Monad (unless)
+import Data.Text qualified as T
+import Free.Agent.Protocol (ResultKind (Fail), defaultProtocol, resultWord)
 import Options.Applicative
 import System.Exit (exitFailure)
 
@@ -128,7 +130,7 @@ runTopic All = do
       case result of
         Right () -> pure True
         Left err -> do
-          putStrLn ("  FAIL " <> topicName topic <> ": " <> displayException err)
+          putStrLn ("  " <> T.unpack (resultWord defaultProtocol Fail) <> " " <> topicName topic <> ": " <> displayException err)
           pure False
 runTopic Seat = seatTopic
 runTopic Transcript = transcriptTopic

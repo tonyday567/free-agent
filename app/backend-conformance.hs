@@ -18,6 +18,7 @@ import Data.Time.Clock (getCurrentTime)
 import Free.Agent.Backend
 import Free.Agent.Bus (postLocal, readLogStrict)
 import Free.Agent.Bus.File (readCursor, readTransaction, writeCursor, writeTransaction)
+import Free.Agent.Protocol (ResultKind (..), defaultProtocol, resultWord)
 import Options.Applicative
 import Seat.Backend (appendBackendTranscript, drainBackend, replyActs, runBackendTurn)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory)
@@ -77,7 +78,7 @@ scratchBase = do
 
 require :: Text -> Bool -> IO ()
 require label ok = do
-  TIO.putStrLn ((if ok then "PASS " else "FAIL ") <> label)
+  TIO.putStrLn (resultWord defaultProtocol (if ok then Pass else Fail) <> " " <> label)
   unless ok exitFailure
 
 runClient :: Client -> FilePath -> IO ClientReport

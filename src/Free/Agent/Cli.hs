@@ -10,6 +10,8 @@ module Free.Agent.Cli
     Cli (..),
     StderrPolicy (..),
     kimiCli,
+    kimiCliWith,
+    kimiTextWith,
     dshCli,
     parseSessionId,
     cleanCliOut,
@@ -55,6 +57,7 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Free.Agent.Delivery (DeliveryFailure (..), DeliveryFailureKind (..), Invocation (..), Turn, TurnCeiling (..), TurnResult (..), deliverTo)
+import Free.Agent.Protocol (Protocol, defaultProtocol, protocolEmptyReply, scrubPresentationBullet)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (-<.>))
@@ -134,7 +137,11 @@ data StderrPolicy
 -- but teed raw to @\<sessionFile\>.stderr.log@ — interiority stays
 -- searchable, never silently dropped.
 kimiCli :: Maybe Text -> Maybe Text -> FilePath -> Cli
-kimiCli model provider sessionFile =
+kimiCli = kimiCliWith defaultProtocol
+
+-- | Kimi recipe over an explicit reply-address and presentation vocabulary.
+kimiCliWith :: Protocol -> Maybe Text -> Maybe Text -> FilePath -> Cli
+kimiCliWith protocol model provider sessionFile =
   Cli
     { cliCommand = "kimi",
       cliArgv = \prompt mSid ->
@@ -148,7 +155,7 @@ kimiCli model provider sessionFile =
       cliStale = \_ out ->
         "Session \"" `T.isInfixOf` out && "not found" `T.isInfixOf` out,
       cliExhausted = \_ _ -> False,
-      cliScrub = kimiText,
+      cliScrub = kimiTextWith protocol,
       cliStderr = StderrDrop,
       -- Interiority log: NAME.sid -> NAME.stderr.log
       cliStderrTee = Just (sessionFile -<.> "stderr.log"),
@@ -164,17 +171,15 @@ kimiSessionId out =
 
 -- | Drop the resume-hint line and one addressed presentation bullet.
 -- Ordinary bullets and addressed lines behind a preamble stay untouched.
-kimiText :: Text -> Text
-kimiText text =
+kimiTextWith :: Protocol -> Text -> Text
+kimiTextWith protocol text =
   let clean =
         T.strip
           . T.unlines
           . filter (not . ("To resume this session:" `T.isPrefixOf`))
           . T.lines
           $ text
-   in case T.stripPrefix "• " clean of
-        Just rest | "@" `T.isPrefixOf` rest -> rest
-        _ -> clean
+   in scrubPresentationBullet protocol clean
 
 -- | Best-effort extraction of a top-level @"key": "value"@ string field
 -- (space after the colon optional; escapes respected).  Not a JSON parser —
@@ -777,7 +782,7 @@ cleanCliOut =
   where
     keep l
       | T.null l = False
-      | "(empty)" == l = False
+      | protocolEmptyReply defaultProtocol == l = False
       | "↪" `T.isPrefixOf` l = False
       | "kimi version" `T.isPrefixOf` l = False
       | "To resume this session:" `T.isPrefixOf` l = False

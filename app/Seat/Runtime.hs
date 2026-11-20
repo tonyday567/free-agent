@@ -37,6 +37,7 @@ import Free.Agent.Bus.File
   )
 import Free.Agent.Bus.Heartbeat (HbState (..), writeHeartbeat)
 import Free.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph)
+import Free.Agent.Protocol (defaultProtocol, isSuppressedReply)
 import Seat.Backend (appendBackendTranscript, replyActs, runBackendTurn)
 import System.Directory (doesFileExist, makeAbsolute, removeFile)
 import System.Environment (setEnv)
@@ -210,9 +211,7 @@ runSeat seat = do
                   _ <- postLocal root post
                   pure ()
                 where
-                  keep post =
-                    let text = T.strip (body post)
-                     in not (T.null text) && text /= "(empty)"
+                  keep = not . isSuppressedReply defaultProtocol . body
 
               recordTranscript n outcome started ended =
                 appendBackendTranscript transcript (snd (stamp (last storedBatch))) started ended (Just n) outcome

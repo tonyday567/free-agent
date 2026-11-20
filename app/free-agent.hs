@@ -52,6 +52,7 @@ import Free.Agent.Cli.Config
 import Free.Agent.Gateway (GatewayConfig (..), defaultGatewayConfig)
 import Free.Agent.Host (BareConfig (..), defaultBareConfig)
 import Free.Agent.Mark (Mark (StandDown), markGlyph)
+import Free.Agent.Protocol (defaultProtocol, protocolSummary)
 import Free.Agent.Refresh (preserveForRefresh, refreshDue, refreshRequestPath, writeRefreshRequest)
 import Free.Agent.Usage (readHermesUsage, readUsageIdentity, renderUsageIdentity)
 import Options.Applicative
@@ -181,7 +182,7 @@ defaultAgentParser =
 commandParser :: Parser Command
 commandParser =
   subparser
-    ( command "bus" (info (BusCmd <$> busParser <**> helper) (progDesc "Bus subcommands"))
+    ( command "bus" (info (BusCmd <$> busParser defaultProtocol <**> helper) (progDesc "Bus subcommands"))
         <> command "llm" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendLlm <$> parseLlmConfig) <**> helper) (progDesc "Direct API seat"))
         <> command "cmd" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendCommand <$> parseCommandConfig) <**> helper) (progDesc "External-command seat"))
         <> command "dsh" (info (AgentCmd <$> deliveryBudgetOpt <*> (BackendDsh <$> parseDshConfig) <**> helper) (progDesc "DSH seat"))
@@ -256,6 +257,7 @@ opts =
     ( fullDesc
         <> progDesc "Unified free-agent CLI"
         <> header "free-agent - bus, seats, and status"
+        <> footer (T.unpack (protocolSummary defaultProtocol))
     )
 
 versionOption :: Parser (a -> a)
@@ -276,7 +278,7 @@ main = do
   cmd <- execParser opts
   case cmd of
     AgentCmd budget backend -> runBackend budget backend
-    BusCmd busCmd -> runBusCommand busCmd
+    BusCmd busCmd -> runBusCommand defaultProtocol busCmd
     StatusCmd root mthreshold depth org -> runStatus root (fromMaybe 900 mthreshold) depth org
     UsageCmd source -> case source of
       HermesSessionFile sessionFile ->

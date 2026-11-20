@@ -12,23 +12,23 @@ module Axioma.Common
   )
 where
 
-import Circuit.Post (Post (..))
 import Circuit.Diagram (SDiagram (..))
 import Circuit.Machine (Body (Body), Moore, MooreT (..), scan)
+import Circuit.Post (Post (..))
 import Circuit.Tensor (unConst)
+import Control.Monad (unless)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Free.Agent.Diagram (skeletonLabels)
+import Free.Agent.Protocol (ResultKind (..), defaultProtocol, resultWord)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile)
 import System.Exit (exitFailure)
 import System.IO (hClose, openTempFile)
 
 assert :: String -> Bool -> IO ()
-assert msg ok =
-  if ok
-    then putStrLn ("  PASS " ++ msg)
-    else do
-      putStrLn ("  FAIL " ++ msg)
-      exitFailure
+assert msg ok = do
+  putStrLn ("  " <> T.unpack (resultWord defaultProtocol (if ok then Pass else Fail)) <> " " <> msg)
+  unless ok exitFailure
 
 -- | The list runner: 'scan' over a seeded 'MooreT' (post-step
 -- convention — output read from the state after each input).

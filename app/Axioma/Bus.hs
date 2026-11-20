@@ -31,6 +31,7 @@ import Free.Agent.Bus.File (QuiesceConfig (..), readCursor, readTransaction, wri
 import Free.Agent.Bus.Heartbeat (HbState (..), hbPath, parseHb, readHeartbeat, writeHeartbeat)
 import Free.Agent.Delivery (Invocation (..), Turn, TurnResult (..), deliverTo, newDeliveryGrant, replyAct)
 import Free.Agent.Mark (Mark (..), controlMark, isHalt, markGlyph)
+import Free.Agent.Protocol (Protocol (..), defaultProtocol)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure, info, renderFailure)
 import System.Directory (doesFileExist, removePathForcibly)
@@ -103,7 +104,7 @@ busTopic = do
     -- masquerading as an empty inbox (the B12 failure the probe showed).
     cliRoot <- tempRoot "free-agent-b12-cli"
     TIO.writeFile (cliRoot </> "log.jsonl") ("{\"id\":0,\"ts\":\"BROKEN\",\"from\":\"a\",\"channel\":null,\"to\":[\"b\"],\"thread\":[],\"body\":\"x\"}\n")
-    refused <- try @SomeException (runBusCommand (ReadCommand cliRoot ["b"] (Just (SinceId 0)) Nothing (Depth 2)))
+    refused <- try @SomeException (runBusCommand defaultProtocol (ReadCommand cliRoot ["b"] (Just (SinceId 0)) Nothing (Depth 2)))
     assert "a malformed row makes bus read exit non-zero" (isLeft refused)
     removePathForcibly cliRoot
 
@@ -340,7 +341,7 @@ busTopic = do
     let stored i f audience ancestors text = case parseTimeText "2026-10-28T00:00:00" of
           Just ts -> Stamped (ts, i) (Post f Nothing audience ancestors text)
           Nothing -> error "bad READY fixture timestamp"
-        readyIds = map (snd . stamp) . readyPosts
+        readyIds = map (snd . stamp) . readyPosts defaultProtocol
         posts =
           [ stored 0 "moka" [] [] "TASK · open offer",
             stored 1 "moka" [] [] "TASK · claimed offer",
@@ -370,8 +371,45 @@ busTopic = do
   do
     let stored i f audience ancestors text = case parseTimeText "2026-10-28T00:00:00" of
           Just ts -> Stamped (ts, i) (Post f Nothing audience ancestors text)
+          Nothing -> error "bad custom protocol fixture timestamp"
+        custom =
+          defaultProtocol
+            { protocolTaskWord = "ASK",
+              protocolClaimWord = "MINE",
+              protocolDoneWord = "FIN",
+              protocolLinkWord = "DEP",
+              protocolLinkSeparator = "=",
+              protocolLinkVerb = "needs",
+              protocolAddressPrefix = "%",
+              protocolAddressTerminator = "="
+            }
+        customReadyIds = map (snd . stamp) . readyPosts custom
+        posts =
+          [ stored 50 "moka" [] [] "ASK open",
+            stored 51 "moka" [] [] "ASK claimed",
+            stored 52 "mucho" ["moka"] [51] "%moka= MINE accepted",
+            stored 53 "moka" [] [] "ASK completed",
+            stored 54 "mucho" ["moka"] [53] "MINE completed",
+            stored 55 "mucho" ["moka"] [53] "FIN completed",
+            stored 56 "moka" [] [] "ASK blocked",
+            stored 57 "moka" [] [] "DEP = 50 needs 56",
+            stored 58 "moka" [] [] "ASK resolved",
+            stored 59 "moka" ["mucho"] [] "ASK assigned blocker",
+            stored 60 "mucho" ["moka"] [59] "FIN blocker",
+            stored 61 "moka" [] [] "DEP = 59 needs 58"
+          ]
+    assert "a supplied protocol owns kinds, link tokens, and announcement addresses" $
+      customReadyIds posts == [50, 58]
+    assert "custom controls are not silently accepted by the default protocol" $
+      map (snd . stamp) (readyPosts defaultProtocol posts) == []
+    assert "default kind matching remains exact and case-sensitive" $
+      null (readyPosts defaultProtocol [stored 62 "moka" [] [] "task lower", stored 63 "moka" [] [] "Task title"])
+
+  do
+    let stored i f audience ancestors text = case parseTimeText "2026-10-28T00:00:00" of
+          Just ts -> Stamped (ts, i) (Post f Nothing audience ancestors text)
           Nothing -> error "bad READY conflict fixture timestamp"
-        readyIds = map (snd . stamp) . readyPosts
+        readyIds = map (snd . stamp) . readyPosts defaultProtocol
         posts =
           [ stored 20 "moka" [] [] "TASK · contested blocker",
             stored 21 "mucho" ["moka"] [20] "CLAIM · task 20",
@@ -388,7 +426,7 @@ busTopic = do
     let stored i f audience ancestors text = case parseTimeText "2026-10-28T00:00:00" of
           Just ts -> Stamped (ts, i) (Post f Nothing audience ancestors text)
           Nothing -> error "bad ancestry fixture timestamp"
-        readyIds = map (snd . stamp) . readyPosts
+        readyIds = map (snd . stamp) . readyPosts defaultProtocol
         offer = stored 30 "moka" [] [] "TASK · parcel alpha"
         claimInside = stored 31 "mucho" ["moka"] [30] "CLAIM · parcel alpha"
         claimOutside = stored 31 "mucho" ["moka"] [] "CLAIM · parcel alpha"
@@ -406,40 +444,40 @@ busTopic = do
     assert "an outside CLAIM leaves its offer READY" $
       readyIds [offer, claimOutside] == [30]
     assert "an inside CLAIM earns no ancestry warning" $
-      null (readyWarnings [offer, claimInside])
+      null (readyWarnings defaultProtocol [offer, claimInside])
     assert "an outside CLAIM names the post and resembling offer" $
-      case readyWarnings [offer, claimOutside] of
+      case readyWarnings defaultProtocol [offer, claimOutside] of
         [warning] -> namesPostAndOffer warning
         _ -> False
     assert "an unrelated outside CLAIM earns no spurious offer warning" $
-      null (readyWarnings [offer, stored 35 "mucho" ["moka"] [] "CLAIM · unrelated"])
+      null (readyWarnings defaultProtocol [offer, stored 35 "mucho" ["moka"] [] "CLAIM · unrelated"])
     assert "an owner DONE inside the component releases a dependent offer" $
       readyIds (withDone doneInside) == [32]
     assert "an owner DONE outside the component leaves the dependent offer blocked" $
       readyIds (withDone doneOutside) == []
     assert "inside CLAIM and DONE earn no ancestry warnings beside another open offer" $
-      null (readyWarnings (withDone doneInside))
+      null (readyWarnings defaultProtocol (withDone doneInside))
     assert "an outside DONE names its post and resembling offer" $
-      case readyWarnings (withDone doneOutside) of
+      case readyWarnings defaultProtocol (withDone doneOutside) of
         [warning] ->
           "post 34" `T.isInfixOf` warning
             && "offer 30" `T.isInfixOf` warning
             && "--thread 30" `T.isInfixOf` warning
         _ -> False
     assert "an addressed outside CLAIM is a claim, not a silent no-op" $
-      case readyWarnings [offer, stored 36 "mucho" ["moka"] [] "@moka: CLAIM · parcel alpha"] of
+      case readyWarnings defaultProtocol [offer, stored 36 "mucho" ["moka"] [] "@moka: CLAIM · parcel alpha"] of
         [warning] ->
           "post 36" `T.isInfixOf` warning
             && "offer 30" `T.isInfixOf` warning
             && "--thread 30" `T.isInfixOf` warning
         _ -> False
     assert "the READY remedy names a command the same build has" $
-      case readyWarnings [offer, claimOutside] of
+      case readyWarnings defaultProtocol [offer, claimOutside] of
         [warning] ->
           "bus post --from mucho --thread 30 --body CLAIM" `T.isInfixOf` warning
             && not ("bus say" `T.isInfixOf` warning)
     assert "the READY remedy says where to stand, since the default root is bus/ beneath the free-agent home" $
-      case readyWarnings [offer, claimOutside] of
+      case readyWarnings defaultProtocol [offer, claimOutside] of
         [warning] -> "from the bus root you queried" `T.isInfixOf` warning
         _ -> False
 
@@ -473,19 +511,19 @@ busTopic = do
         far = stored 43 "moka" [] [] "TASK · sigma parcel"
         below = [stored 41 "mucho" ["moka"] [] "DONE · omega sigma", near, far]
         above = [stored 44 "mucho" ["moka"] [] "DONE · omega sigma", near, far]
-    belowOutcome <- try (evaluate (length (readyWarnings below))) :: IO (Either SomeException Int)
+    belowOutcome <- try (evaluate (length (readyWarnings defaultProtocol below))) :: IO (Either SomeException Int)
     assert "a stray below its offers computes the lint without underflow" $
       case belowOutcome of
         Right 1 ->
-          case readyWarnings below of
+          case readyWarnings defaultProtocol below of
             [warning] -> "post 41" `T.isInfixOf` warning && "offer 42" `T.isInfixOf` warning
             _ -> False
         _ -> False
-    aboveOutcome <- try (evaluate (length (readyWarnings above))) :: IO (Either SomeException Int)
+    aboveOutcome <- try (evaluate (length (readyWarnings defaultProtocol above))) :: IO (Either SomeException Int)
     assert "a stray above its offers still picks the nearest id" $
       case aboveOutcome of
         Right 1 ->
-          case readyWarnings above of
+          case readyWarnings defaultProtocol above of
             [warning] -> "post 44" `T.isInfixOf` warning && "offer 43" `T.isInfixOf` warning
             _ -> False
         _ -> False
@@ -816,7 +854,7 @@ busTopic = do
           ["quiet"]
           root
           Nothing
-          (\_ -> ioTurn (pure (replyAct "quiet" "LOCAL\nplain local response")))
+          (\_ -> ioTurn (pure (replyAct defaultProtocol "quiet" "LOCAL\nplain local response")))
           >> putMVar done ()
     _ <- postLocal root (mkPost "human" ["quiet"] "*(no post)*")
     _ <- postLocal root (mkPost "human" ["quiet"] (markGlyph Landed))
@@ -825,7 +863,7 @@ busTopic = do
     let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "quiet"]
     assert "LOCAL response text publishes no reply act" $ replies == []
-    let acts = replyAct "quiet" "@human: acknowledged"
+    let acts = replyAct defaultProtocol "quiet" "@human: acknowledged"
     assert "an addressed response publishes without inferred ancestry or channel" $
       case acts of
         [reply] ->
@@ -866,7 +904,7 @@ busTopic = do
     root <- tempRoot "free-agent-post-flags"
     _ <- postLocal root (mkPost "human" ["seat"] "parent")
     -- The flag interface: both flags reach the command record.
-    let parseFlags = execParserPure defaultPrefs (info busParser mempty)
+    let parseFlags = execParserPure defaultPrefs (info (busParser defaultProtocol) mempty)
     assert "post --thread and --channel reach the command record" $
       case parseFlags ["post", "--root", root, "--from", "seat", "--body", "reply", "--thread", "0", "--channel", "ops"] of
         Success (PostCommand _ (Just "seat") _ (Just "reply") (Just 0) (Just "ops")) -> True
@@ -906,7 +944,7 @@ busTopic = do
     assert "the comma refusal happens before anything lands" $ afterRefused == beforeRefused
     -- The effect: a flag post lands ancestry and a channel in the log, and the
     -- channel addresses it (an empty --to still delivers to a subscriber).
-    runBusCommand (PostCommand root (Just "seat") [] (Just "reply") (Just 0) (Just "ops"))
+    runBusCommand defaultProtocol (PostCommand root (Just "seat") [] (Just "reply") (Just 0) (Just "ops"))
     content <- TIO.readFile (root </> "log.jsonl")
     let landed = map stamped (mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content))
         replyPost = last landed

@@ -55,6 +55,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Free.Agent.Agent (Name)
 import Free.Agent.Bus (postLocal)
+import Free.Agent.Protocol (Protocol, parseAddress, renderAddress)
 import System.Directory (removeFile)
 import System.FilePath ((</>))
 import System.IO (stderr)
@@ -224,45 +225,45 @@ directPostTo grant deliver root post = do
 -- suffix outside a fenced quotation is published; the prefix is not bus
 -- content. Inline mentions and Markdown blockquote addresses are not explicit
 -- addresses.
-replyAct :: Name -> Text -> [Post Text Text]
-replyAct agent response =
-  case parseAddress response <|> parseLaterLineAddress agent response of
+replyAct :: Protocol -> Name -> Text -> [Post Text Text]
+replyAct protocol agent response =
+  case parseAddress protocol response <|> parseLaterLineAddress protocol agent response of
     Nothing -> []
     Just (recipient, replyBody) -> pure (Post agent Nothing [recipient] [] replyBody)
 
 -- | Publish an intentional response after making a misplaced address visible.
-replyActIO :: Name -> Text -> IO [Post Text Text]
-replyActIO agent response = do
-  traverse_ (TIO.hPutStrLn stderr) (replyWarning agent response)
-  pure (replyAct agent response)
+replyActIO :: Protocol -> Name -> Text -> IO [Post Text Text]
+replyActIO protocol agent response = do
+  traverse_ (TIO.hPutStrLn stderr) (replyWarning protocol agent response)
+  pure (replyAct protocol agent response)
 
 -- | A valid address at the start of a later line earns a warning with its
 -- zero-based character offset. The addressed suffix publishes; the prefix does
 -- not. Inline mentions and genuinely unaddressed replies produce no warning
 -- and no publication.
-replyWarning :: Name -> Text -> Maybe Text
-replyWarning agent response =
-  case parseAddress response of
+replyWarning :: Protocol -> Name -> Text -> Maybe Text
+replyWarning protocol agent response =
+  case parseAddress protocol response of
     Just _ -> Nothing
     Nothing -> do
-      (offset, recipient, _) <- laterLineAddress agent response
+      (offset, recipient, _) <- laterLineAddress protocol agent response
       pure
         ( "🟡 "
             <> agent
-            <> ": @"
-            <> recipient
-            <> ": begins at character offset "
+            <> ": "
+            <> renderAddress protocol recipient
+            <> " begins at character offset "
             <> T.pack (show offset)
             <> ", not 0; publishing addressed suffix"
         )
 
-parseLaterLineAddress :: Name -> Text -> Maybe (Name, Text)
-parseLaterLineAddress agent response =
+parseLaterLineAddress :: Protocol -> Name -> Text -> Maybe (Name, Text)
+parseLaterLineAddress protocol agent response =
   (\(_, recipient, replyBody) -> (recipient, replyBody))
-    <$> laterLineAddress agent response
+    <$> laterLineAddress protocol agent response
 
-laterLineAddress :: Name -> Text -> Maybe (Int, Name, Text)
-laterLineAddress agent response =
+laterLineAddress :: Protocol -> Name -> Text -> Maybe (Int, Name, Text)
+laterLineAddress protocol agent response =
   listToMaybe
     ( reverse
         [ (T.length prefix + 1 + indent, recipient, replyBody)
@@ -270,7 +271,7 @@ laterLineAddress agent response =
           not (insideFence prefix),
           let (spaces, line) = T.span isSpace rest,
           let indent = T.length spaces,
-          Just (recipient, replyBody) <- pure (parseAddress line),
+          Just (recipient, replyBody) <- pure (parseAddress protocol line),
           recipient /= agent
         ]
     )
@@ -282,17 +283,6 @@ insideFence = odd . length . filter isFence . T.lines
 
 isFence :: Text -> Bool
 isFence line = "```" `T.isPrefixOf` T.stripStart line
-
--- | An address at the start of the response, allowing leading whitespace:
--- @\@@, a non-empty name without spaces, and a colon.
-parseAddress :: Text -> Maybe (Name, Text)
-parseAddress response = do
-  rest <- T.stripPrefix "@" (T.stripStart response)
-  let (name, afterName) = T.break (== ':') rest
-      recipient = T.strip name
-  if T.null recipient || T.null afterName || T.any (\c -> isSpace c || c == '@') recipient
-    then Nothing
-    else Just (recipient, T.strip (T.drop 1 afterName))
 
 -- ---------------------------------------------------------------------------
 -- Stranded replies, told on the next delivery
@@ -306,28 +296,28 @@ strandNotePath root name = root </> (".strand-" <> T.unpack name)
 -- line's addressed suffix and the text above the address stayed local. It is
 -- a harness fact for the seat's next delivery, never formatting blame; a
 -- prefix-first address, plain prose, and local responses leave no note.
-strandedNote :: Name -> Stored -> Text -> Maybe Text
-strandedNote agent stored response =
-  case parseAddress response of
+strandedNote :: Protocol -> Name -> Stored -> Text -> Maybe Text
+strandedNote protocol agent stored response =
+  case parseAddress protocol response of
     Just _ -> Nothing
     Nothing ->
       ( \(_, recipient, _) ->
           "🟡 your reply for delivery "
             <> T.pack (show (snd (stamp stored)))
-            <> " published from its `@"
-            <> recipient
-            <> ":` address onward only; the text above the address did not reach the bus."
+            <> " published from its `"
+            <> renderAddress protocol recipient
+            <> "` address onward only; the text above the address did not reach the bus."
       )
-        <$> laterLineAddress agent response
+        <$> laterLineAddress protocol agent response
 
 -- | Record a stranded reply for the seat's next delivery; silence otherwise.
 -- A failed write is bookkeeping loss, not turn failure.
-noteStrand :: FilePath -> Name -> Stored -> Text -> IO ()
-noteStrand root agent stored response =
+noteStrand :: Protocol -> FilePath -> Name -> Stored -> Text -> IO ()
+noteStrand protocol root agent stored response =
   catch
     ( traverse_
         (\note -> TIO.appendFile (strandNotePath root agent) (note <> "\n"))
-        (strandedNote agent stored response)
+        (strandedNote protocol agent stored response)
     )
     (\(_ :: IOException) -> pure ())
 

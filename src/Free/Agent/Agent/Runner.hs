@@ -12,11 +12,9 @@ module Free.Agent.Agent.Runner
   )
 where
 
-import Free.Agent.Agent (Name)
 import Circuit.Parser.Framing (Stored, decodeRow)
 import Circuit.Post (Post (..), PostId, mkPost)
 import Circuit.Shared (stamp, stamped)
-import Free.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph)
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, displayException, fromException, try)
 import Control.Monad (void)
@@ -27,6 +25,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Free.Agent.Agent (Name)
 import Free.Agent.Bus (postLocal)
 import Free.Agent.Bus.File
   ( Decision (..),
@@ -50,6 +49,8 @@ import Free.Agent.Delivery
     deliveryFailureLabel,
     useDeliveryGrant,
   )
+import Free.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph)
+import Free.Agent.Protocol (defaultProtocol, isSuppressedReply)
 import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
@@ -233,9 +234,7 @@ runAgentLoop agentName names root mQuiesce grant handleBatch = do
                   Right (TurnResponse replies) -> do
                     writeIORef skips 0
                     writeIORef failures 0
-                    let keep p =
-                          let b = T.strip (body p)
-                           in not (T.null b) && b /= "(empty)"
+                    let keep = not . isSuppressedReply defaultProtocol . body
                     traverse_ (postLocal root) (filter keep replies)
                     writeTransaction root agentName nextCursor
                     writeCursor root agentName nextCursor
@@ -434,12 +433,12 @@ batchEvidence root agentName ids = do
           -- notice the evidence that a turn had published.
           let hits =
                 [ snd (stamp s)
-                  | l <- ls,
-                    Right s <- [decodeRow l],
-                    let p = stamped s,
-                    from p == agentName,
-                    not (null (to p)),
-                    snd (stamp s) > batchEnd || any (`elem` ids) (thread p)
+                | l <- ls,
+                  Right s <- [decodeRow l],
+                  let p = stamped s,
+                  from p == agentName,
+                  not (null (to p)),
+                  snd (stamp s) > batchEnd || any (`elem` ids) (thread p)
                 ]
           pure $ case hits of
             [] -> "none"
