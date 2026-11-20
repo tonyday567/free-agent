@@ -9,11 +9,11 @@ where
 
 import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Post (Post (..), deliversTo)
-import Circuit.Shared (stamped)
+import Circuit.Shared (stamp, stamped)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -28,6 +28,7 @@ import System.FilePath (takeDirectory, (</>))
 import System.Posix.Files (setFileMode)
 import System.Posix.Signals (sigKILL, signalProcess)
 import System.Process (getPid, readProcessWithExitCode, spawnProcess, terminateProcess, waitForProcess)
+import System.Timeout (timeout)
 
 seatBinary :: IO FilePath
 seatBinary = do
@@ -383,4 +384,77 @@ runtimeTopic = do
     transcriptExists <- doesFileExist (root </> ".transcripts" </> "seat.jsonl")
     assert "unavailable-before-start leaves no failed-turn row and no settlement" $
       code /= ExitSuccess && cursor == 0 && transaction == Nothing && not transcriptExists
+    removePathForcibly root
+
+  -- A started failure delivered to an already-active watcher must not leave
+  -- the tail offset behind the original post. Its notice is only a wake: the
+  -- addressed TASK is the input that must never be presented twice in-process.
+  do
+    root <- tempRoot "free-agent-runtime-active-failure"
+    let failing =
+          T.pack (scriptPreamble root)
+            <> "printf 'STDOUT-TAIL-MARKER\\n'\nprintf 'STDERR-TAIL-MARKER\\n' >&2\nexit 3\n"
+    writeSeat root "seat" failing
+    TIO.writeFile (root </> "log.jsonl") ""
+    bin <- seatBinary
+    handle <-
+      bracket (getEnv "PATH") (setEnv "PATH") $ \oldPath -> do
+        setEnv "PATH" (root </> "bin" <> ":" <> oldPath)
+        spawnProcess bin (kimiArgs root "seat" <> ["--quiesce", "3"])
+    waitForPath (root </> ".hb-seat")
+    threadDelay 200_000
+    cause <- postLocal root (mkPost "runner" ["seat"] "TASK active watcher failure")
+    exited <- timeout 10_000_000 (waitForProcess handle)
+    case exited of
+      Nothing -> do
+        terminateProcess handle
+        _ <- waitForProcess handle
+        pure ()
+      Just _ -> pure ()
+    calls <- T.lines <$> callLog root
+    posts <- logPosts root
+    cursor <- readCursor root "seat"
+    transaction <- readTransaction root "seat"
+    transcriptExists <- doesFileExist (root </> ".transcripts" </> "seat.jsonl")
+    transcript <- if transcriptExists then TIO.readFile (root </> ".transcripts" </> "seat.jsonl") else pure ""
+    active <- doesFileExist (root </> ".active-seat")
+    let rows = filter (not . T.null) (T.lines transcript)
+        notices =
+          [ p
+          | p <- posts,
+            from p == "seat",
+            null (to p),
+            "backend failed on posts 0" `T.isInfixOf` body p
+          ]
+        code = fromMaybe (ExitFailure 124) exited
+    putStrLn $
+      "active-watcher failure counts: exit="
+        <> show code
+        <> " calls="
+        <> show (length calls)
+        <> " rows="
+        <> show (length rows)
+        <> " notices="
+        <> show (length notices)
+        <> " cursor="
+        <> show cursor
+    assert "active-watcher failure is bounded to one invocation, failed row, and notice" $
+      isJust exited && length calls == 1 && length rows == 1 && length notices == 1
+    assert "active-watcher failure preserves the original post and leaves settlement unmoved" $
+      snd (stamp cause) == 0
+        && cursor == 0
+        && transaction == Nothing
+        && not active
+        && case posts of
+          (original : _) -> from original == "runner" && to original == ["seat"] && body original == "TASK active watcher failure"
+          [] -> False
+    assert "active-watcher failure keeps an unaddressed notice and stdout/stderr tails" $
+      case notices of
+        [notice] ->
+          channel notice == Nothing
+            && "\"outcome\":\"failed\"" `T.isInfixOf` transcript
+            && "\"exit_code\":3" `T.isInfixOf` transcript
+            && "STDOUT-TAIL-MARKER" `T.isInfixOf` transcript
+            && "STDERR-TAIL-MARKER" `T.isInfixOf` transcript
+        _ -> False
     removePathForcibly root

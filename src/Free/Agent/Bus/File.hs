@@ -36,13 +36,11 @@ module Free.Agent.Bus.File
   )
 where
 
-import Free.Agent.Agent (Name)
+import Circuit.Machine (Body (..), Moore)
 import Circuit.Parser.Framing (Stored)
+import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Post (Post, PostId)
 import Circuit.Shared (stamp, stamped)
-import Free.Agent.Mark (Mark (Timeout), markGlyph)
-import Circuit.Machine (Body (..), Moore)
-import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Tensor (Const (Const), unConst)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM
@@ -59,6 +57,7 @@ import Control.Concurrent.STM
     tryPutTMVar,
     writeTVar,
   )
+import Control.Exception (onException)
 import Control.Monad (unless, when)
 import Data.ByteString qualified as BS
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -70,7 +69,9 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
+import Free.Agent.Agent (Name)
 import Free.Agent.Bus (decodeLogStrict, readFileStrict, readLogStrict, readSince, touchLog, withLogRead)
+import Free.Agent.Mark (Mark (Timeout), markGlyph)
 import System.Directory (doesFileExist, listDirectory, removeFile)
 import System.FSNotify (Event (..), watchDir, withManager)
 import System.FilePath (takeDirectory, takeFileName, (</>))
@@ -370,7 +371,7 @@ tailLog path names startCursor mQuiesce cb = do
   unless exists $ do
     -- Touch an empty log so the scribe has a file to append to.
     touchLog path
-  (off0, halted0, _, _) <- drainFrom 0 startCursor
+  (off0, halted0, _, _) <- drainFrom 0 startCursor (\_ -> pure ())
   offRef <- newIORef off0
   halted <- newTVarIO halted0
   lock <- newMVar ()
@@ -421,24 +422,29 @@ tailLog path names startCursor mQuiesce cb = do
     -- cursor stays where it was for the next seat. Measured without this gate
     -- on ~/net, 6 Nov 2026: seats @moss@ and @reed@ ran 103s and 768s of work
     -- after their loops had already decided to stop.
+    -- The byte offset is a read watermark, not settlement. Advance it after
+    -- complete rows decode and the handler either returns or throws. A failure
+    -- notice may wake the watcher, but cannot make it present the same input
+    -- again; the separate settlement cursor stays unmoved for explicit retry.
+    -- A decode failure happens before either commit and keeps its suffix.
     drainLocked lock offRef halted filt = withMVar lock $ \_ -> do
       haltedNow <- readTVarIO halted
       if haltedNow
         then pure (True, 0, 0)
         else do
           off <- readIORef offRef
-          (off', h, nAll, nDeliv) <- drainFrom off filt
-          writeIORef offRef off'
+          (off', h, nAll, nDeliv) <- drainFrom off filt (writeIORef offRef)
           when h (atomically (writeTVar halted True))
           pure (h, nAll, nDeliv)
-    drainFrom off since = do
+    drainFrom off since commitOffset = do
       (ls, off') <- readCompleteLines off
       posts <-
         either
           (ioError . userError . malformedSuffix off)
           pure
           (decodeLogStrict (T.unlines ls))
-      (nDeliv, halted) <- deliver (readSince posts names since)
+      (nDeliv, halted) <- deliver (readSince posts names since) `onException` commitOffset off'
+      commitOffset off'
       pure (off', halted, length ls, nDeliv)
 
     malformedSuffix off errors =
