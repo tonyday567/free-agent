@@ -9,7 +9,7 @@ import Circuit.Post (Post (..), PostId, mkPost)
 import Circuit.Shared (stamp, stamped)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
-import Control.Monad (forM_, unless)
+import Control.Monad (unless)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -20,7 +20,7 @@ import Free.Agent.Bus (postLocal, readLogStrict)
 import Free.Agent.Bus.File (readCursor, readTransaction, writeCursor, writeTransaction)
 import Free.Agent.Protocol (ResultKind (..), defaultProtocol, resultWord)
 import Options.Applicative
-import Seat.Backend (appendBackendTranscript, drainBackend, replyActs, runBackendTurn)
+import Seat.Backend (appendBackendTranscript, drainBackend, runBackendTurn)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 import System.Environment (getEnv, setEnv)
 import System.Exit (exitFailure)
@@ -34,7 +34,6 @@ data Client = Hermes | Dsh | Both
 data ClientReport = ClientReport
   { reportActs :: [Text],
     reportOutputChannels :: [[OutputChannel]],
-    reportThreads :: [[PostId]],
     reportTranscriptRows :: Int,
     reportCursor :: PostId
   }
@@ -48,7 +47,7 @@ main = do
     Both -> do
       hermes <- runClient Hermes (base </> "hermes")
       dsh <- runClient Dsh (base </> "dsh")
-      require "compare identical normalized acts, outputs, ancestry, transcripts, and cursor" (hermes == dsh)
+      require "compare identical normalized acts, local outputs, transcripts, and cursor" (hermes == dsh)
       TIO.putStrLn ("artifact: " <> T.pack base)
     other -> do
       _ <- runClient other (base </> clientName other)
@@ -144,25 +143,23 @@ execute client root = do
 
   posts <- readLogStrict (root </> "log.jsonl")
   let replies = [stamped stored | stored <- posts, from (stamped stored) == name]
-      threads = map thread replies
-  require "each reply output becomes one sender-directed post with input ancestry" $
-    length replies == 2
-      && map body replies == ["conformance-one", "conformance-two"]
-      && all ((== ["runner"]) . to) replies
-      && threads == [[snd (stamp firstCause)], [snd (stamp secondCause)]]
+  require "raw final reply outputs stay local without inferred recipients or ancestry" $
+    null replies && length posts == 3
   transaction <- readTransaction root name
   cursor <- readCursor root name
   require "two completed turns commit twice; the final cursor is exact" $
     transaction == Just (snd (stamp secondCause) + 1) && cursor == snd (stamp secondCause) + 1
   transcriptText <- TIO.readFile transcript
   let rows = filter (not . T.null) (T.lines transcriptText)
-  require "open/send/resume/cancel leave three same-shaped transcript records" $
-    length rows == 3 && all validTranscriptRow rows
+  require "open/send/resume/cancel leave three transcript records retaining raw replies" $
+    length rows == 3
+      && all validTranscriptRow rows
+      && "conformance-one" `T.isInfixOf` transcriptText
+      && "@runner: conformance-two" `T.isInfixOf` transcriptText
   pure
     ClientReport
       { reportActs = ["open", "send", "resume", "cancel"],
         reportOutputChannels = [map outputChannel firstOutputs, map outputChannel secondOutputs],
-        reportThreads = threads,
         reportTranscriptRows = length rows,
         reportCursor = cursor
       }
@@ -180,8 +177,6 @@ completedTurn root transcript session name cause request = do
       appendBackendTranscript transcript (snd (stamp cause)) started ended Nothing outcome
       case outcome of
         Completed _ -> do
-          let replies = replyActs name [cause] outputs
-          forM_ replies (postLocal root)
           let next = snd (stamp cause) + 1
           writeTransaction root name next
           writeCursor root name next
@@ -256,11 +251,11 @@ fakeSource client =
           "  prev=\"$a\"",
           "done",
           "if [ -n \"$usage\" ]; then printf '{\"session_id\":\"conformance-session\",\"completed\":true}\\n' > \"$usage\"; fi",
-          "case \"$input\" in *resume-turn*) printf 'conformance-two\\n' ;; *) printf 'conformance-one\\n' ;; esac"
+          "case \"$input\" in *resume-turn*) printf '@runner: conformance-two\\n' ;; *) printf 'conformance-one\\n' ;; esac"
         ]
     dshSuccess =
       unlines
         [ "printf '%s\\n' '{\"type\":\"session\",\"sessionId\":\"conformance-session\"}'",
-          "case \"$input\" in *resume-turn*) text=conformance-two ;; *) text=conformance-one ;; esac",
+          "case \"$input\" in *resume-turn*) text='@runner: conformance-two' ;; *) text=conformance-one ;; esac",
           "printf '{\"type\":\"final\",\"text\":\"%s\"}\\n' \"$text\""
         ]

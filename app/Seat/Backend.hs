@@ -1,25 +1,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Backend acts at the seat boundary: drain events, retain transcript
--- evidence, and construct explicit reply posts with input ancestry.
+-- | Backend acts at the seat boundary: drain events and retain transcript
+-- evidence. Raw final reply output remains local seat output.
 module Seat.Backend
   ( runBackendTurn,
     drainBackend,
     appendBackendTranscript,
-    replyActs,
   )
 where
 
-import Circuit.Parser.Framing (Stored)
-import Circuit.Post (Post (..), PostId, mkPost)
-import Circuit.Shared (stamp, stamped)
-import Data.List (nub)
+import Circuit.Post (PostId)
 import Data.Maybe (fromMaybe)
-import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (UTCTime, diffUTCTime)
-import Free.Agent.Agent (Name)
 import Free.Agent.Backend
 import Free.Agent.Cli (TranscriptOutcome (..), TranscriptRecord (..), encodeTranscriptLine)
 import System.Directory (createDirectoryIfMissing)
@@ -81,14 +75,3 @@ appendBackendTranscript path postId started ended attempt outcome = do
           trSessionId = evidence >>= evidenceSessionId,
           trRaw = T.intercalate "\n" (filter (not . T.null) [maybe "" evidenceRawOutput evidence, fromMaybe "" (evidence >>= evidenceUsage)])
         }
-
--- | Each reply-channel output is one explicit post act. Thoughts, deltas,
--- usage, stdout, stderr, and raw evidence remain off the bus. Audience is the
--- distinct external senders, ancestry is the committed input, and channel is
--- always cleared: a reply to channel mail must not re-broadcast the channel.
-replyActs :: Name -> [Stored] -> [BackendOutput] -> [Post Text Text]
-replyActs who inputs outputs =
-  [(mkPost who senders text) {thread = ancestry} | BackendOutput ReplyOutput text <- outputs]
-  where
-    senders = nub [from p | p <- map stamped inputs, from p /= who]
-    ancestry = map (snd . stamp) inputs

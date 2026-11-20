@@ -126,9 +126,6 @@ acpTopic = do
     content <- TIO.readFile (root </> "log.jsonl")
     let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
         replies = [stamped s | s <- parsed, from (stamped s) == "acp1"]
-    assert "R2a the wired acp seat publishes explicit content with input audience and ancestry" $
-      code == ExitSuccess
-        && case replies of
-          [r] -> to r == ["human"] && body r == "@acp1: acp ack: ok" && thread r == [0]
-          _ -> False
+    assert "R2a raw acp reply output stays local without inferred audience or ancestry" $
+      code == ExitSuccess && null replies && length parsed == 2
     removePathForcibly root

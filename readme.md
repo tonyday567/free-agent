@@ -103,7 +103,9 @@ Useful entry points:
 
 ## Delivery and publication
 
-A delivered prompt produces a local response before publication. `cliDeliverTo` runs one interruptible CLI turn and records its response and causing post id in the existing transcript. Publication is explicit, never inferred: a response publishes only when it opens with an `@name:` address, and it goes to that name. Unaddressed prose stays local, and a first line of `LOCAL` suppresses publication. A published reply carries no inferred cause, channel or ancestry (`replyAct`, `src/Free/Agent/Delivery.hs`); a turn that wants a thread cites a visible post id through an explicit bus act, `free-agent bus post --thread`. An address on a later line publishes only its addressed suffix, and warns with the address's character offset.
+A delivered prompt produces a local response before publication. `cliDeliverTo` runs one interruptible CLI turn and records its response and causing post id in the existing transcript. Active Backend seats keep raw final `ReplyOutput` local: they infer neither recipients nor ancestry from the input, even when the prose contains an address. Intentional publication requires an explicit send act through `free-agent bus post`; that act chooses its own audience and any `--thread` ancestry.
+
+The older `replyAct` adapter retains its explicit `@name:` response convention (`src/Free/Agent/Delivery.hs`): unaddressed prose and a first line of `LOCAL` stay local, while an addressed response publishes without inferred cause, channel or ancestry. An address on a later line publishes only its addressed suffix and warns with the address's character offset. This adapter is not the active Backend-seat publication path.
 
 Each executable seat has a finite `--delivery-budget N` (default 1000000). Exhaustion stands the loop down without invoking the backend or advancing the causing cursor.
 

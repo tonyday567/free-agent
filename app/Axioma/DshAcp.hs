@@ -327,11 +327,6 @@ dshAcpTopic = do
     let replies = [p | p <- posts, Circuit.Post.from p == "seat", not (null (Circuit.Post.to p))]
     assert ("wired dsh-acp command exits cleanly" <> if code == ExitSuccess then "" else ": " <> err) $
       code == ExitSuccess
-    assert "wired dsh-acp publishes one sender-directed reply with ancestry" $
-      case replies of
-        [reply] ->
-          Circuit.Post.body reply == "dsh-one"
-            && Circuit.Post.to reply == ["human"]
-            && Circuit.Post.thread reply == [0]
-        _ -> False
+    assert "wired dsh-acp raw reply output stays local without inferred audience or ancestry" $
+      null replies && length posts == 2
     removePathForcibly root

@@ -38,7 +38,7 @@ import Free.Agent.Bus.File
 import Free.Agent.Bus.Heartbeat (HbState (..), writeHeartbeat)
 import Free.Agent.Mark (Mark (..), controlMark, isEscalate, isHalt, markGlyph)
 import Free.Agent.Protocol (defaultProtocol, isSuppressedReply)
-import Seat.Backend (appendBackendTranscript, replyActs, runBackendTurn)
+import Seat.Backend (appendBackendTranscript, runBackendTurn)
 import System.Directory (doesFileExist, makeAbsolute, removeFile)
 import System.Environment (setEnv)
 import System.FilePath ((</>))
@@ -176,15 +176,15 @@ runSeat seat = do
                         case result of
                           Left err -> clearActive >> environmentFailed ("send refused: " <> T.pack (show err))
                           Right (_, Unavailable why) -> clearActive >> environmentFailed why
-                          Right (outputs, outcome) -> do
+                          Right (_, outcome) -> do
+                            -- Raw reply output is local evidence. An intentional
+                            -- publication uses the bus-post tool path itself.
                             ended <- getCurrentTime
                             recordTranscript n outcome started ended
                             case outcome of
                               Ceiling {} -> pure ()
                               Exhausted {} -> pure ()
                               _ -> clearActive
-                            let replies = replyActs agentName storedBatch outputs
-                            publish replies
                             case outcome of
                               Completed _ -> do
                                 extra <- seatAfterCompleted seat
@@ -192,7 +192,7 @@ runSeat seat = do
                                 writeTransaction root agentName nextCursor
                                 writeCursor root agentName nextCursor
                                 writeIORef skips 0
-                                pure $ if any ((== Just StandDown) . controlMark) (replies <> extra) then Halt else Continue
+                                pure $ if any ((== Just StandDown) . controlMark) extra then Halt else Continue
                               Cancelled _ -> pure Halt
                               Stale why _
                                 | sessionChoice == AutomaticSession -> do

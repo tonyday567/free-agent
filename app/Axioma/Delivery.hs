@@ -435,9 +435,9 @@ deliveryTopic = do
 
   -------------------------------------------------------------------------
   -- Wired Kimi batch delivery: three posts cause one Backend invocation.
-  -- Reply output is content verbatim; audience and ancestry come from input.
+  -- Raw reply output is transcript evidence, never a manufactured bus post.
   -------------------------------------------------------------------------
-  putStrLn "wired Kimi batch publication"
+  putStrLn "wired Kimi batch locality"
   kimiRoot <- tempRoot "free-agent-kimi-batch"
   let fakeBin = kimiRoot </> "bin"
       fakeKimi = fakeBin </> "kimi"
@@ -487,14 +487,8 @@ deliveryTopic = do
   content <- TIO.readFile (kimiRoot </> "log.jsonl")
   let parsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines content)
       replies = [stamped s | s <- parsed, from (stamped s) == "kimi1"]
-  assert "the complete reply output publishes with explicit input ancestry" $
-    case replies of
-      [r] ->
-        to r == ["yang"]
-          && body r == "local batch notes\n@yang: kimi batch report"
-          && channel r == Nothing
-          && thread r == [0, 1, 2]
-      _ -> False
+  assert "raw Kimi reply output stays local without inferred audience or ancestry" $
+    null replies && length parsed == 4
   firstCursor <- readCursor kimiRoot "kimi1"
   firstTransaction <- readTransaction kimiRoot "kimi1"
   assert "the wired quiet-capable batch commits before its halt" $
@@ -531,24 +525,22 @@ deliveryTopic = do
     length callsAfter == 2
       && case callsAfter of
         [_, checkCall] ->
-          "[post 5] yang: CHECK-CASE" `T.isInfixOf` checkCall
+          "[post 4] yang: CHECK-CASE" `T.isInfixOf` checkCall
             && not ("Harness notes:" `T.isInfixOf` checkCall)
         _ -> False
   checkContent <- TIO.readFile (kimiRoot </> "log.jsonl")
   let checkParsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines checkContent)
       checkReplies = [stamped s | s <- checkParsed, from (stamped s) == "kimi1"]
-  assert "plain singleton output is also an explicit reply act" $
-    case checkReplies of
-      [_, r] -> to r == ["yang"] && body r == "checked" && thread r == [5]
-      _ -> False
+  assert "plain singleton output also remains local" $
+    null checkReplies && length checkParsed == 6
   kimiStrandGone <- doesFileExist (strandNotePath kimiRoot "kimi1")
   assert "another Backend turn leaves no stranded note" $ not kimiStrandGone
   removePathForcibly kimiRoot
 
   -------------------------------------------------------------------------
   -- Wired Hermes batch capture: the Backend receives the whole mail batch
-  -- once. Reply text is content verbatim; audience and ancestry come from
-  -- the committed input. Usage, transcript, and file evidence remain intact.
+  -- once. Raw reply text and usage remain transcript and file evidence; no
+  -- audience or ancestry is inferred from the committed input.
   -------------------------------------------------------------------------
   putStrLn "wired Hermes batch capture"
   hermesRoot <- tempRoot "free-agent-hermes-batch"
@@ -608,14 +600,8 @@ deliveryTopic = do
   hermesContent <- TIO.readFile (hermesRoot </> "log.jsonl")
   let hermesParsed = mapMaybe (either (const Nothing) Just . decodeRow) (T.lines hermesContent)
       hermesReplies = [stamped s | s <- hermesParsed, from (stamped s) == "hermes1"]
-  assert "the complete Hermes reply publishes with explicit input ancestry" $
-    case hermesReplies of
-      [r] ->
-        to r == ["yang"]
-          && body r == "@yang: hermes batch report"
-          && channel r == Nothing
-          && thread r == [0, 1, 2]
-      _ -> False
+  assert "raw Hermes reply output stays local without inferred audience or ancestry" $
+    null hermesReplies && length hermesParsed == 4
   hermesCursor <- readCursor hermesRoot "hermes1"
   hermesTransaction <- readTransaction hermesRoot "hermes1"
   assert "the wired Hermes batch writes its transaction before the halt" $

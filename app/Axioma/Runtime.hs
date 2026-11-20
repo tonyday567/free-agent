@@ -236,7 +236,7 @@ b17TrialClosed :: B17Trial -> Bool
 b17TrialClosed result =
   b17Calls result == 1
     && b17Rows result == 1
-    && b17Replies result == 1
+    && b17Replies result == 0
     && b17Notices result == 1
     && b17Exits result == [0, 0]
     && b17Transaction result == Just 1
@@ -247,27 +247,41 @@ runtimeTopic :: IO ()
 runtimeTopic = do
   putStrLn "live Backend-seat settlement"
 
-  -- Channel and multi-sender input: one explicit response reaches every
-  -- external sender, clears the channel, and cites the whole batch.
+  -- Channel and multi-sender input supplies no implicit audience or ancestry.
+  -- A deliberate bus-post act chooses both; raw final prose remains local.
   do
     root <- tempRoot "free-agent-runtime-audience"
-    writeSeat root "ops" (successSource root "runtime-reply")
+    bin <- seatBinary
+    let source =
+          T.pack (scriptPreamble root)
+            <> T.pack
+              ( unlines
+                  [ show bin <> " bus post --root \"$FREE_AGENT_BUS_ROOT\" --from ops --to tony --to alex --body 'intentional report' --thread 1",
+                    "printf 'To resume this session: kimi -r runtime-session\\n@tony: raw local reply\\n'"
+                  ]
+              )
+    writeSeat root "ops" source
     _ <- postLocal root (mkPost "tony" [] "channel question") {channel = Just "ops"}
     _ <- postLocal root (mkPost "alex" ["ops"] "direct question")
     _ <- postLocal root (mkPost "runner" ["ops"] (markGlyph Landed))
     (code, _, err) <- runKimi root "ops"
     posts <- logPosts root
     let replies = [p | p <- posts, from p == "ops", not (null (to p))]
+    transcript <- TIO.readFile (root </> ".transcripts" </> "ops.jsonl")
     assert ("channel/multi-sender seat exits cleanly" <> if code == ExitSuccess then "" else ": " <> err) $
       code == ExitSuccess
-    assert "reply clears channel, reaches both senders, and cites all inputs" $
+    assert "explicit bus post chooses its audience and ancestry; raw reply prose stays local" $
       case replies of
         [reply] ->
           channel reply == Nothing
             && to reply == ["tony", "alex"]
-            && thread reply == [0, 1]
+            && thread reply == [1]
+            && body reply == "intentional report"
             && deliversTo reply ["tony"]
             && deliversTo reply ["alex"]
+            && length posts == 4
+            && not (any ((== "@tony: raw local reply") . body) posts)
+            && "@tony: raw local reply" `T.isInfixOf` transcript
         _ -> False
     removePathForcibly root
 
@@ -300,10 +314,10 @@ runtimeTopic = do
         && case calls of
           [resumed, fresh] -> "-r old-sid" `T.isInfixOf` resumed && not ("-r old-sid" `T.isInfixOf` fresh)
           _ -> False
-    assert "stale recovery rotates the sid and commits the recovered reply" $
+    assert "stale recovery rotates the sid and commits the recovered turn without a raw reply post" $
       sid == "new-sid"
         && cursor == 2
-        && any (\p -> from p == "seat" && body p == "recovered" && to p == ["human"]) posts
+        && not (any (\p -> from p == "seat" && body p == "recovered") posts)
     removePathForcibly root
 
   -- Interruption leaves the batch unsettled. A later explicit launch is the
@@ -368,41 +382,42 @@ runtimeTopic = do
         && "ambiguous recovery" `T.isInfixOf` content
     removePathForcibly root
 
-  -- Force transaction creation to fail after publication. Restart must retain
-  -- the single reply and expose ambiguity without repeating the client turn.
+  -- Force transaction creation to fail after a quiet completed turn. Restart
+  -- retains the settled evidence and exposes ambiguity without repeating the
+  -- client turn or manufacturing a reply.
   do
     root <- tempRoot "free-agent-runtime-crash"
-    writeSeat root "seat" (successSource root "published-once")
+    writeSeat root "seat" (successSource root "raw-local-once")
     _ <- postLocal root (mkPost "human" ["seat"] "crash work")
     _ <- postLocal root (mkPost "runner" ["seat"] (markGlyph Landed))
     createDirectoryIfMissing False (root </> ".transaction-seat")
     (firstCode, _, _) <- runKimi root "seat"
     firstCalls <- T.lines <$> callLog root
     firstPosts <- logPosts root
-    let firstReplies = [p | p <- firstPosts, from p == "seat", body p == "published-once"]
+    let firstReplies = [p | p <- firstPosts, from p == "seat", body p == "raw-local-once"]
     firstCursor <- readCursor root "seat"
     removeDirectory (root </> ".transaction-seat")
     (secondCode, _, _) <- runKimi root "seat"
     secondCalls <- T.lines <$> callLog root
     secondPosts <- logPosts root
-    let secondReplies = [p | p <- secondPosts, from p == "seat", body p == "published-once"]
-    assert "forced post-publication crash retains one reply and no cursor" $
+    let secondReplies = [p | p <- secondPosts, from p == "seat", body p == "raw-local-once"]
+    assert "forced post-turn crash leaves raw output local and no cursor" $
       firstCode /= ExitSuccess
         && length firstCalls == 1
-        && length firstReplies == 1
+        && null firstReplies
         && firstCursor == 0
-    assert "ambiguous restart does not duplicate publication or invocation" $
+    assert "ambiguous restart does not manufacture publication or repeat invocation" $
       secondCode == ExitSuccess
         && length secondCalls == 1
-        && length secondReplies == 1
+        && null secondReplies
         && any (\p -> from p == "seat" && "ambiguous recovery" `T.isInfixOf` body p) secondPosts
     removePathForcibly root
 
-  -- Terminal evidence is not optional: if its append fails, publication and
-  -- settlement stop and the surviving active marker prevents a replay.
+  -- Terminal evidence is not optional: if its append fails, settlement stops
+  -- and the surviving active marker prevents a replay. Raw output stays local.
   do
     root <- tempRoot "free-agent-runtime-transcript-crash"
-    writeSeat root "seat" (successSource root "must-not-publish")
+    writeSeat root "seat" (successSource root "raw-local")
     _ <- postLocal root (mkPost "human" ["seat"] "transcript crash work")
     _ <- postLocal root (mkPost "runner" ["seat"] (markGlyph Landed))
     createDirectoryIfMissing True (root </> ".transcripts" </> "seat.jsonl")
@@ -416,10 +431,10 @@ runtimeTopic = do
     cursor <- readCursor root "seat"
     transaction <- readTransaction root "seat"
     content <- TIO.readFile (root </> "log.jsonl")
-    assert "failed transcript evidence blocks publication and leaves a dead heartbeat" $
+    assert "failed transcript evidence leaves raw output local and a dead heartbeat" $
       firstCode /= ExitSuccess
         && length firstCalls == 1
-        && not (any (\p -> from p == "seat" && body p == "must-not-publish") firstPosts)
+        && not (any (\p -> from p == "seat" && body p == "raw-local") firstPosts)
         && fmap (\(state, _, _) -> state) heartbeat == Just Dead
     assert "missing terminal evidence recovers as ambiguous without another invocation" $
       secondCode == ExitSuccess
@@ -486,7 +501,7 @@ runtimeTopic = do
         && length calls == 3
         && cursor == 2
         && transaction == Just 1
-        && any (\p -> from p == "seat" && to p == ["human"] && body p == "recovered") posts
+        && not (any (\p -> from p == "seat" && body p == "recovered") posts)
     removePathForcibly root
 
   -- Startup and spawn availability are environment failures, not fabricated
@@ -593,8 +608,8 @@ runtimeTopic = do
     removePathForcibly root
 
   -- Two already-ready processes with one name race the same input. A trial
-  -- fails on duplicate compute even if publication deduplication leaves one
-  -- reply; twenty bounded trials retain every per-trial root and measurement.
+  -- fails on duplicate compute; raw output cannot publish or wake a receiver.
+  -- Twenty bounded trials retain every per-trial root and measurement.
   do
     bin <- seatBinary
     oracle <- getExecutablePath
@@ -605,5 +620,5 @@ runtimeTopic = do
         result <- runB17Trial bin trial
         putStrLn (renderB17Trial trial result)
         pure result
-    assert "B17 synchronized same-name trials allow one invocation, row, reply, and settlement" $
+    assert "B17 synchronized same-name trials allow one invocation, row, no raw reply, and settlement" $
       all b17TrialClosed results
