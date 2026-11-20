@@ -392,7 +392,7 @@ runRefreshSupervisor budget threshold wakeFrom cfg = supervise Nothing []
         <> ["--root", hcRoot cfg]
         <> concatMap (\name -> ["--name", T.unpack name]) names
         <> ["--prompt", hcPromptFile cfg]
-        <> concatMap (\sender -> ["--wake-from", T.unpack sender]) (fromMaybe [] wakeFrom)
+        <> maybe [] (concatMap (\sender -> ["--wake-from", T.unpack sender])) wakeFrom
         <> maybe [] (\path -> ["--session", path]) (hcSessionFile cfg)
         <> maybe [] (\model -> ["--model", T.unpack model]) (hcModel cfg)
         <> maybe [] (\provider -> ["--provider", T.unpack provider]) (hcProvider cfg)

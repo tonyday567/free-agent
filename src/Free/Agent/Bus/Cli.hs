@@ -253,29 +253,26 @@ checkThreadId root' tid = do
           else Left ("no post with id " <> T.pack (show tid) <> " — threads attach to an existing post")
 
 postCmd :: Parser BusCommand
-postCmd = do
-  root <- rootOpt
-  fromName <-
-    optional
+postCmd =
+  PostCommand
+    <$> rootOpt
+    <*> optional
       ( option
           (T.pack <$> str)
           (long "from" <> metavar "NAME" <> help "Sender name")
       )
-  toNames <-
-    many
+    <*> many
       ( option
           recipientReader
           (long "to" <> metavar "NAME" <> help "Recipient name (repeatable, no commas); refused beside --channel, which is the whole address")
       )
-  bodyText <-
-    optional
+    <*> optional
       ( option
           (T.pack <$> str)
           (long "body" <> metavar "TEXT" <> help "Post body")
       )
-  thr <- threadOpt
-  chan <- channelOpt
-  pure (PostCommand root fromName toNames bodyText thr chan)
+    <*> threadOpt
+    <*> channelOpt
 
 watchCmd :: Parser BusCommand
 watchCmd = WatchCommand <$> rootOpt <*> namesArg
@@ -550,9 +547,7 @@ runWatch root names = do
 -- empty view; the diagnostic carries its 1-based row and 0-based character
 -- offset.
 loadPosts :: FilePath -> IO [Stored]
-loadPosts path = do
-  posts <- readLogStrict path
-  pure posts
+loadPosts = readLogStrict
 
 -- | Read a thread (all posts sharing a root id with the given post), or
 -- posts addressed to NAMEs. A thread view ignores NAMEs. A path that is not
