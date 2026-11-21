@@ -20,7 +20,7 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
-import Free.Agent.Acp (AcpChannel (..), AcpClient (..), AcpConfig (..), AcpEmission (..), AcpInput (..), AcpPhase (..), PromptResult (..), Update (..), acpBody, acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, frameUpdate, jsonToInt, promptResult)
+import Free.Agent.Acp (AcpClient (..), AcpConfig (..), AcpEmission (..), AcpPhase (..), DshAct (..), DshChannel (..), PromptResult (..), Update (..), acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, dshBody, frameUpdate, jsonToInt, promptResult)
 import Free.Agent.Activity
 import Free.Agent.Agent (runAgent)
 import Free.Agent.Bus (postLocal)
@@ -158,6 +158,7 @@ acpBodyWitness = do
     scriptedDouble
       [ Reply initOut,
         Reply newOut,
+        Quiet,
         ReplyMany (\line -> [thoughtNote, reverseNote, replyNote "two replies", promptOut line, usageNote]),
         Quiet,
         ReplyMany (\line -> [replyNote "later reply", promptOut line])
@@ -167,16 +168,29 @@ acpBodyWitness = do
       acquire = do
         _ <- acpInitialize client 1_000_000
         (msid, _) <- acpNewSession client 1_000_000 "."
-        pure (client, fromMaybe "body-session" msid)
-      Body initialise commitBody emitBody = acpBody acquire 2_000_000
+        pure (DshChannel client (fromMaybe "body-session" msid) AcpDone [])
+  constructed <- acquire
+  quietTranscript <- TIO.readFile transcriptFile
+  assert "quiet construction retains SessionId without sending a prompt" $
+    dshSession constructed == "body-session"
+      && not ("session/prompt" `T.isInfixOf` quietTranscript)
+  let Body initialise commitBody emitBody = dshBody (pure constructed) 2_000_000 (pure ())
       step observer channel = do
         (next, emission) <- runK emitBody channel
         _ <- observeAcpEmission observer emission
         pure (next, emission)
-  first <- runK initialise (AcpPromptInput "first" (pure ()))
-  assert "Body init opens one session and commits its first prompt" $
-    acpChannelSession first == "body-session"
-      && case acpChannelPhase first of
+  seeded <- runK initialise Cancel
+  cancelTranscript <- TIO.readFile transcriptFile
+  assert "Cancel is an ordinary first act and does not acquire a prompt branch" $
+    "session/cancel" `T.isInfixOf` cancelTranscript
+      && not ("session/prompt" `T.isInfixOf` cancelTranscript)
+      && case dshPhase seeded of
+        AcpDone -> True
+        _ -> False
+  first <- runK commitBody (seeded, Prompt "first")
+  assert "an ordinary Prompt after seeding commits against the quiet session" $
+    dshSession first == "body-session"
+      && case dshPhase first of
         AcpAwaiting _ _ -> True
         _ -> False
   observer <- newActivityObserver 0.5
@@ -219,7 +233,7 @@ acpBodyWitness = do
             _ -> False
       (responseChannel, response) <- step observer replyChannel
       assert "the correlated stop frame starts draining rather than settling early" $
-        case (response, acpChannelPhase responseChannel) of
+        case (response, dshPhase responseChannel) of
           (AcpProtocol _, AcpDraining _ _) -> True
           _ -> False
       (usageChannel, usage) <- step observer responseChannel
@@ -244,20 +258,20 @@ acpBodyWitness = do
         [AgentThoughtChunk _, AgentMessageChunk _, UsageUpdate _] -> True
         _ -> False
   assert "the settled channel is reusable by a later commit" $
-    case acpChannelPhase done of
+    case dshPhase done of
       AcpDone -> True
       _ -> False
-  later <- runK commitBody (done, AcpPromptInput "second" (pure ()))
+  later <- runK commitBody (done, Prompt "second")
   (laterReplyChannel, laterReply) <- runK emitBody later
   assert "later commit uses the same session and emits its own reply" $
-    acpChannelSession laterReplyChannel == "body-session"
+    dshSession laterReplyChannel == "body-session"
       && case laterReply of
         AcpProtocol raw -> frameUpdate raw == Just (AgentMessageChunk "later reply")
         _ -> False
   (laterResponseChannel, _) <- runK emitBody laterReplyChannel
   (laterDone, laterTerminal) <- runK emitBody laterResponseChannel
   assert "later prompt also settles exactly once" $
-    case (laterTerminal, acpChannelPhase laterDone) of
+    case (laterTerminal, dshPhase laterDone) of
       (AcpPromptDone response messages, AcpDone) ->
         let value = promptResult response messages
          in prReply value == "later reply" && prStopReason value == Just "end_turn"

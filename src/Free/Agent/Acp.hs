@@ -58,12 +58,13 @@ module Free.Agent.Acp
     promptResult,
 
     -- * Prompt body
-    AcpBody,
-    AcpInput (..),
-    AcpChannel (..),
+    SessionId,
+    DshBody,
+    DshAct (..),
+    DshChannel (..),
     AcpPhase (..),
     AcpEmission (..),
-    acpBody,
+    dshBody,
 
     -- * Seat
     acpHost,
@@ -476,7 +477,7 @@ acpInitialize c micros =
 
 -- | @session/new@ with the session cwd pinned.  Returns the sessionId on
 -- success.
-acpNewSession :: AcpClient -> Int -> FilePath -> IO (Maybe Text, [Json])
+acpNewSession :: AcpClient -> Int -> FilePath -> IO (Maybe SessionId, [Json])
 acpNewSession c micros cwd = do
   (mresp, msgs) <-
     acpRequest
@@ -489,7 +490,7 @@ acpNewSession c micros cwd = do
 -- | @session/resume@ for a persisted session at the same absolute cwd.
 -- dsh returns configOptions rather than echoing the session id, so the raw
 -- response is retained and the caller keeps the requested id as evidence.
-acpResumeSession :: AcpClient -> Int -> Text -> FilePath -> IO (Maybe Json, [Json])
+acpResumeSession :: AcpClient -> Int -> SessionId -> FilePath -> IO (Maybe Json, [Json])
 acpResumeSession c micros sid cwd =
   acpRequest
     c
@@ -499,7 +500,7 @@ acpResumeSession c micros sid cwd =
 
 -- | @session/set_config_option@ — returns the full configOptions array.
 acpSetConfigOption ::
-  AcpClient -> Int -> Text -> Text -> Text -> IO (Maybe Json, [Json])
+  AcpClient -> Int -> SessionId -> Text -> Text -> IO (Maybe Json, [Json])
 acpSetConfigOption c micros sid configId value =
   acpRequest
     c
@@ -513,7 +514,7 @@ acpSetConfigOption c micros sid configId value =
     )
 
 -- | @session/cancel@ notification for the live session.
-acpCancel :: AcpClient -> Text -> IO ()
+acpCancel :: AcpClient -> SessionId -> IO ()
 acpCancel client sid =
   acpSendValue
     client
@@ -539,11 +540,15 @@ data PromptResult = PromptResult
   }
   deriving (Show)
 
--- | One first or later turn input. The post-send hook is where a runner
--- installs cancellation without racing prompt submission.
-data AcpInput
-  = AcpPromptInput Text (IO ())
-  | AcpCancelInput
+-- | ACP server session identity.
+type SessionId = Text
+
+-- | One ordinary dsh act. First-input seeding does not give either constructor
+-- a separate protocol path.
+data DshAct
+  = Prompt Text
+  | Cancel
+  deriving (Eq, Show)
 
 -- | Prompt correlation and the fixed post-response drain phase. A timed-out
 -- channel is poisoned so no later turn can consume its late response.
@@ -554,13 +559,13 @@ data AcpPhase
   | AcpPoisoned
   deriving (Show)
 
--- | Live prompt state. Raw frames are reversed internally and restored to
--- arrival order at the terminal emission.
-data AcpChannel = AcpChannel
-  { acpChannelClient :: AcpClient,
-    acpChannelSession :: Text,
-    acpChannelPhase :: AcpPhase,
-    acpChannelMessages :: [Json]
+-- | Live dsh protocol state. Raw frames are reversed internally and restored
+-- to arrival order at the terminal emission; no folded 'DshAct' is retained.
+data DshChannel = DshChannel
+  { dshClient :: AcpClient,
+    dshSession :: SessionId,
+    dshPhase :: AcpPhase,
+    dshMessages :: [Json]
   }
 
 -- | One raw protocol frame or the terminal raw-frame boundary. Correlation,
@@ -571,45 +576,43 @@ data AcpEmission
   | AcpPromptDone (Maybe Json) [Json]
   deriving (Show)
 
--- | The decomposed ACP prompt machine. The acquisition action uses the
--- existing open, initialize, new/resume, and persistence path; 'init' runs it
--- and commits the first prompt. Resource closure remains with the runner.
-type AcpBody = Body (,) (,) AcpChannel AcpChannel (K IO) AcpInput AcpEmission
+-- | The decomposed dsh ACP machine. Its acquisition action constructs a live
+-- client and session quietly. 'init' seeds that channel with its first
+-- 'DshAct' through the same commit function as every later act. The supplied
+-- post-prompt action is runner-local and is neither act nor channel state.
+type DshBody = Body (,) (,) DshChannel DshChannel (K IO) DshAct AcpEmission
 
-acpBody :: IO (AcpClient, Text) -> Int -> AcpBody
-acpBody acquire micros =
+dshBody :: IO DshChannel -> Int -> IO () -> DshBody
+dshBody acquire micros afterPrompt =
   Body
-    ( K $ \input -> do
-        (client, sid) <- acquire
-        commitInput (AcpChannel client sid AcpDone []) input
-    )
-    (K (uncurry commitInput))
+    (K $ \act -> acquire >>= (`commitAct` act))
+    (K (uncurry commitAct))
     (K emitPrompt)
   where
-    commitInput channel input = case input of
-      AcpCancelInput ->
-        acpCancel (acpChannelClient channel) (acpChannelSession channel) >> pure channel
-      AcpPromptInput promptText onSend -> do
-        case acpChannelPhase channel of
+    commitAct channel act = case act of
+      Cancel ->
+        acpCancel (dshClient channel) (dshSession channel) >> pure channel
+      Prompt promptText -> do
+        case dshPhase channel of
           AcpDone -> pure ()
           AcpPoisoned -> ioError (userError "acp: commit on a timed-out channel")
           _ -> ioError (userError "acp: prompt committed while another prompt is active")
         rid <-
           acpSendRequest
-            (acpChannelClient channel)
+            (dshClient channel)
             "session/prompt"
             ( JObject
-                [ ("sessionId", JString (acpChannelSession channel)),
+                [ ("sessionId", JString (dshSession channel)),
                   ( "prompt",
                     JArray (V.fromList [JObject [("type", JString ("text" :: Text)), ("text", JString promptText)]])
                   )
                 ]
             )
-        onSend
+        afterPrompt
         started <- getCurrentTime
-        pure channel {acpChannelPhase = AcpAwaiting rid started, acpChannelMessages = []}
+        pure channel {dshPhase = AcpAwaiting rid started, dshMessages = []}
 
-    emitPrompt channel = case acpChannelPhase channel of
+    emitPrompt channel = case dshPhase channel of
       AcpDone -> ioError (userError "acp: emit after prompt settlement")
       AcpPoisoned -> ioError (userError "acp: emit after prompt timeout")
       AcpAwaiting rid started -> do
@@ -619,7 +622,7 @@ acpBody acquire micros =
           Just (raw, frame, updated) -> case frame of
             Just (Response i _) | i == rid -> do
               now <- getCurrentTime
-              protocol raw updated {acpChannelPhase = AcpDraining raw now}
+              protocol raw updated {dshPhase = AcpDraining raw now}
             _ -> protocol raw updated
       AcpDraining response started -> do
         received <- readWithin 500_000 started channel
@@ -632,18 +635,18 @@ acpBody acquire micros =
       if left <= 0
         then pure Nothing
         else do
-          received <- acpReadClassified (acpChannelClient channel) left
+          received <- acpReadClassified (dshClient channel) left
           pure (fmap (record channel) received)
 
     record channel (raw, frame) =
-      (raw, frame, channel {acpChannelMessages = raw : acpChannelMessages channel})
+      (raw, frame, channel {dshMessages = raw : dshMessages channel})
 
     protocol raw channel = pure (channel, AcpProtocol raw)
 
     settle channel response phase =
       pure
-        ( channel {acpChannelPhase = phase},
-          AcpPromptDone response (reverse (acpChannelMessages channel))
+        ( channel {dshPhase = phase},
+          AcpPromptDone response (reverse (dshMessages channel))
         )
 
 budgetLeft :: Int -> UTCTime -> IO Int
@@ -666,21 +669,21 @@ promptResult response messages =
 
 -- | @session/prompt@ with a single text block. This compatibility runner
 -- collects the Body's emissions until its one terminal projection.
-acpPrompt :: AcpClient -> Int -> Text -> Text -> IO PromptResult
+acpPrompt :: AcpClient -> Int -> SessionId -> Text -> IO PromptResult
 acpPrompt client micros sid promptText = snd <$> acpPromptWithResponse client micros sid promptText
 
 -- | Prompt with the exact correlated response exposed beside collected
 -- updates. A timed-out request is not drained: its late response must stay
 -- distinguishable from the next turn's response.
-acpPromptWithResponse :: AcpClient -> Int -> Text -> Text -> IO (Maybe Json, PromptResult)
+acpPromptWithResponse :: AcpClient -> Int -> SessionId -> Text -> IO (Maybe Json, PromptResult)
 acpPromptWithResponse = acpPromptWithResponseOnSend (pure ())
 
 -- | Prompt with an action run after the request is on the wire. This keeps
 -- cancellation installation ordered after prompt submission.
-acpPromptWithResponseOnSend :: IO () -> AcpClient -> Int -> Text -> Text -> IO (Maybe Json, PromptResult)
+acpPromptWithResponseOnSend :: IO () -> AcpClient -> Int -> SessionId -> Text -> IO (Maybe Json, PromptResult)
 acpPromptWithResponseOnSend onSend client micros sid promptText = do
-  let Body initialise _ emitBody = acpBody (pure (client, sid)) micros
-  channel <- runK initialise (AcpPromptInput promptText onSend)
+  let Body initialise _ emitBody = dshBody (pure (DshChannel client sid AcpDone [])) micros onSend
+  channel <- runK initialise (Prompt promptText)
   collect emitBody channel
   where
     collect emitBody channel = do
@@ -706,7 +709,7 @@ acpHost ::
   Text ->
   AcpClient ->
   -- | The ACP session id, from 'acpNewSession'.
-  Text ->
+  SessionId ->
   Host
 acpHost name micros systemPrompt c sid =
   Host

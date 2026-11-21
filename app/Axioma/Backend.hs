@@ -447,6 +447,10 @@ dshAcpWitness = do
   bracket (getEnv "PATH") (setEnv "PATH") $ \oldPath -> do
     setEnv "PATH" (bin <> ":" <> oldPath)
     session <- openBackend backend
+    startupWire <- TIO.readFile wire
+    assert "B30a-quiet dsh construction initializes and retains a session without prompting" $
+      "session/new" `T.isInfixOf` startupWire
+        && not ("session/prompt" `T.isInfixOf` startupWire)
     assert "B30a dsh ACP declares resumable, cancellable incremental events" $
       sessionCapabilities session == BackendCapabilities DshAcpBackend ServerSessions IncrementalEvents True
     first <- runRequest session (defaultRequest "first")

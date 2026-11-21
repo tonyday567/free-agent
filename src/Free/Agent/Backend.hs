@@ -64,7 +64,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Vector qualified as V
-import Free.Agent.Acp (AcpClient, AcpConfig (..), AcpEmission (..), AcpInput (..), Frame (..), Update (..), acpBody, acpCancel, acpInitialize, acpNewSession, acpResumeSession, classifyFrame, closeAcp, defaultAcpConfig, frameUpdate, jsonToInt, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates, promptResult)
+import Free.Agent.Acp (AcpClient, AcpConfig (..), AcpEmission (..), AcpPhase (..), DshAct (..), DshChannel (..), Frame (..), SessionId, Update (..), acpCancel, acpInitialize, acpNewSession, acpResumeSession, classifyFrame, closeAcp, defaultAcpConfig, dshBody, frameUpdate, jsonToInt, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates, promptResult)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliCeiling, cliExhausted, cliInterrupted, cliScrub, cliStale, dshCli, kimiCli)
 import Free.Agent.Gateway (GatewayClient (..), GatewayConfig (..), openGateway, parseSseFrame)
 import Free.Agent.Host (BareConfig (..), hermesCli)
@@ -768,7 +768,7 @@ textAt path value = go path value
 
 -- ACP -----------------------------------------------------------------------
 
-openAcpSession :: AcpClient -> Int -> FilePath -> IO (Either BackendOutcome Text)
+openAcpSession :: AcpClient -> Int -> FilePath -> IO (Either BackendOutcome SessionId)
 openAcpSession client micros cwd = do
   (response, messages) <- acpInitialize client micros
   case response of
@@ -790,7 +790,7 @@ openAcpSession client micros cwd = do
     isResponse (Just (Response _ _)) = True
     isResponse _ = False
 
-resumeAcpSession :: AcpClient -> Int -> FilePath -> Text -> IO (Either BackendOutcome Text)
+resumeAcpSession :: AcpClient -> Int -> FilePath -> SessionId -> IO (Either BackendOutcome SessionId)
 resumeAcpSession client micros cwd sid = do
   (response, messages) <- acpInitialize client micros
   case response of
@@ -809,7 +809,7 @@ resumeAcpSession client micros cwd sid = do
                   Left (Failed ProtocolFailure (TE.decodeUtf8 (encodeJson err)) evidence)
               | otherwise -> Right sid
 
-runAcp :: Int -> Text -> AcpClient -> Text -> Bool -> Maybe (IORef Bool) -> SessionState -> Active -> BackendRequest -> IO BackendOutcome
+runAcp :: Int -> Text -> AcpClient -> SessionId -> Bool -> Maybe (IORef Bool) -> SessionState -> Active -> BackendRequest -> IO BackendOutcome
 runAcp micros systemPrompt client sid cancellable cardState state turn request = do
   cancelled <- readIORef (activeCancelled turn)
   if cancelled
@@ -826,7 +826,7 @@ runAcp micros systemPrompt client sid cancellable cardState state turn request =
               writeIORef (activeCancel turn) cancelPrompt
               cancelledNow <- readIORef (activeCancelled turn)
               when cancelledNow cancelPrompt
-          Body initialise _ emitFrame = acpBody (pure (client, sid)) micros
+          Body initialise _ emitFrame = dshBody (pure (DshChannel client sid AcpDone [])) micros installCancel
           drive channel = do
             (next, emission) <- runK emitFrame channel
             case emission of
@@ -841,7 +841,7 @@ runAcp micros systemPrompt client sid cancellable cardState state turn request =
                   forM_ [json | UsageUpdate json <- prUpdates collected] $ \json ->
                     emitText state UsageOutput (TE.decodeUtf8 (encodeJson json))
                 pure (response, collected)
-      result <- try @IOException (runK initialise (AcpPromptInput prompt installCancel) >>= drive)
+      result <- try @IOException (runK initialise (Prompt prompt) >>= drive)
       writeIORef (activeCancel turn) (pure ())
       forM_ cardState $ \fresh -> writeIORef fresh False
       case result of
