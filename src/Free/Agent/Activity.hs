@@ -31,7 +31,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Word (Word64)
-import Free.Agent.Acp (AcpEmission (..), Update (..))
+import Free.Agent.Acp (AcpEmission (..), Update (..), frameUpdate)
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
@@ -88,13 +88,16 @@ observeChunk observer text =
       | T.null chunk = 0
       | otherwise = max 1 (length (T.words chunk))
 
--- | Observe only thought and reply text. Protocol maintenance, stop, usage,
--- and settlement retain the current count and never manufacture tokens.
+-- | Project only thought and reply text from raw frames. Protocol maintenance,
+-- stop, usage, and settlement retain the current count and never manufacture
+-- tokens.
 observeAcpEmission :: ActivityObserver -> AcpEmission -> IO TokenCount
 observeAcpEmission observer emission = case emission of
-  AcpProtocol _ (Just (AgentThoughtChunk text)) -> observeChunk observer text
-  AcpProtocol _ (Just (AgentMessageChunk text)) -> observeChunk observer text
-  _ -> currentTokens observer
+  AcpProtocol raw -> case frameUpdate raw of
+    Just (AgentThoughtChunk text) -> observeChunk observer text
+    Just (AgentMessageChunk text) -> observeChunk observer text
+    _ -> currentTokens observer
+  AcpPromptDone _ _ -> currentTokens observer
 
 currentTokens :: ActivityObserver -> IO TokenCount
 currentTokens observer = readIORef (observerTokens observer)

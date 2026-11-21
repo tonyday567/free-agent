@@ -20,7 +20,7 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
-import Free.Agent.Acp (AcpChannel (..), AcpClient (..), AcpConfig (..), AcpEmission (..), AcpInput (..), AcpPhase (..), PromptResult (..), Update (..), acpBody, acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, jsonToInt)
+import Free.Agent.Acp (AcpChannel (..), AcpClient (..), AcpConfig (..), AcpEmission (..), AcpInput (..), AcpPhase (..), PromptResult (..), Update (..), acpBody, acpHost, acpInitialize, acpNewSession, closeAcp, defaultAcpConfig, frameUpdate, jsonToInt, promptResult)
 import Free.Agent.Activity
 import Free.Agent.Agent (runAgent)
 import Free.Agent.Bus (postLocal)
@@ -188,7 +188,7 @@ acpBodyWitness = do
       assert "the first emit is a live thought chunk before reply or settlement" $
         thoughtCount == TokenCount 2
           && case thought of
-            AcpProtocol _ (Just (AgentThoughtChunk "two thoughts")) -> True
+            AcpProtocol raw -> frameUpdate raw == Just (AgentThoughtChunk "two thoughts")
             _ -> False
       waitForSamples samples 3
       live <- reverse <$> readIORef samples
@@ -208,30 +208,32 @@ acpBodyWitness = do
       assert "reverse RPC is protocol maintenance with no update or token output" $
         maintenanceCount == TokenCount 2
           && case maintenance of
-            AcpProtocol _ Nothing -> True
+            AcpProtocol raw -> frameUpdate raw == Nothing
             _ -> False
       (replyChannel, reply) <- step observer maintenanceChannel
       replyCount <- currentTokens observer
       assert "reply text commits independently after thought" $
         replyCount == TokenCount 4
           && case reply of
-            AcpProtocol _ (Just (AgentMessageChunk "two replies")) -> True
+            AcpProtocol raw -> frameUpdate raw == Just (AgentMessageChunk "two replies")
             _ -> False
       (responseChannel, response) <- step observer replyChannel
       assert "the correlated stop frame starts draining rather than settling early" $
         case (response, acpChannelPhase responseChannel) of
-          (AcpProtocol _ Nothing, AcpDraining _ _) -> True
+          (AcpProtocol _, AcpDraining _ _) -> True
           _ -> False
       (usageChannel, usage) <- step observer responseChannel
       usageCount <- currentTokens observer
       assert "trailing usage stays ordered and does not invent generated tokens" $
         usageCount == TokenCount 4
           && case usage of
-            AcpProtocol _ (Just (UsageUpdate _)) -> True
+            AcpProtocol raw -> case frameUpdate raw of
+              Just (UsageUpdate _) -> True
+              _ -> False
             _ -> False
       (settled, terminal) <- step observer usageChannel
       case terminal of
-        AcpPromptDone _ value -> pure (settled, value)
+        AcpPromptDone terminalResponse messages -> pure (settled, promptResult terminalResponse messages)
         _ -> error "ACP Body did not settle after its bounded drain"
   assert "one terminal result retains ordered thought, reply, usage, stop, and raw frames" $
     prReply result == "two replies"
@@ -250,13 +252,15 @@ acpBodyWitness = do
   assert "later commit uses the same session and emits its own reply" $
     acpChannelSession laterReplyChannel == "body-session"
       && case laterReply of
-        AcpProtocol _ (Just (AgentMessageChunk "later reply")) -> True
+        AcpProtocol raw -> frameUpdate raw == Just (AgentMessageChunk "later reply")
         _ -> False
   (laterResponseChannel, _) <- runK emitBody laterReplyChannel
   (laterDone, laterTerminal) <- runK emitBody laterResponseChannel
   assert "later prompt also settles exactly once" $
     case (laterTerminal, acpChannelPhase laterDone) of
-      (AcpPromptDone _ value, AcpDone) -> prReply value == "later reply" && prStopReason value == Just "end_turn"
+      (AcpPromptDone response messages, AcpDone) ->
+        let value = promptResult response messages
+         in prReply value == "later reply" && prStopReason value == Just "end_turn"
       _ -> False
   closeAcp client
   transcript <- TIO.readFile transcriptFile

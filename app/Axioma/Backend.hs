@@ -8,12 +8,14 @@ module Axioma.Backend
 where
 
 import Axioma.Common (assert, tempRoot)
+import Circuit.Parser.Json (Json (..), decodeJson)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as TIO
 import Free.Agent.Acp (AcpConfig (..), defaultAcpConfig)
 import Free.Agent.Backend
@@ -22,7 +24,7 @@ import Free.Agent.Gateway (GatewayConfig (..), defaultGatewayConfig)
 import Free.Agent.Host (BareConfig (..), defaultBareConfig, hermesCli)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, removePathForcibly)
 import System.Environment (getEnv, setEnv)
-import System.FilePath ((</>))
+import System.FilePath ((-<.>), (</>))
 import System.Posix.Files (setFileMode)
 import System.Process (createProcess, proc, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
@@ -424,6 +426,7 @@ dshAcpWitness = do
       workspace = root </> "workspace"
       dshHome = root </> "dsh-home"
       sessionFile = root </> "session"
+      transcriptFile = sessionFile -<.> "acp.jsonl"
       basePatch = root </> "base.yml"
       modelPatch = root </> "model.yml"
       wire = root </> "wire.jsonl"
@@ -450,8 +453,30 @@ dshAcpWitness = do
     second <- runRequest session (defaultRequest "second")
     assert "B30b fresh dsh prompts settle against the persisted session" $
       all (completedWithSession "dsh-session") [first, second]
-    incremental <- runRequest session (defaultRequest "incremental-turn")
-    assert "B30h dsh emits thought, reply, usage, and one settlement without maintenance output" $
+    incrementalAccepted <- sendSession session (defaultRequest "incremental-turn")
+    assert "B30h incremental dsh prompt is accepted" $ incrementalAccepted == Right ()
+    thoughtEvent <- nextEvent session
+    thoughtTranscript <- readRawTranscript transcriptFile
+    assert "B30i dsh appends sent prompt and received thought before later frames or settlement" $
+      thoughtEvent == Output (BackendOutput ThoughtOutput "dsh thought")
+        && transcriptHas "send" "\"method\":\"session/prompt\"" thoughtTranscript
+        && transcriptHas "recv" "dsh thought" thoughtTranscript
+        && not (transcriptHas "recv" "dsh live reply" thoughtTranscript)
+        && not (transcriptHas "recv" "test/maintenance" thoughtTranscript)
+    TIO.writeFile (root </> "thought-observed") ""
+    replyEvent <- nextEvent session
+    replyTranscript <- readRawTranscript transcriptFile
+    assert "B30j dsh transcript includes reply and non-text frames in both directions as they arrive" $
+      replyEvent == Output (BackendOutput ReplyOutput "dsh live reply")
+        && transcriptHas "recv" "test/maintenance" replyTranscript
+        && transcriptHas "send" "\"id\":41" replyTranscript
+        && transcriptHas "send" "method not found: test/maintenance" replyTranscript
+        && transcriptHas "recv" "dsh live reply" replyTranscript
+    TIO.writeFile (root </> "reply-observed") ""
+    usageEvent <- nextEvent session
+    settledEvent <- nextEvent session
+    let incremental = [thoughtEvent, replyEvent, usageEvent, settledEvent]
+    assert "B30k dsh emits thought, reply, usage, and one settlement without maintenance output" $
       case incremental of
         [ Output (BackendOutput ThoughtOutput "dsh thought"),
           Output (BackendOutput ReplyOutput "dsh live reply"),
@@ -462,6 +487,8 @@ dshAcpWitness = do
               && evidenceContextUsage evidence == Just (BackendContextUsage 9 (Just 30))
               && "test/maintenance" `T.isInfixOf` evidenceRawOutput evidence
         _ -> False
+    busExists <- doesFileExist (root </> "log.jsonl")
+    assert "B30l raw ACP transcript is independent of bus and text projections" $ not busExists
     closeSession session
 
     resumed <- openBackend backend
@@ -500,17 +527,40 @@ dshAcpWitness = do
       [Output _, Settled (Completed evidence)] -> evidenceSessionId evidence == Just sid
       _ -> False
 
+readRawTranscript :: FilePath -> IO [(Text, Text)]
+readRawTranscript path = do
+  rows <- T.lines <$> TIO.readFile path
+  let decoded = traverse decodeTranscriptRow rows
+  assert "raw ACP transcript retains exactly the {ts,dir,raw} JSONL shape" (isJust decoded)
+  pure (fromMaybe [] decoded)
+  where
+    decodeTranscriptRow line = case decodeJson (encodeUtf8 line) of
+      Right (JObject fields)
+        | length fields == 3,
+          Just (JString ts) <- lookup "ts" fields,
+          not (T.null ts),
+          Just (JString dir) <- lookup "dir" fields,
+          dir == "send" || dir == "recv",
+          Just (JString raw) <- lookup "raw" fields ->
+            Just (dir, raw)
+      _ -> Nothing
+
+transcriptHas :: Text -> Text -> [(Text, Text)] -> Bool
+transcriptHas dir fragment = any (\(actualDir, raw) -> actualDir == dir && fragment `T.isInfixOf` raw)
+
 dshFakeSource :: FilePath -> FilePath -> FilePath -> Text
 dshFakeSource root wire cancelMark =
   T.pack $
     unlines
       [ "#!/usr/bin/env python3",
-        "import json, os, pathlib, sys",
+        "import json, os, pathlib, sys, time",
         "root = " <> show root,
         "wire = " <> show wire,
         "cancel_mark = " <> show cancelMark,
         "with open(root + '/provenance', 'a') as f:",
         "  f.write(os.environ.get('DSH_HOME', '') + '|' + os.getcwd() + '|' + ' '.join(sys.argv[1:]) + '\\n')",
+        "def wait(path):",
+        "  while not pathlib.Path(path).exists(): time.sleep(0.01)",
         "def log(value):",
         "  with open(wire, 'a') as f: f.write(json.dumps(value, separators=(',', ':')) + '\\n')",
         "def send(value):",
@@ -531,8 +581,10 @@ dshFakeSource root wire cancelMark =
         "  elif method == 'session/prompt':",
         "    if 'incremental-turn' in json.dumps(value):",
         "      send({'jsonrpc':'2.0','method':'session/update','params':{'update':{'sessionId':'dsh-session','sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'dsh thought'}}}})",
+        "      wait(root + '/thought-observed')",
         "      send({'jsonrpc':'2.0','id':41,'method':'test/maintenance','params':{}})",
         "      send({'jsonrpc':'2.0','method':'session/update','params':{'update':{'sessionId':'dsh-session','sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'dsh live reply'}}}})",
+        "      wait(root + '/reply-observed')",
         "      response(rid, {'stopReason':'end_turn'})",
         "      send({'jsonrpc':'2.0','method':'session/update','params':{'update':{'sessionId':'dsh-session','sessionUpdate':'usage_update','used':9,'size':30}}})",
         "    elif 'cancel-turn' in json.dumps(value):",

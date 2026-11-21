@@ -64,7 +64,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Vector qualified as V
-import Free.Agent.Acp (AcpClient, AcpConfig (..), AcpEmission (..), AcpInput (..), Frame (..), Update (..), acpBody, acpCancel, acpInitialize, acpNewSession, acpResumeSession, classifyFrame, closeAcp, defaultAcpConfig, jsonToInt, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates)
+import Free.Agent.Acp (AcpClient, AcpConfig (..), AcpEmission (..), AcpInput (..), Frame (..), Update (..), acpBody, acpCancel, acpInitialize, acpNewSession, acpResumeSession, classifyFrame, closeAcp, defaultAcpConfig, frameUpdate, jsonToInt, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates, promptResult)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliCeiling, cliExhausted, cliInterrupted, cliScrub, cliStale, dshCli, kimiCli)
 import Free.Agent.Gateway (GatewayClient (..), GatewayConfig (..), openGateway, parseSseFrame)
 import Free.Agent.Host (BareConfig (..), hermesCli)
@@ -74,7 +74,7 @@ import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
 import System.Directory (createDirectoryIfMissing, doesFileExist, makeAbsolute, removeFile)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory)
+import System.FilePath (takeDirectory, (-<.>))
 import System.IO (hClose, hPutStr)
 import System.Process (ProcessHandle, StdStream (CreatePipe), createProcess, proc, terminateProcess, waitForProcess)
 import System.Process qualified as Process
@@ -220,9 +220,10 @@ dshBackend :: Maybe Text -> FilePath -> Maybe FilePath -> FilePath -> Backend
 dshBackend card basePatch modelPatch sessionFile =
   ProcessBackend DshBackend (dshCli card basePatch modelPatch sessionFile)
 
--- | Persistent dsh through ACP, with its workspace, session store, and patch
--- route pinned independently of the bus root and launcher's environment.
--- The card is presented on a newly created session, not replayed on resume.
+-- | Persistent dsh through ACP, with its workspace, session store, raw-frame
+-- transcript, and patch route pinned independently of the bus root and
+-- launcher's environment. The card is presented on a newly created session,
+-- not replayed on resume.
 dshAcpBackend :: Maybe Text -> FilePath -> Maybe FilePath -> FilePath -> FilePath -> FilePath -> Backend
 dshAcpBackend card basePatch modelPatch workspace dshHome sessionFile =
   DshAcp config 600_000_000 (fromMaybe "" card) sessionFile
@@ -234,7 +235,8 @@ dshAcpBackend card basePatch modelPatch workspace dshHome sessionFile =
             ["acp", "--patch", basePatch]
               <> maybe [] (\path -> ["--patch", path]) modelPatch,
           acpWorkDir = workspace,
-          acpEnv = [("DSH_HOME", dshHome)]
+          acpEnv = [("DSH_HOME", dshHome)],
+          acpTranscript = Just (sessionFile -<.> "acp.jsonl")
         }
 
 -- | A generic process recipe, kept separate from the named backend constructors.
@@ -828,16 +830,17 @@ runAcp micros systemPrompt client sid cancellable cardState state turn request =
           drive channel = do
             (next, emission) <- runK emitFrame channel
             case emission of
-              AcpProtocol _ update -> do
-                when cancellable (forM_ update (emitAcpUpdate state))
+              AcpProtocol raw -> do
+                when cancellable (forM_ (frameUpdate raw) (emitAcpUpdate state))
                 drive next
-              AcpPromptDone response promptResult -> do
+              AcpPromptDone response messages -> do
+                let collected = promptResult response messages
                 unless cancellable $ do
-                  emitText state ReplyOutput (prReply promptResult)
-                  emitText state ThoughtOutput (prThoughts promptResult)
-                  forM_ [json | UsageUpdate json <- prUpdates promptResult] $ \json ->
+                  emitText state ReplyOutput (prReply collected)
+                  emitText state ThoughtOutput (prThoughts collected)
+                  forM_ [json | UsageUpdate json <- prUpdates collected] $ \json ->
                     emitText state UsageOutput (TE.decodeUtf8 (encodeJson json))
-                pure (response, promptResult)
+                pure (response, collected)
       result <- try @IOException (runK initialise (AcpPromptInput prompt installCancel) >>= drive)
       writeIORef (activeCancel turn) (pure ())
       forM_ cardState $ \fresh -> writeIORef fresh False
@@ -846,11 +849,11 @@ runAcp micros systemPrompt client sid cancellable cardState state turn request =
           writeIORef (stateClosed state) True
           catch (closeAcp client) (\(_ :: IOException) -> pure ())
           pure (Failed ProcessFailure (T.pack (displayException err)) emptyEvidence {evidenceSessionId = Just sid})
-        Right (response, promptResult) -> do
-          let messages = prMessages promptResult
-              reply = prReply promptResult
-              stop = prStopReason promptResult
-              usage = [json | UsageUpdate json <- prUpdates promptResult]
+        Right (response, collected) -> do
+          let messages = prMessages collected
+              reply = prReply collected
+              stop = prStopReason collected
+              usage = [json | UsageUpdate json <- prUpdates collected]
               evidence = acpEvidence (Just sid) messages stop usage
           wasCancelled <- readIORef (activeCancelled turn)
           let outcome = case response of

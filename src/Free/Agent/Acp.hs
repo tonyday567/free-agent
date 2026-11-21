@@ -40,6 +40,7 @@ module Free.Agent.Acp
     -- * Session updates
     Update (..),
     parseUpdate,
+    frameUpdate,
 
     -- * Requests
     acpSendValue,
@@ -54,6 +55,7 @@ module Free.Agent.Acp
     acpPromptWithResponse,
     acpPromptWithResponseOnSend,
     PromptResult (..),
+    promptResult,
 
     -- * Prompt body
     AcpBody,
@@ -149,6 +151,7 @@ openAcp :: AcpConfig -> IO AcpClient
 openAcp cfg = do
   let wd = acpWorkDir cfg
   createDirectoryIfMissing True wd
+  forM_ (acpTranscript cfg) $ createDirectoryIfMissing True . takeDirectory
   inherited <- getEnvironment
   let overridden = map fst (acpEnv cfg)
       childEnv =
@@ -268,6 +271,13 @@ parseUpdate params = do
   where
     contentText upd =
       fromMaybe "" (objLookup "content" upd >>= textAt "text")
+
+-- | Project one raw frame into a session update. Other frame classes and
+-- non-update notifications remain protocol evidence rather than model output.
+frameUpdate :: Json -> Maybe Update
+frameUpdate raw = case classifyFrame raw of
+  Just (Notification "session/update" params) -> parseUpdate params
+  _ -> Nothing
 
 -- ---------------------------------------------------------------------------
 -- Send / receive
@@ -544,22 +554,21 @@ data AcpPhase
   | AcpPoisoned
   deriving (Show)
 
--- | Live prompt state. Frames and updates are reversed internally and
--- restored to arrival order in 'PromptResult'.
+-- | Live prompt state. Raw frames are reversed internally and restored to
+-- arrival order at the terminal emission.
 data AcpChannel = AcpChannel
   { acpChannelClient :: AcpClient,
     acpChannelSession :: Text,
     acpChannelPhase :: AcpPhase,
-    acpChannelMessages :: [Json],
-    acpChannelUpdates :: [Update]
+    acpChannelMessages :: [Json]
   }
 
--- | One protocol observation or the single terminal prompt projection.
--- Reverse-RPC and unrelated frames are 'AcpProtocol' with no update; they do
--- not require a placeholder model-output event.
+-- | One raw protocol frame or the terminal raw-frame boundary. Correlation,
+-- reverse-RPC servicing, and the bounded drain belong to the machine; text,
+-- activity, and collected results are runner projections of these frames.
 data AcpEmission
-  = AcpProtocol Json (Maybe Update)
-  | AcpPromptDone (Maybe Json) PromptResult
+  = AcpProtocol Json
+  | AcpPromptDone (Maybe Json) [Json]
   deriving (Show)
 
 -- | The decomposed ACP prompt machine. The acquisition action uses the
@@ -572,7 +581,7 @@ acpBody acquire micros =
   Body
     ( K $ \input -> do
         (client, sid) <- acquire
-        commitInput (AcpChannel client sid AcpDone [] []) input
+        commitInput (AcpChannel client sid AcpDone []) input
     )
     (K (uncurry commitInput))
     (K emitPrompt)
@@ -598,7 +607,7 @@ acpBody acquire micros =
             )
         onSend
         started <- getCurrentTime
-        pure channel {acpChannelPhase = AcpAwaiting rid started, acpChannelMessages = [], acpChannelUpdates = []}
+        pure channel {acpChannelPhase = AcpAwaiting rid started, acpChannelMessages = []}
 
     emitPrompt channel = case acpChannelPhase channel of
       AcpDone -> ioError (userError "acp: emit after prompt settlement")
@@ -610,13 +619,13 @@ acpBody acquire micros =
           Just (raw, frame, updated) -> case frame of
             Just (Response i _) | i == rid -> do
               now <- getCurrentTime
-              protocol raw frame updated {acpChannelPhase = AcpDraining raw now}
-            _ -> protocol raw frame updated
+              protocol raw updated {acpChannelPhase = AcpDraining raw now}
+            _ -> protocol raw updated
       AcpDraining response started -> do
         received <- readWithin 500_000 started channel
         case received of
           Nothing -> settle channel (Just response) AcpDone
-          Just (raw, frame, updated) -> protocol raw frame updated
+          Just (raw, _, updated) -> protocol raw updated
 
     readWithin budget started channel = do
       left <- budgetLeft budget started
@@ -627,26 +636,14 @@ acpBody acquire micros =
           pure (fmap (record channel) received)
 
     record channel (raw, frame) =
-      let update = case frame of
-            Just (Notification "session/update" params) -> parseUpdate params
-            _ -> Nothing
-          updated =
-            channel
-              { acpChannelMessages = raw : acpChannelMessages channel,
-                acpChannelUpdates = maybe id (\u -> (u :)) update (acpChannelUpdates channel)
-              }
-       in (raw, frame, updated)
+      (raw, frame, channel {acpChannelMessages = raw : acpChannelMessages channel})
 
-    protocol raw frame channel =
-      let update = case frame of
-            Just (Notification "session/update" params) -> parseUpdate params
-            _ -> Nothing
-       in pure (channel, AcpProtocol raw update)
+    protocol raw channel = pure (channel, AcpProtocol raw)
 
     settle channel response phase =
       pure
         ( channel {acpChannelPhase = phase},
-          AcpPromptDone response (promptResult channel response)
+          AcpPromptDone response (reverse (acpChannelMessages channel))
         )
 
 budgetLeft :: Int -> UTCTime -> IO Int
@@ -654,17 +651,18 @@ budgetLeft micros started = do
   now <- getCurrentTime
   pure (micros - round (realToFrac (diffUTCTime now started) * 1e6 :: Double))
 
-promptResult :: AcpChannel -> Maybe Json -> PromptResult
-promptResult channel response =
+-- | Collect raw prompt frames into the compatibility result.
+promptResult :: Maybe Json -> [Json] -> PromptResult
+promptResult response messages =
   PromptResult
     { prReply = T.concat [text | AgentMessageChunk text <- updates],
       prThoughts = T.concat [text | AgentThoughtChunk text <- updates],
       prStopReason = response >>= resultOf >>= textAt "stopReason",
       prUpdates = updates,
-      prMessages = reverse (acpChannelMessages channel)
+      prMessages = messages
     }
   where
-    updates = reverse (acpChannelUpdates channel)
+    updates = mapMaybe frameUpdate messages
 
 -- | @session/prompt@ with a single text block. This compatibility runner
 -- collects the Body's emissions until its one terminal projection.
@@ -688,8 +686,8 @@ acpPromptWithResponseOnSend onSend client micros sid promptText = do
     collect emitBody channel = do
       (next, emission) <- runK emitBody channel
       case emission of
-        AcpProtocol _ _ -> collect emitBody next
-        AcpPromptDone response result -> pure (response, result)
+        AcpProtocol _ -> collect emitBody next
+        AcpPromptDone response messages -> pure (response, promptResult response messages)
 
 -- ---------------------------------------------------------------------------
 -- Seat
