@@ -135,8 +135,8 @@ dshAcpTopic = do
     writeFake root
     withFakePath root $ do
       session <- openBackend (backendAt root)
-      assert "dsh ACP declares its named kind, server session, collection, and cancellation" $
-        sessionCapabilities session == BackendCapabilities DshAcpBackend ServerSessions CollectedEvents True
+      assert "dsh ACP declares its named kind, server session, incremental delivery, and cancellation" $
+        sessionCapabilities session == BackendCapabilities DshAcpBackend ServerSessions IncrementalEvents True
       first <- runRequest session (defaultRequest "first-turn")
       second <- runRequest session (defaultRequest "second-turn")
       exhausted <- runRequest session (defaultRequest "exhaust-turn")

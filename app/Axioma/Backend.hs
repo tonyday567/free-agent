@@ -444,12 +444,24 @@ dshAcpWitness = do
   bracket (getEnv "PATH") (setEnv "PATH") $ \oldPath -> do
     setEnv "PATH" (bin <> ":" <> oldPath)
     session <- openBackend backend
-    assert "B30a dsh ACP declares its own resumable, cancellable collected-event backend" $
-      sessionCapabilities session == BackendCapabilities DshAcpBackend ServerSessions CollectedEvents True
+    assert "B30a dsh ACP declares resumable, cancellable incremental events" $
+      sessionCapabilities session == BackendCapabilities DshAcpBackend ServerSessions IncrementalEvents True
     first <- runRequest session (defaultRequest "first")
     second <- runRequest session (defaultRequest "second")
     assert "B30b fresh dsh prompts settle against the persisted session" $
       all (completedWithSession "dsh-session") [first, second]
+    incremental <- runRequest session (defaultRequest "incremental-turn")
+    assert "B30h dsh emits thought, reply, usage, and one settlement without maintenance output" $
+      case incremental of
+        [ Output (BackendOutput ThoughtOutput "dsh thought"),
+          Output (BackendOutput ReplyOutput "dsh live reply"),
+          Output (BackendOutput UsageOutput usage),
+          Settled (Completed evidence)
+          ] ->
+            "\"used\":9" `T.isInfixOf` usage
+              && evidenceContextUsage evidence == Just (BackendContextUsage 9 (Just 30))
+              && "test/maintenance" `T.isInfixOf` evidenceRawOutput evidence
+        _ -> False
     closeSession session
 
     resumed <- openBackend backend
@@ -517,7 +529,13 @@ dshFakeSource root wire cancelMark =
         "  elif method == 'session/resume':",
         "    response(rid, {'configOptions':[]})",
         "  elif method == 'session/prompt':",
-        "    if 'cancel-turn' in json.dumps(value):",
+        "    if 'incremental-turn' in json.dumps(value):",
+        "      send({'jsonrpc':'2.0','method':'session/update','params':{'update':{'sessionId':'dsh-session','sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'dsh thought'}}}})",
+        "      send({'jsonrpc':'2.0','id':41,'method':'test/maintenance','params':{}})",
+        "      send({'jsonrpc':'2.0','method':'session/update','params':{'update':{'sessionId':'dsh-session','sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'dsh live reply'}}}})",
+        "      response(rid, {'stopReason':'end_turn'})",
+        "      send({'jsonrpc':'2.0','method':'session/update','params':{'update':{'sessionId':'dsh-session','sessionUpdate':'usage_update','used':9,'size':30}}})",
+        "    elif 'cancel-turn' in json.dumps(value):",
         "      pathlib.Path(cancel_mark).touch()",
         "      for cancel_line in sys.stdin:",
         "        cancel = json.loads(cancel_line)",

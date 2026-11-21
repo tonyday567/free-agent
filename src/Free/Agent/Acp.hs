@@ -49,10 +49,19 @@ module Free.Agent.Acp
     acpNewSession,
     acpResumeSession,
     acpSetConfigOption,
+    acpCancel,
     acpPrompt,
     acpPromptWithResponse,
     acpPromptWithResponseOnSend,
     PromptResult (..),
+
+    -- * Prompt body
+    AcpBody,
+    AcpInput (..),
+    AcpChannel (..),
+    AcpPhase (..),
+    AcpEmission (..),
+    acpBody,
 
     -- * Seat
     acpHost,
@@ -60,7 +69,7 @@ module Free.Agent.Acp
 where
 
 import Circuit.Category (K (..))
-import Circuit.Machine (Poles (..))
+import Circuit.Machine (Body (Body), Poles (..))
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Syntax (eval)
 import Control.Exception (SomeException, try)
@@ -72,7 +81,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text.IO qualified as TIO
-import Data.Time (diffUTCTime, getCurrentTime)
+import Data.Time (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Vector qualified as V
 import Free.Agent.Host (BodyMode (..), Host (..))
 import Free.Agent.StdPorts
@@ -375,17 +384,16 @@ acpAnswer c rid method params = case method of
 -- ---------------------------------------------------------------------------
 
 -- | Send a request and block until its response arrives or the timeout
--- (microseconds) expires.  Interleaved reverse-RPCs are answered (see
+-- (microseconds) expires. Interleaved reverse-RPCs are answered (see
 -- 'acpAnswer'); every frame seen (including the response) is returned in
 -- arrival order alongside the response.
 acpRequest :: AcpClient -> Int -> Text -> Json -> IO (Maybe Json, [Json])
 acpRequest = acpRequestOnSend (pure ())
 
--- | Send one request, run @onSend@ after its correlated id is on the wire,
--- then read until that response arrives or the timeout expires. The hook is
--- where a caller installs cancellation without a pre-prompt race.
-acpRequestOnSend :: IO () -> AcpClient -> Int -> Text -> Json -> IO (Maybe Json, [Json])
-acpRequestOnSend onSend c micros method params = do
+-- | Allocate and send one correlated request. Reading its response is a
+-- separate leg so prompt runners can choose collection or incrementality.
+acpSendRequest :: AcpClient -> Text -> Json -> IO Int
+acpSendRequest c method params = do
   rid <- atomicModifyIORef' (acpNextId c) (\i -> (i + 1, i))
   acpSendValue
     c
@@ -396,27 +404,43 @@ acpRequestOnSend onSend c micros method params = do
           ("params", params)
         ]
     )
+  pure rid
+  where
+    t2 = "2.0" :: Text
+
+-- | Read one frame and service reverse-RPC before returning it. The raw
+-- message remains available even when it has no classified protocol shape.
+acpReadClassified :: AcpClient -> Int -> IO (Maybe (Json, Maybe Frame))
+acpReadClassified c micros = do
+  mv <- acpReadFrame c micros
+  case mv of
+    Nothing -> pure Nothing
+    Just value -> do
+      case classifyFrame value of
+        Just (AgentRequest i m p) -> acpAnswer c i m p
+        _ -> pure ()
+      pure (Just (value, classifyFrame value))
+
+-- | Send one request, run @onSend@ after its correlated id is on the wire,
+-- then read until that response arrives or the timeout expires. The hook is
+-- where a caller installs cancellation without a pre-prompt race.
+acpRequestOnSend :: IO () -> AcpClient -> Int -> Text -> Json -> IO (Maybe Json, [Json])
+acpRequestOnSend onSend c micros method params = do
+  rid <- acpSendRequest c method params
   onSend
   start <- getCurrentTime
   loop rid [] start
   where
-    t2 = "2.0" :: Text
-    budgetLeft start = do
-      now <- getCurrentTime
-      pure (micros - round (realToFrac (diffUTCTime now start) * 1e6 :: Double))
     loop rid acc start = do
-      left <- budgetLeft start
+      left <- budgetLeft micros start
       if left <= 0
         then pure (Nothing, reverse acc)
         else do
-          mv <- acpReadFrame c left
+          mv <- acpReadClassified c left
           case mv of
             Nothing -> pure (Nothing, reverse acc)
-            Just v -> case classifyFrame v of
+            Just (v, frame) -> case frame of
               Just (Response i _) | i == rid -> pure (Just v, reverse (v : acc))
-              Just (AgentRequest i m p) -> do
-                acpAnswer c i m p
-                loop rid (v : acc) start
               _ -> loop rid (v : acc) start
 
 -- | @initialize@ handshake: protocolVersion 1, fs client capabilities on,
@@ -478,6 +502,18 @@ acpSetConfigOption c micros sid configId value =
         ]
     )
 
+-- | @session/cancel@ notification for the live session.
+acpCancel :: AcpClient -> Text -> IO ()
+acpCancel client sid =
+  acpSendValue
+    client
+    ( JObject
+        [ ("jsonrpc", JString "2.0"),
+          ("method", JString "session/cancel"),
+          ("params", JObject [("sessionId", JString sid)])
+        ]
+    )
+
 -- | The result of one prompt turn.
 data PromptResult = PromptResult
   { -- | Assembled @agent_message_chunk@ text (the reply).
@@ -493,9 +529,145 @@ data PromptResult = PromptResult
   }
   deriving (Show)
 
--- | @session/prompt@ with a single text block. Streams are collected until
--- the prompt response, then drained briefly for trailing notifications
--- (@usage_update@ arrives after the response).
+-- | One first or later turn input. The post-send hook is where a runner
+-- installs cancellation without racing prompt submission.
+data AcpInput
+  = AcpPromptInput Text (IO ())
+  | AcpCancelInput
+
+-- | Prompt correlation and the fixed post-response drain phase. A timed-out
+-- channel is poisoned so no later turn can consume its late response.
+data AcpPhase
+  = AcpAwaiting Int UTCTime
+  | AcpDraining Json UTCTime
+  | AcpDone
+  | AcpPoisoned
+  deriving (Show)
+
+-- | Live prompt state. Frames and updates are reversed internally and
+-- restored to arrival order in 'PromptResult'.
+data AcpChannel = AcpChannel
+  { acpChannelClient :: AcpClient,
+    acpChannelSession :: Text,
+    acpChannelPhase :: AcpPhase,
+    acpChannelMessages :: [Json],
+    acpChannelUpdates :: [Update]
+  }
+
+-- | One protocol observation or the single terminal prompt projection.
+-- Reverse-RPC and unrelated frames are 'AcpProtocol' with no update; they do
+-- not require a placeholder model-output event.
+data AcpEmission
+  = AcpProtocol Json (Maybe Update)
+  | AcpPromptDone (Maybe Json) PromptResult
+  deriving (Show)
+
+-- | The decomposed ACP prompt machine. The acquisition action uses the
+-- existing open, initialize, new/resume, and persistence path; 'init' runs it
+-- and commits the first prompt. Resource closure remains with the runner.
+type AcpBody = Body (,) (,) AcpChannel AcpChannel (K IO) AcpInput AcpEmission
+
+acpBody :: IO (AcpClient, Text) -> Int -> AcpBody
+acpBody acquire micros =
+  Body
+    ( K $ \input -> do
+        (client, sid) <- acquire
+        commitInput (AcpChannel client sid AcpDone [] []) input
+    )
+    (K (uncurry commitInput))
+    (K emitPrompt)
+  where
+    commitInput channel input = case input of
+      AcpCancelInput ->
+        acpCancel (acpChannelClient channel) (acpChannelSession channel) >> pure channel
+      AcpPromptInput promptText onSend -> do
+        case acpChannelPhase channel of
+          AcpDone -> pure ()
+          AcpPoisoned -> ioError (userError "acp: commit on a timed-out channel")
+          _ -> ioError (userError "acp: prompt committed while another prompt is active")
+        rid <-
+          acpSendRequest
+            (acpChannelClient channel)
+            "session/prompt"
+            ( JObject
+                [ ("sessionId", JString (acpChannelSession channel)),
+                  ( "prompt",
+                    JArray (V.fromList [JObject [("type", JString ("text" :: Text)), ("text", JString promptText)]])
+                  )
+                ]
+            )
+        onSend
+        started <- getCurrentTime
+        pure channel {acpChannelPhase = AcpAwaiting rid started, acpChannelMessages = [], acpChannelUpdates = []}
+
+    emitPrompt channel = case acpChannelPhase channel of
+      AcpDone -> ioError (userError "acp: emit after prompt settlement")
+      AcpPoisoned -> ioError (userError "acp: emit after prompt timeout")
+      AcpAwaiting rid started -> do
+        received <- readWithin micros started channel
+        case received of
+          Nothing -> settle channel Nothing AcpPoisoned
+          Just (raw, frame, updated) -> case frame of
+            Just (Response i _) | i == rid -> do
+              now <- getCurrentTime
+              protocol raw frame updated {acpChannelPhase = AcpDraining raw now}
+            _ -> protocol raw frame updated
+      AcpDraining response started -> do
+        received <- readWithin 500_000 started channel
+        case received of
+          Nothing -> settle channel (Just response) AcpDone
+          Just (raw, frame, updated) -> protocol raw frame updated
+
+    readWithin budget started channel = do
+      left <- budgetLeft budget started
+      if left <= 0
+        then pure Nothing
+        else do
+          received <- acpReadClassified (acpChannelClient channel) left
+          pure (fmap (record channel) received)
+
+    record channel (raw, frame) =
+      let update = case frame of
+            Just (Notification "session/update" params) -> parseUpdate params
+            _ -> Nothing
+          updated =
+            channel
+              { acpChannelMessages = raw : acpChannelMessages channel,
+                acpChannelUpdates = maybe id (\u -> (u :)) update (acpChannelUpdates channel)
+              }
+       in (raw, frame, updated)
+
+    protocol raw frame channel =
+      let update = case frame of
+            Just (Notification "session/update" params) -> parseUpdate params
+            _ -> Nothing
+       in pure (channel, AcpProtocol raw update)
+
+    settle channel response phase =
+      pure
+        ( channel {acpChannelPhase = phase},
+          AcpPromptDone response (promptResult channel response)
+        )
+
+budgetLeft :: Int -> UTCTime -> IO Int
+budgetLeft micros started = do
+  now <- getCurrentTime
+  pure (micros - round (realToFrac (diffUTCTime now started) * 1e6 :: Double))
+
+promptResult :: AcpChannel -> Maybe Json -> PromptResult
+promptResult channel response =
+  PromptResult
+    { prReply = T.concat [text | AgentMessageChunk text <- updates],
+      prThoughts = T.concat [text | AgentThoughtChunk text <- updates],
+      prStopReason = response >>= resultOf >>= textAt "stopReason",
+      prUpdates = updates,
+      prMessages = reverse (acpChannelMessages channel)
+    }
+  where
+    updates = reverse (acpChannelUpdates channel)
+
+-- | @session/prompt@ with a single text block. This compatibility runner
+-- collects the Body's emissions until its one terminal projection.
 acpPrompt :: AcpClient -> Int -> Text -> Text -> IO PromptResult
 acpPrompt client micros sid promptText = snd <$> acpPromptWithResponse client micros sid promptText
 
@@ -508,62 +680,16 @@ acpPromptWithResponse = acpPromptWithResponseOnSend (pure ())
 -- | Prompt with an action run after the request is on the wire. This keeps
 -- cancellation installation ordered after prompt submission.
 acpPromptWithResponseOnSend :: IO () -> AcpClient -> Int -> Text -> Text -> IO (Maybe Json, PromptResult)
-acpPromptWithResponseOnSend onSend c micros sid promptText = do
-  (mresp, msgs) <-
-    acpRequestOnSend
-      onSend
-      c
-      micros
-      "session/prompt"
-      ( JObject
-          [ ("sessionId", JString sid),
-            ( "prompt",
-              JArray (V.fromList [JObject [("type", JString ("text" :: Text)), ("text", JString promptText)]])
-            )
-          ]
-      )
-  trailing <- maybe (pure []) (const drain) mresp
-  let allMsgs = msgs <> trailing
-      updates =
-        [ u
-        | Just (Notification "session/update" ps) <- map classifyFrame allMsgs,
-          Just u <- [parseUpdate ps]
-        ]
-      reply = T.concat [t | AgentMessageChunk t <- updates]
-      thoughts = T.concat [t | AgentThoughtChunk t <- updates]
-      stop = mresp >>= resultOf >>= textAt "stopReason"
-  pure
-    ( mresp,
-      PromptResult
-        { prReply = reply,
-          prThoughts = thoughts,
-          prStopReason = stop,
-          prUpdates = updates,
-          prMessages = allMsgs
-        }
-    )
+acpPromptWithResponseOnSend onSend client micros sid promptText = do
+  let Body initialise _ emitBody = acpBody (pure (client, sid)) micros
+  channel <- runK initialise (AcpPromptInput promptText onSend)
+  collect emitBody channel
   where
-    -- Drain trailing notifications for at most 500ms in total. Resetting an
-    -- idle timeout on every frame would let a chatty peer postpone settlement
-    -- forever after its prompt response has already arrived.
-    drain = do
-      started <- getCurrentTime
-      go started []
-      where
-        go started acc = do
-          now <- getCurrentTime
-          let left = 500000 - round (realToFrac (diffUTCTime now started) * 1e6 :: Double)
-          if left <= 0
-            then pure (reverse acc)
-            else do
-              mv <- acpReadFrame c left
-              case mv of
-                Nothing -> pure (reverse acc)
-                Just v -> do
-                  case classifyFrame v of
-                    Just (AgentRequest i m p) -> acpAnswer c i m p
-                    _ -> pure ()
-                  go started (v : acc)
+    collect emitBody channel = do
+      (next, emission) <- runK emitBody channel
+      case emission of
+        AcpProtocol _ _ -> collect emitBody next
+        AcpPromptDone response result -> pure (response, result)
 
 -- ---------------------------------------------------------------------------
 -- Seat

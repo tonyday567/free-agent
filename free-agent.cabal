@@ -48,6 +48,7 @@ library
   hs-source-dirs: src
   exposed-modules:
     Free.Agent.Acp
+    Free.Agent.Activity
     Free.Agent.Agent
     Free.Agent.Agent.Runner
     Free.Agent.Backend
@@ -80,6 +81,7 @@ library
     circuits >=0.3 && <0.4,
     circuits-diagrams >=0.1 && <0.2,
     circuits-parser >=0.1 && <0.2,
+    circuits-stats >=0.1 && <0.2,
     containers >=0.6 && <0.9,
     directory >=1.3 && <1.4,
     filelock >=0.1 && <0.2,

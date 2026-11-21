@@ -45,6 +45,7 @@ module Free.Agent.Backend
   )
 where
 
+import Circuit.Category (K (..))
 import Circuit.Machine (Body (Body), Moore)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Tensor (unConst)
@@ -63,7 +64,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Vector qualified as V
-import Free.Agent.Acp (AcpClient, AcpConfig (..), Frame (..), Update (..), acpInitialize, acpNewSession, acpPromptWithResponseOnSend, acpResumeSession, acpSendValue, classifyFrame, closeAcp, defaultAcpConfig, jsonToInt, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates)
+import Free.Agent.Acp (AcpClient, AcpConfig (..), AcpEmission (..), AcpInput (..), Frame (..), Update (..), acpBody, acpCancel, acpInitialize, acpNewSession, acpResumeSession, classifyFrame, closeAcp, defaultAcpConfig, jsonToInt, openAcp, prMessages, prReply, prStopReason, prThoughts, prUpdates)
 import Free.Agent.Cli (Cli (..), StderrPolicy (..), cliCeiling, cliExhausted, cliInterrupted, cliScrub, cliStale, dshCli, kimiCli)
 import Free.Agent.Gateway (GatewayClient (..), GatewayConfig (..), openGateway, parseSseFrame)
 import Free.Agent.Host (BareConfig (..), hermesCli)
@@ -328,7 +329,7 @@ capabilitiesFor backend = case backend of
   DirectHttp {} -> BackendCapabilities DirectHttpBackend NoSessions OneShot False
   Gateway {} -> BackendCapabilities GatewayBackend ServerSessions IncrementalEvents False
   Acp {} -> BackendCapabilities AcpBackend ServerSessions CollectedEvents False
-  DshAcp {} -> BackendCapabilities DshAcpBackend ServerSessions CollectedEvents True
+  DshAcp {} -> BackendCapabilities DshAcpBackend ServerSessions IncrementalEvents True
 
 -- | Open configured resources. Open failures become a closed session with one
 -- terminal event, so environment failure is observable through the same leg.
@@ -817,21 +818,27 @@ runAcp micros systemPrompt client sid cancellable cardState state turn request =
             (if includeCard && not (T.null systemPrompt) then systemPrompt <> "\n\n" else "")
               <> "User messages:\n"
               <> requestText request
-          cancelPrompt =
-            acpSendValue
-              client
-              ( JObject
-                  [ ("jsonrpc", JString "2.0"),
-                    ("method", JString "session/cancel"),
-                    ("params", JObject [("sessionId", JString sid)])
-                  ]
-              )
+          cancelPrompt = acpCancel client sid
           installCancel =
             when cancellable $ do
               writeIORef (activeCancel turn) cancelPrompt
               cancelledNow <- readIORef (activeCancelled turn)
               when cancelledNow cancelPrompt
-      result <- try @IOException (acpPromptWithResponseOnSend installCancel client micros sid prompt)
+          Body initialise _ emitFrame = acpBody (pure (client, sid)) micros
+          drive channel = do
+            (next, emission) <- runK emitFrame channel
+            case emission of
+              AcpProtocol _ update -> do
+                when cancellable (forM_ update (emitAcpUpdate state))
+                drive next
+              AcpPromptDone response promptResult -> do
+                unless cancellable $ do
+                  emitText state ReplyOutput (prReply promptResult)
+                  emitText state ThoughtOutput (prThoughts promptResult)
+                  forM_ [json | UsageUpdate json <- prUpdates promptResult] $ \json ->
+                    emitText state UsageOutput (TE.decodeUtf8 (encodeJson json))
+                pure (response, promptResult)
+      result <- try @IOException (runK initialise (AcpPromptInput prompt installCancel) >>= drive)
       writeIORef (activeCancel turn) (pure ())
       forM_ cardState $ \fresh -> writeIORef fresh False
       case result of
@@ -842,13 +849,9 @@ runAcp micros systemPrompt client sid cancellable cardState state turn request =
         Right (response, promptResult) -> do
           let messages = prMessages promptResult
               reply = prReply promptResult
-              thoughts = prThoughts promptResult
               stop = prStopReason promptResult
               usage = [json | UsageUpdate json <- prUpdates promptResult]
               evidence = acpEvidence (Just sid) messages stop usage
-          emitText state ReplyOutput reply
-          emitText state ThoughtOutput thoughts
-          forM_ usage $ \json -> emitText state UsageOutput (TE.decodeUtf8 (encodeJson json))
           wasCancelled <- readIORef (activeCancelled turn)
           let outcome = case response of
                 Nothing -> Failed TimeoutFailure "ACP prompt timed out; session closed against late responses" evidence
@@ -873,6 +876,13 @@ runAcp micros systemPrompt client sid cancellable cardState state turn request =
               catch (closeAcp client) (\(_ :: IOException) -> pure ())
             _ -> pure ()
           pure outcome
+
+emitAcpUpdate :: SessionState -> Update -> IO ()
+emitAcpUpdate state update = case update of
+  AgentMessageChunk text -> emitText state ReplyOutput text
+  AgentThoughtChunk text -> emitText state ThoughtOutput text
+  UsageUpdate json -> emitText state UsageOutput (TE.decodeUtf8 (encodeJson json))
+  _ -> pure ()
 
 acpEvidence :: Maybe Text -> [Json] -> Maybe Text -> [Json] -> BackendEvidence
 acpEvidence sid messages stop usage =

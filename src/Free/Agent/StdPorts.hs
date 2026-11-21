@@ -428,6 +428,8 @@ data DoubleStep a
     Die ExitCode
   | -- | Answer one token with two frames, like a chatty child.
     Reply2 (a -> a) (a -> a)
+  | -- | Answer one token with an ordered burst of frames.
+    ReplyMany (a -> [a])
 
 -- | A scripted in-memory double on the same pole shapes as a real port:
 -- each written token advances the script by one step.  After 'Die' the
@@ -458,6 +460,8 @@ scriptedDouble script = do
                 atomically $ do
                   writeTQueue q (Payload (g1 a))
                   writeTQueue q (Payload (g2 a))
+              (ReplyMany g : _) ->
+                atomically (mapM_ (writeTQueue q . Payload) (g a))
               [] -> pure ()
       writeIn = K step
       noWrite = K $ \_ -> pure ()
