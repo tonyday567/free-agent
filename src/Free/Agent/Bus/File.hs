@@ -37,12 +37,11 @@ module Free.Agent.Bus.File
   )
 where
 
-import Circuit.Machine (Body (..), Moore)
+import Circuit.Machine (Moore (Moore))
 import Circuit.Parser.Framing (Stored)
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Post (PostId)
 import Circuit.Shared (stamp)
-import Circuit.Tensor (Const (Const), unConst)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM
   ( TVar,
@@ -122,7 +121,7 @@ newtype Decision = Decision {decisionBody :: Text}
 -- is inert. Time is a percept: the pump feeds ticks, no wall clock
 -- lives here.
 quiesceAgent :: Int -> Moore (,) Int (->) QEvent (Maybe Decision)
-quiesceAgent n = Body (\i -> step (0, i)) step (Const . decide)
+quiesceAgent n = Moore (\i -> step (0, i)) step decide
   where
     step (count, i) = case i of
       Tick -> min n (count + 1)
@@ -136,11 +135,11 @@ quiesceAgent n = Body (\i -> step (0, i)) step (Const . decide)
 
 -- | One machine tick: the next state.
 stepQ :: Moore (,) Int (->) QEvent (Maybe Decision) -> Int -> QEvent -> Int
-stepQ (Body _ k _) s i = k (s, i)
+stepQ (Moore _ k _) s i = k (s, i)
 
 -- | The observation at a state.
 observeQ :: Moore (,) Int (->) QEvent (Maybe Decision) -> Int -> Maybe Decision
-observeQ (Body _ _ o) s = unConst (o s)
+observeQ (Moore _ _ o) s = o s
 
 -- | Path to the cursor file for an agent.
 --

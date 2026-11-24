@@ -24,7 +24,8 @@ module Free.Agent.Agent
 where
 
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Moore)
+import Circuit.Body (Body (Body))
+import Circuit.Machine (Moore (Moore))
 import Circuit.Post
   ( Inbox,
     Log,
@@ -38,7 +39,6 @@ import Circuit.Post
     watch,
   )
 import Circuit.Stream (Cons, Snoc (..), These (..), Uncons (..))
-import Circuit.Tensor (Const (..), unConst)
 import Circuit.Traced (trace)
 import Control.Monad (foldM)
 import Data.Map qualified as Map
@@ -101,11 +101,11 @@ type PureAgent s a b = Body (,) (,) s s (->) a b
 
 -- | A history agent: cons each input and observe a function of the history.
 tape :: ([i] -> o) -> Moore (,) [i] (->) i o
-tape f = Body (\i -> [i]) (\(hist, i) -> i : hist) (Const . f)
+tape f = Moore (\i -> [i]) (\(hist, i) -> i : hist) f
 
 -- | Adapt a Moore cell into a pure agent over the same state.
 cellToAgent :: Moore (,) s (->) a b -> PureAgent s a b
-cellToAgent (Body j k e) = Body j k (\s -> (s, unConst (e s)))
+cellToAgent (Moore j k e) = Body j k (\s -> (s, e s))
 
 -- Internal pure-meeting state. Only 'loop' exposes the scheduler; its result
 -- is pattern-matched opaquely by the Q7 witness.

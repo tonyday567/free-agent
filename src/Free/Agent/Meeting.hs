@@ -37,8 +37,7 @@ where
 import Free.Agent.Agent (Name)
 import Circuit.Post (Post (..), PostId, coneByIndex, deliversTo, mkPost, sortNub)
 import Free.Agent.Cli (synthesisPosts)
-import Circuit.Machine (Body (Body), Moore)
-import Circuit.Tensor (Const (..), unConst)
+import Circuit.Machine (Moore (Moore))
 import Data.List (inits, intersect)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -49,7 +48,7 @@ import Data.Text qualified as T
 -- driver assigned to that batch.  This lets agents thread replies/syntheses
 -- by exact reference without inventing ids.
 --
--- The box carries a 'Body': the emit leg /is/ the certified
+-- The box carries a 'Moore': the emit leg /is/ the certified
 -- observation — output is read from the state after consuming the input
 -- (post-input timing), so there is no separate observation certificate to
 -- keep in agreement with the step.
@@ -59,15 +58,15 @@ data AgentBox where
 -- | One batch step: commit the input and its ids, emit the answer
 -- (post-input timing — output is read from the state after consuming the input).
 runAgentBox :: AgentBox -> [Post Text Text] -> [PostId] -> ([Post Text Text], AgentBox)
-runAgentBox (AgentBox s (Body j k o)) ins ids =
+runAgentBox (AgentBox s (Moore j k o)) ins ids =
   let s' = k (s, (ins, ids))
-   in (unConst (o s'), AgentBox s' (Body j k o))
+   in (o s', AgentBox s' (Moore j k o))
 
 -- | Lift an agent that ignores ids into one that accepts the boxed
 -- @(posts, ids)@ input.  This is the minimal adapter for existing agents
 -- that do not need provenance.
 withIds :: Moore (,) s (->) [Post Text Text] [Post Text Text] -> Moore (,) s (->) ([Post Text Text], [PostId]) [Post Text Text]
-withIds (Body j k o) = Body (\(ins, _ids) -> j ins) (\(s, (ins, _ids)) -> k (s, ins)) o
+withIds (Moore j k o) = Moore (\(ins, _ids) -> j ins) (\(s, (ins, _ids)) -> k (s, ins)) o
 
 -- | The quoter's output at a state: one honest synthesis post per non-empty
 -- batch, quoting what it saw.
@@ -85,12 +84,12 @@ quoterOut who tag batch batchIds = case batch of
 -- emit answers it.
 quoter :: Name -> Text -> Moore (,) ([Post Text Text], [PostId], [Post Text Text], [PostId]) (->) ([Post Text Text], [PostId]) [Post Text Text]
 quoter who tag =
-  Body
+  Moore
     (\(ins, insIds) -> (reverse ins, reverse insIds, ins, insIds))
     ( \((hist, histIds, _batch, _batchIds), (ins, insIds)) ->
         (reverse ins ++ hist, reverse insIds ++ histIds, ins, insIds)
     )
-    (Const . \(_, _, batch, batchIds) -> quoterOut who tag batch batchIds)
+    (\(_, _, batch, batchIds) -> quoterOut who tag batch batchIds)
 
 -- | Run @n@ rounds over a roster.  Every box sees the previous round's
 -- concatenated outputs (round 1 sees the seed).  Returns the rounds.

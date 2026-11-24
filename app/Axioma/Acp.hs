@@ -8,7 +8,7 @@ where
 
 import Axioma.Common (assert, mkPost, tempRoot)
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body))
+import Circuit.Body (Body (Body))
 import Circuit.Parser.Framing (decodeRow)
 import Circuit.Parser.Json (Json (..), decodeJson)
 import Circuit.Post (Post (..))

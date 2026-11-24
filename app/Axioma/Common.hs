@@ -13,9 +13,8 @@ module Axioma.Common
 where
 
 import Circuit.Diagram (SDiagram (..))
-import Circuit.Machine (Body (Body), Moore, MooreT (..), scan)
+import Circuit.Machine (Moore (Moore), MooreT (..), scan)
 import Circuit.Post (Post (..))
-import Circuit.Tensor (unConst)
 import Control.Monad (unless)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -33,12 +32,12 @@ assert msg ok = do
 -- | The list runner: 'scan' over a seeded 'MooreT' (post-step
 -- convention — output read from the state after each input).
 iterateAgent :: Moore (,) s (->) i o -> s -> [i] -> [o]
-iterateAgent (Body _ k o) s0 = scan (MooreT (Body (\i -> k (s0, i)) k o))
+iterateAgent (Moore _ k o) s0 = scan (MooreT (Moore (\i -> k (s0, i)) k o))
 
 -- | The Eval-shaped reading of a body state: emit, and the step
 -- function as an input-indexed state update.
 runMono :: Moore (,) s (->) i o -> s -> (o, i -> s)
-runMono (Body _ k o) s = (unConst (o s), \i -> k (s, i))
+runMono (Moore _ k o) s = (o s, \i -> k (s, i))
 
 mkPost :: Text -> [Text] -> Text -> Post Text Text
 mkPost f t b = Post f Nothing t [] b

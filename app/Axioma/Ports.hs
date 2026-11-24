@@ -9,10 +9,10 @@ module Axioma.Ports
 where
 
 import Axioma.Common (assert)
+import Circuit.Body (Poles (commit, emit))
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Moore, Poles (commit, emit))
+import Circuit.Machine (Moore (Moore))
 import Circuit.Syntax (eval)
-import Circuit.Tensor (unConst)
 import Control.Monad (void)
 import Data.ByteString qualified as BS
 import Data.Maybe (isJust)
@@ -153,6 +153,6 @@ shellConfig script =
     }
 
 runCell :: Moore (,) s (->) a b -> s -> a -> (b, s)
-runCell (Body _ step output) state input =
+runCell (Moore _ step output) state input =
   let next = step (state, input)
-   in (unConst (output next), next)
+   in (output next, next)

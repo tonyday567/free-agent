@@ -45,10 +45,10 @@ module Free.Agent.Backend
   )
 where
 
+import Circuit.Body (Body (Body))
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Moore)
+import Circuit.Machine (Moore (Moore))
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
-import Circuit.Tensor (unConst)
 import Control.Applicative ((<|>))
 import Control.Concurrent (Chan, MVar, forkIO, modifyMVar, newChan, newEmptyMVar, newMVar, putMVar, readChan, readMVar, writeChan)
 import Control.Exception (AsyncException, IOException, SomeException, catch, displayException, fromException, onException, throwIO, try)
@@ -678,8 +678,8 @@ jsonField _ _ = Nothing
 -- Gateway SSE ---------------------------------------------------------------
 
 runCell :: Moore (,) s (->) a b -> s -> a -> (b, s)
-runCell (Body _ step output) state input =
-  let next = step (state, input) in (unConst (output next), next)
+runCell (Moore _ step output) state input =
+  let next = step (state, input) in (output next, next)
 
 runGateway :: Text -> GatewayClient -> SessionState -> Active -> BackendRequest -> IO BackendOutcome
 runGateway systemPrompt client state _ request = do

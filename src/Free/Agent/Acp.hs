@@ -72,7 +72,7 @@ module Free.Agent.Acp
 where
 
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Poles (..))
+import Circuit.Body (Body (Body), Poles (..))
 import Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Circuit.Syntax (eval)
 import Control.Exception (SomeException, try)
